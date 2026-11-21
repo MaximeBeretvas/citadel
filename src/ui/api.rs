@@ -10,7 +10,7 @@ use crate::db::open_rw_db;
 use crate::db::readonly::{execute_readonly_query, QueryResult};
 use crate::error::{Result, VaultError};
 use crate::ingest::{self, SourceRecord, SourceSummary, SyncSummary};
-use crate::sources::{AddSourceParams, RemovedSource, SourceLifecycle};
+use crate::sources::{AddSourceParams, Removal, RemovedSource, SourceLifecycle};
 use crate::ui::UiState;
 
 /// HTTP error wrapper mapping [`VaultError`] variants to structured JSON responses.
@@ -211,10 +211,19 @@ pub async fn delete_source(
     Path(id_or_slug): Path<String>,
 ) -> ApiResult<(StatusCode, Json<RemovedSource>)> {
     let (_source_id, source_name) = resolve_source_in_vault(&state.config, &id_or_slug)?;
-    let removed = SourceLifecycle::new(state.config.clone())
+    match SourceLifecycle::new(state.config.clone())
         .remove(&source_name)
-        .await?;
-    Ok((StatusCode::OK, Json(removed)))
+        .await?
+    {
+        Removal::Removed(removed) => Ok((StatusCode::OK, Json(removed))),
+        Removal::AlreadySyncing => Err(already_syncing(&source_name)),
+    }
+}
+
+fn already_syncing(name: &str) -> ApiError {
+    ApiError(VaultError::AlreadyRunning(format!(
+        "source '{name}' is already syncing; try again when it finishes"
+    )))
 }
 
 /// `POST /api/sources/{id}/sync`
@@ -225,11 +234,17 @@ pub async fn sync_source(
 ) -> ApiResult<(StatusCode, Json<SyncAcceptedResponse>)> {
     let (source_id, source_name) = resolve_source_in_vault(&state.config, &id_or_slug)?;
 
-    let lifecycle = SourceLifecycle::new(state.config.clone());
+    // Claim before replying, so a second request gets 409 instead of a silent no-op.
+    let Some(claimed) = SourceLifecycle::new(state.config.clone())
+        .claim(&source_name)
+        .await?
+    else {
+        return Err(already_syncing(&source_name));
+    };
     let name_for_task = source_name.clone();
     let prune = query.prune;
     tokio::spawn(async move {
-        if let Err(err) = lifecycle.sync(&name_for_task, prune).await {
+        if let Err(err) = claimed.run(prune).await {
             tracing::error!(
                 source = %name_for_task,
                 error = %err,

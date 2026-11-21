@@ -9,7 +9,7 @@ use serde_json::{json, Value};
 use crate::config::VaultConfig;
 use crate::db::{execute_readonly_query, open_rw_db};
 use crate::error::{Result, VaultError};
-use crate::sources::{AddSourceParams, SourceLifecycle, UpdateSourceParams};
+use crate::sources::{AddSourceParams, Removal, SourceLifecycle, SyncOutcome, UpdateSourceParams};
 
 const DEFAULT_PROTOCOL_VERSION: &str = "2024-11-05";
 const SUPPORTED_PROTOCOL_VERSIONS: &[&str] = &["2025-03-26", "2024-11-05"];
@@ -359,19 +359,34 @@ async fn call_manage_sync(
     };
 
     let lifecycle = SourceLifecycle::new(config.clone());
-    let summaries = match target_name {
-        Some(name) => lifecycle
-            .sync(name, false)
+    let Some(name) = target_name else {
+        let summaries = lifecycle
+            .sync_all(false)
             .await
-            .map(|summary| vec![summary]),
-        None => lifecycle.sync_all(false).await,
-    }
-    .map_err(|err| err.to_string())?;
+            .map_err(|err| err.to_string())?;
+        return Ok(json!({
+            "action": "sync",
+            "summaries": summaries,
+        }));
+    };
 
-    Ok(json!({
-        "action": "sync",
-        "summaries": summaries,
-    }))
+    match lifecycle
+        .sync(name, false)
+        .await
+        .map_err(|err| err.to_string())?
+    {
+        SyncOutcome::Synced(summary) => Ok(json!({
+            "action": "sync",
+            "summaries": [summary],
+        })),
+        SyncOutcome::AlreadySyncing => Ok(json!({
+            "action": "sync",
+            "outcome": "already_syncing",
+            "name": name,
+            "summaries": [],
+            "message": format!("source '{name}' is already syncing; nothing was started"),
+        })),
+    }
 }
 
 async fn call_manage_update(
@@ -407,16 +422,24 @@ async fn call_manage_remove(
     args: ManageArgs,
 ) -> std::result::Result<Value, String> {
     let name = require_non_empty_name(args.name.as_deref(), "remove")?;
-    let removed = SourceLifecycle::new(config.clone())
+    let removal = SourceLifecycle::new(config.clone())
         .remove(name)
         .await
         .map_err(|err| err.to_string())?;
 
-    Ok(json!({
-        "action": "remove",
-        "name": removed.name,
-        "pages_deleted": removed.pages_deleted,
-    }))
+    Ok(match removal {
+        Removal::Removed(removed) => json!({
+            "action": "remove",
+            "name": removed.name,
+            "pages_deleted": removed.pages_deleted,
+        }),
+        Removal::AlreadySyncing => json!({
+            "action": "remove",
+            "outcome": "already_syncing",
+            "name": name,
+            "message": format!("source '{name}' is syncing; nothing was removed, try again when it finishes"),
+        }),
+    })
 }
 
 fn require_non_empty_name<'a>(

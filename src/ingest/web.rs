@@ -1406,7 +1406,9 @@ mod tests {
         let second = SourceLifecycle::new(cfg.clone())
             .sync("recrawl-docs", false)
             .await
-            .expect("recrawl sync");
+            .expect("recrawl sync")
+            .synced()
+            .expect("synced");
         server_handle.abort();
 
         assert_eq!(second.pages_added, 0);
@@ -1705,7 +1707,9 @@ mod tests {
         let resync = lifecycle2
             .sync(&source.name, false)
             .await
-            .expect("resync capped source");
+            .expect("resync capped source")
+            .synced()
+            .expect("synced");
         // Which 2 of the 3 linked pages a capped crawl visits is not deterministic.
         assert_eq!(resync.pages_added + resync.pages_unchanged, 2);
         assert_eq!(resync.pages_stale, 0);
@@ -1724,7 +1728,9 @@ mod tests {
         let recapped = lifecycle2
             .sync(&source.name, false)
             .await
-            .expect("recrawl capped source");
+            .expect("recrawl capped source")
+            .synced()
+            .expect("synced");
         server_handle.abort();
         assert_eq!(
             recapped.pages_stale, 0,

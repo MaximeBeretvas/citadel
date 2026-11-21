@@ -72,6 +72,14 @@ CREATE TABLE IF NOT EXISTS sync_runs (
     error_message   TEXT
 );
 
+-- Sync claims (ADR-0001): at most one Sync per Source across every process.
+CREATE TABLE IF NOT EXISTS sync_claims (
+    source_id      INTEGER PRIMARY KEY REFERENCES sources(id) ON DELETE CASCADE,
+    pid            INTEGER NOT NULL,                      -- holder process id
+    instance_token TEXT NOT NULL,                         -- random per holder process start
+    claimed_at     TEXT NOT NULL                          -- ISO-8601 UTC
+);
+
 -- External-content FTS5 tables (porter + unicode61 tokenization)
 CREATE VIRTUAL TABLE IF NOT EXISTS pages_fts USING fts5(
     title, content_md,

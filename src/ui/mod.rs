@@ -252,6 +252,63 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
     }
 
+    #[tokio::test]
+    async fn sync_returns_409_when_claimed() {
+        let vault_dir = tempdir().expect("vault tempdir");
+        let docs_dir = tempdir().expect("docs tempdir");
+        std::fs::write(docs_dir.path().join("a.md"), "# A\n\nAlpha.\n").expect("write a.md");
+        let config = VaultConfig::new(vault_dir.path());
+        let lifecycle = crate::sources::SourceLifecycle::new(config.clone());
+        lifecycle
+            .add(
+                crate::sources::AddSourceParams {
+                    origin: docs_dir.path().to_string_lossy().into_owned(),
+                    name: Some("busy".into()),
+                    ..Default::default()
+                },
+                false,
+            )
+            .await
+            .expect("register");
+        let held = lifecycle
+            .claim("busy")
+            .await
+            .expect("claim")
+            .expect("claim is free");
+
+        let app = build_router(config);
+        for (method, uri) in [
+            (Method::POST, "/api/sources/busy/sync"),
+            (Method::DELETE, "/api/sources/busy"),
+        ] {
+            let resp = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method(method.clone())
+                        .uri(uri)
+                        .body(Body::empty())
+                        .expect("build request"),
+                )
+                .await
+                .expect("response");
+            assert_eq!(resp.status(), StatusCode::CONFLICT, "{method} {uri}");
+        }
+        drop(held);
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/api/sources/busy/sync")
+                    .body(Body::empty())
+                    .expect("build request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(resp.status(), StatusCode::ACCEPTED);
+    }
+
     async fn read_json_body(resp: axum::response::Response) -> Value {
         let bytes = resp
             .into_body()

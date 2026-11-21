@@ -1,0 +1,103 @@
+use std::sync::atomic::{AtomicI64, Ordering};
+use std::sync::Arc;
+
+use rusqlite::Connection;
+use tempfile::tempdir;
+
+use super::*;
+use crate::db::open_rw_db;
+
+const T0: i64 = 1_800_000_000;
+
+/// A fake process: fixed pid and token, a settable clock, and a pid-liveness answer.
+fn env(pid: i64, token: &str, clock: &Arc<AtomicI64>, alive: bool) -> ClaimEnv {
+    let clock = Arc::clone(clock);
+    ClaimEnv {
+        pid,
+        token: token.to_string(),
+        now: Arc::new(move || clock.load(Ordering::SeqCst)),
+        pid_alive: Arc::new(move |_| alive),
+    }
+}
+
+fn vault_with_source() -> (tempfile::TempDir, Connection, i64) {
+    let dir = tempdir().expect("tempdir");
+    let conn = open_rw_db(&dir.path().join("vault.db")).expect("open db");
+    conn.execute(
+        "INSERT INTO sources (name, kind, origin) VALUES ('docs', 'local', '/tmp/docs')",
+        [],
+    )
+    .expect("insert source");
+    let id = conn.last_insert_rowid();
+    (dir, conn, id)
+}
+
+fn status(conn: &Connection, id: i64) -> String {
+    conn.query_row("SELECT status FROM sources WHERE id = ?1", [id], |r| {
+        r.get(0)
+    })
+    .expect("status")
+}
+
+#[test]
+fn second_claim_is_refused() {
+    let (_dir, conn, id) = vault_with_source();
+    let clock = Arc::new(AtomicI64::new(T0));
+    let first = env(100, "a", &clock, true);
+    let second = env(200, "b", &clock, true);
+
+    assert!(try_acquire(&conn, id, &first).expect("first claim"));
+    assert!(!try_acquire(&conn, id, &second).expect("second claim"));
+    // The holder itself cannot claim twice either.
+    assert!(!try_acquire(&conn, id, &first).expect("re-claim"));
+
+    release(&conn, id, &first).expect("release");
+    assert!(try_acquire(&conn, id, &second).expect("claim after release"));
+}
+
+#[test]
+fn dead_holder_claim_is_taken_over() {
+    let (_dir, conn, id) = vault_with_source();
+    let clock = Arc::new(AtomicI64::new(T0));
+    let crashed = env(100, "a", &clock, true);
+    assert!(try_acquire(&conn, id, &crashed).expect("claim"));
+    conn.execute("UPDATE sources SET status = 'syncing' WHERE id = ?1", [id])
+        .expect("simulate stuck status");
+
+    let sees_dead_holder = env(200, "b", &clock, false);
+    assert!(try_acquire(&conn, id, &sees_dead_holder).expect("takeover"));
+    assert_eq!(status(&conn, id), "error", "stuck 'syncing' is reset");
+
+    // The crashed holder's late release must not drop the new holder's claim.
+    release(&conn, id, &crashed).expect("stale release");
+    let third = env(300, "c", &clock, true);
+    assert!(!try_acquire(&conn, id, &third).expect("still held"));
+}
+
+#[test]
+fn expired_claim_is_taken_over() {
+    let (_dir, conn, id) = vault_with_source();
+    let clock = Arc::new(AtomicI64::new(T0));
+    let holder = env(100, "a", &clock, true);
+    let other = env(200, "b", &clock, true);
+    assert!(try_acquire(&conn, id, &holder).expect("claim"));
+
+    clock.store(T0 + MAX_CLAIM_AGE_SECS - 1, Ordering::SeqCst);
+    assert!(!try_acquire(&conn, id, &other).expect("not yet expired"));
+
+    clock.store(T0 + MAX_CLAIM_AGE_SECS, Ordering::SeqCst);
+    assert!(try_acquire(&conn, id, &other).expect("expired takeover"));
+}
+
+#[test]
+fn same_pid_other_token_is_taken_over() {
+    let (_dir, conn, id) = vault_with_source();
+    let clock = Arc::new(AtomicI64::new(T0));
+    // pid 1 in the container: the earlier run and this run share a pid, and it is alive.
+    let earlier_run = env(1, "earlier", &clock, true);
+    let this_run = env(1, "current", &clock, true);
+    assert!(try_acquire(&conn, id, &earlier_run).expect("claim"));
+
+    assert!(try_acquire(&conn, id, &this_run).expect("takeover from earlier run"));
+    assert!(!try_acquire(&conn, id, &this_run).expect("now held by this run"));
+}

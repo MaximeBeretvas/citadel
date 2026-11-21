@@ -11,15 +11,15 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use notify::RecursiveMode;
 use notify_debouncer_mini::{new_debouncer, DebounceEventResult};
 use rusqlite::Connection;
-use tokio::sync::{mpsc, Mutex, Semaphore};
+use tokio::sync::{mpsc, Semaphore};
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 
 use crate::config::VaultConfig;
 use crate::db::open_rw_db;
 use crate::error::{Result, VaultError};
-use crate::ingest::{local::canonicalize_local_dir, map_source_record, SourceRecord};
-use crate::sources::SourceLifecycle;
+use crate::ingest::{local::canonicalize_local_dir, map_source_record, SourceRecord, SyncSummary};
+use crate::sources::{SourceLifecycle, SyncOutcome};
 
 pub use service::{
     generate_launchd_plist, generate_systemd_unit, install_service, uninstall_service,
@@ -315,7 +315,6 @@ pub fn select_due_web_sources_at(
                 status, last_synced_at, last_error, created_at
          FROM sources
          WHERE kind = 'web'
-           AND status != 'syncing'
            AND refresh_interval_secs > 0
            AND (
                last_synced_at IS NULL
@@ -352,7 +351,7 @@ pub async fn run_scheduler_with_options(
     cancel: CancellationToken,
 ) -> Result<()> {
     let semaphore = Arc::new(Semaphore::new(max_concurrency.max(1)));
-    let in_flight: Arc<Mutex<HashSet<i64>>> = Arc::new(Mutex::new(HashSet::new()));
+    let lifecycle = SourceLifecycle::new(config.clone());
     let mut tasks: JoinSet<()> = JoinSet::new();
 
     let mut ticker = tokio::time::interval(tick_interval.max(Duration::from_millis(10)));
@@ -379,16 +378,21 @@ pub async fn run_scheduler_with_options(
                     if cancel.is_cancelled() {
                         break;
                     }
-                    {
-                        let mut active = in_flight.lock().await;
-                        if !active.insert(source.id) {
+                    // The Sync claim is the only exclusion: a Source syncing anywhere
+                    // (this scheduler, the UI, the CLI, another process) is skipped.
+                    let claimed = match lifecycle.claim(&source.name).await {
+                        Ok(Some(claimed)) => claimed,
+                        Ok(None) => {
+                            tracing::debug!(source = %source.name, "skipped: already syncing");
                             continue;
                         }
-                    }
+                        Err(err) => {
+                            tracing::warn!(source = %source.name, error = %err, "scheduler failed to claim source");
+                            continue;
+                        }
+                    };
 
                     let sem = Arc::clone(&semaphore);
-                    let active_set = Arc::clone(&in_flight);
-                    let lifecycle = SourceLifecycle::new(config.clone());
                     let task_cancel = cancel.clone();
 
                     tasks.spawn(async move {
@@ -396,45 +400,31 @@ pub async fn run_scheduler_with_options(
                             _ = task_cancel.cancelled() => None,
                             acquired = sem.acquire_owned() => acquired.ok(),
                         };
+                        let Some(_permit) = permit else {
+                            return;
+                        };
 
-                        if let Some(_permit) = permit {
-                            let jitter = compute_jitter(max_jitter_secs, source.id);
-                            let proceed = if jitter.is_zero() {
-                                !task_cancel.is_cancelled()
-                            } else {
-                                tokio::select! {
-                                    _ = task_cancel.cancelled() => false,
-                                    _ = tokio::time::sleep(jitter) => true,
-                                }
-                            };
-
-                            if proceed {
-                                tracing::info!(source = %source.name, "starting scheduled web sync");
-                                match lifecycle.sync(&source.name, false).await {
-                                    Ok(summary) => {
-                                        tracing::info!(
-                                            source = %summary.source_name,
-                                            added = summary.pages_added,
-                                            updated = summary.pages_updated,
-                                            unchanged = summary.pages_unchanged,
-                                            stale = summary.pages_stale,
-                                            failed = summary.pages_failed,
-                                            "scheduled web sync complete"
-                                        );
-                                    }
-                                    Err(err) => {
-                                        tracing::warn!(
-                                            source = %source.name,
-                                            error = %err,
-                                            "scheduled web sync failed"
-                                        );
-                                    }
-                                }
+                        let jitter = compute_jitter(max_jitter_secs, claimed.source().id);
+                        let proceed = if jitter.is_zero() {
+                            !task_cancel.is_cancelled()
+                        } else {
+                            tokio::select! {
+                                _ = task_cancel.cancelled() => false,
+                                _ = tokio::time::sleep(jitter) => true,
                             }
+                        };
+                        if !proceed {
+                            return;
                         }
 
-                        let mut active = active_set.lock().await;
-                        active.remove(&source.id);
+                        let name = claimed.source().name.clone();
+                        tracing::info!(source = %name, "starting scheduled web sync");
+                        match claimed.run(false).await {
+                            Ok(summary) => log_sync_summary(&summary, "scheduled web sync complete"),
+                            Err(err) => {
+                                tracing::warn!(source = %name, error = %err, "scheduled web sync failed");
+                            }
+                        }
                     });
                 }
             }
@@ -444,6 +434,18 @@ pub async fn run_scheduler_with_options(
     // Drain in-flight tasks so any active SQLite transactions finish cleanly.
     while tasks.join_next().await.is_some() {}
     Ok(())
+}
+
+fn log_sync_summary(summary: &SyncSummary, message: &str) {
+    tracing::info!(
+        source = %summary.source_name,
+        added = summary.pages_added,
+        updated = summary.pages_updated,
+        unchanged = summary.pages_unchanged,
+        stale = summary.pages_stale,
+        failed = summary.pages_failed,
+        "{message}"
+    );
 }
 
 fn load_due_web_sources(config: &VaultConfig) -> Result<Vec<SourceRecord>> {
@@ -487,11 +489,16 @@ pub async fn run_watcher_with_debounce(
     let lifecycle = SourceLifecycle::new(config.clone());
     let mut watched_roots: HashMap<PathBuf, SourceRecord> = HashMap::new();
     refresh_watched_local_sources(&config, &mut debouncer, &mut watched_roots);
+    // Sources that changed while another Sync held their claim; each gets one follow-up.
+    let mut dirty: HashSet<i64> = HashSet::new();
 
     let mut refresh_ticker = tokio::time::interval(WATCHER_SOURCE_REFRESH_INTERVAL);
     refresh_ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     // Consume the immediate initial tick since we already loaded sources above.
     refresh_ticker.tick().await;
+
+    let mut retry_ticker = tokio::time::interval(debounce.max(Duration::from_millis(10)));
+    retry_ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
     loop {
         tokio::select! {
@@ -500,6 +507,15 @@ pub async fn run_watcher_with_debounce(
             }
             _ = refresh_ticker.tick() => {
                 refresh_watched_local_sources(&config, &mut debouncer, &mut watched_roots);
+                dirty.retain(|id| watched_roots.values().any(|s| s.id == *id));
+            }
+            _ = retry_ticker.tick(), if !dirty.is_empty() => {
+                let pending: Vec<i64> = dirty.iter().copied().collect();
+                for source_id in pending {
+                    if watcher_sync(&lifecycle, &watched_roots, source_id).await {
+                        dirty.remove(&source_id);
+                    }
+                }
             }
             maybe_res = rx.recv() => {
                 let Some(event_res) = maybe_res else {
@@ -507,32 +523,9 @@ pub async fn run_watcher_with_debounce(
                 };
                 match event_res {
                     Ok(events) => {
-                        let affected_ids = match_affected_sources(&events, &watched_roots);
-                        if affected_ids.is_empty() {
-                            continue;
-                        }
-                        for source_id in affected_ids {
-                            let Some(source) = watched_roots
-                                .values()
-                                .find(|s| s.id == source_id)
-                                .cloned()
-                            else {
-                                continue;
-                            };
-                            match lifecycle.sync(&source.name, false).await {
-                                Ok(summary) => {
-                                    tracing::info!(
-                                        source = %summary.source_name,
-                                        added = summary.pages_added,
-                                        updated = summary.pages_updated,
-                                        unchanged = summary.pages_unchanged,
-                                        stale = summary.pages_stale,
-                                        "watcher re-indexed local source"
-                                    );
-                                }
-                                Err(err) => {
-                                    tracing::warn!(error = %err, "watcher local sync failed");
-                                }
+                        for source_id in match_affected_sources(&events, &watched_roots) {
+                            if !watcher_sync(&lifecycle, &watched_roots, source_id).await {
+                                dirty.insert(source_id);
                             }
                         }
                     }
@@ -546,6 +539,36 @@ pub async fn run_watcher_with_debounce(
 
     drop(debouncer);
     Ok(())
+}
+
+/// Sync one watched Source. Returns `false` when another Sync holds its claim, so the
+/// caller can queue one follow-up pass.
+async fn watcher_sync(
+    lifecycle: &SourceLifecycle,
+    watched_roots: &HashMap<PathBuf, SourceRecord>,
+    source_id: i64,
+) -> bool {
+    let Some(name) = watched_roots
+        .values()
+        .find(|s| s.id == source_id)
+        .map(|s| s.name.clone())
+    else {
+        return true;
+    };
+    match lifecycle.sync(&name, false).await {
+        Ok(SyncOutcome::Synced(summary)) => {
+            log_sync_summary(&summary, "watcher re-indexed local source");
+            true
+        }
+        Ok(SyncOutcome::AlreadySyncing) => {
+            tracing::debug!(source = %name, "already syncing; queued a follow-up pass");
+            false
+        }
+        Err(err) => {
+            tracing::warn!(source = %name, error = %err, "watcher local sync failed");
+            true
+        }
+    }
 }
 
 fn load_local_sources(config: &VaultConfig) -> Result<Vec<SourceRecord>> {
@@ -747,7 +770,7 @@ mod tests {
         )
         .expect("insert local");
 
-        // 6. Currently syncing web source (even if last_synced_at IS NULL) -> SKIP
+        // 6. Web source left 'syncing' by a crashed run -> DUE; the Sync claim decides exclusion
         conn.execute(
             "INSERT INTO sources (name, kind, origin, refresh_interval_secs, status, last_synced_at)
              VALUES ('syncing-web', 'web', 'https://syncing.example.com', 86400, 'syncing', NULL)",
@@ -758,7 +781,10 @@ mod tests {
         let due = select_due_web_sources_at(&conn, now_epoch).expect("select_due_web_sources_at");
         let mut names: Vec<String> = due.into_iter().map(|s| s.name).collect();
         names.sort();
-        assert_eq!(names, vec!["never-synced-web", "overdue-web"]);
+        assert_eq!(
+            names,
+            vec!["never-synced-web", "overdue-web", "syncing-web"]
+        );
     }
 
     #[test]
@@ -885,6 +911,163 @@ mod tests {
         assert_eq!(
             revision_count, 1,
             "page_revisions should record the change diff"
+        );
+    }
+
+    /// The pid of a process that has already exited.
+    fn dead_pid() -> i64 {
+        let mut child = Command::new("true").spawn().expect("spawn true");
+        let pid = i64::from(child.id());
+        child.wait().expect("wait true");
+        pid
+    }
+
+    #[tokio::test]
+    async fn scheduler_picks_source_with_dead_claim() {
+        use axum::{response::Html, routing::get, Router};
+
+        let app = Router::new().route(
+            "/docs/",
+            get(|| async {
+                Html("<html><body><main><h1>Docs</h1><p>Up.</p></main></body></html>")
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        let server = tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+
+        let vault_dir = tempdir().expect("vault tempdir");
+        let config = VaultConfig::new(vault_dir.path()).allowing_private_origins();
+        let added = SourceLifecycle::new(config.clone())
+            .add(
+                AddSourceParams {
+                    origin: format!("http://{addr}/docs/"),
+                    name: Some("crashed".into()),
+                    ..Default::default()
+                },
+                false,
+            )
+            .await
+            .expect("register");
+
+        // A Sync that crashed: status stuck at 'syncing' and a claim held by a dead pid.
+        let conn = open_rw_db(&config.db_path()).expect("open_rw_db");
+        conn.execute(
+            "UPDATE sources SET status = 'syncing' WHERE id = ?1",
+            [added.source.id],
+        )
+        .expect("stuck status");
+        conn.execute(
+            "INSERT INTO sync_claims (source_id, pid, instance_token, claimed_at)
+             VALUES (?1, ?2, 'crashed-run', strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))",
+            rusqlite::params![added.source.id, dead_pid()],
+        )
+        .expect("dead claim");
+        drop(conn);
+
+        let cancel = CancellationToken::new();
+        let scheduler = tokio::spawn(run_scheduler_with_options(
+            config.clone(),
+            Duration::from_millis(20),
+            1,
+            0,
+            cancel.clone(),
+        ));
+
+        let mut state = (String::new(), 1_i64);
+        for _ in 0..50 {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            let conn = open_rw_db(&config.db_path()).expect("open_rw_db");
+            state = conn
+                .query_row(
+                    "SELECT s.status, (SELECT COUNT(*) FROM sync_claims c WHERE c.source_id = s.id)
+                     FROM sources s WHERE s.id = ?1",
+                    [added.source.id],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+                .expect("query state");
+            if state == ("ok".to_string(), 0) {
+                break;
+            }
+        }
+        cancel.cancel();
+        scheduler.await.expect("join").expect("scheduler shutdown");
+        server.abort();
+        assert_eq!(state, ("ok".to_string(), 0));
+    }
+
+    #[tokio::test]
+    async fn watcher_runs_follow_up_after_already_syncing() {
+        let vault_dir = tempdir().expect("vault tempdir");
+        let docs_dir = tempdir().expect("docs tempdir");
+        let md_path = docs_dir.path().join("guide.md");
+        std::fs::write(&md_path, "# Guide\n\nInitial version.\n").expect("write md");
+
+        let config = VaultConfig::new(vault_dir.path());
+        let lifecycle = SourceLifecycle::new(config.clone());
+        lifecycle
+            .add(
+                AddSourceParams {
+                    origin: docs_dir.path().to_string_lossy().into_owned(),
+                    name: Some("busy-docs".to_string()),
+                    ..Default::default()
+                },
+                true,
+            )
+            .await
+            .expect("add");
+
+        // Another Sync holds the claim while the file changes.
+        let held = lifecycle
+            .claim("busy-docs")
+            .await
+            .expect("claim")
+            .expect("claim is free");
+
+        let cancel = CancellationToken::new();
+        let watcher = tokio::spawn(run_watcher_with_debounce(
+            config.clone(),
+            Duration::from_millis(100),
+            cancel.clone(),
+        ));
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        std::fs::write(&md_path, "# Guide\n\nChanged while busy.\n").expect("update md");
+
+        // Let the watcher see the change and get AlreadySyncing.
+        tokio::time::sleep(Duration::from_millis(600)).await;
+        let read_body = || -> String {
+            open_rw_db(&config.db_path())
+                .expect("open_rw_db")
+                .query_row(
+                    "SELECT content_md FROM pages WHERE uri = 'guide.md'",
+                    [],
+                    |r| r.get(0),
+                )
+                .expect("body")
+        };
+        assert!(
+            read_body().contains("Initial version"),
+            "claim held: no sync yet"
+        );
+
+        drop(held);
+        let mut body = String::new();
+        for _ in 0..40 {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            body = read_body();
+            if body.contains("Changed while busy") {
+                break;
+            }
+        }
+        cancel.cancel();
+        watcher.await.expect("join").expect("watcher shutdown");
+        assert!(
+            body.contains("Changed while busy"),
+            "follow-up sync ran: {body}"
         );
     }
 }

@@ -9,7 +9,7 @@ pub use crate::skill::SkillTarget;
 use crate::config::VaultConfig;
 use crate::db::{execute_readonly_query, QueryResult};
 use crate::ingest::{self, parse_duration_secs, SourceDetail, SourceSummary, SyncSummary};
-use crate::sources::{AddSourceParams, SourceLifecycle};
+use crate::sources::{AddSourceParams, Removal, SourceLifecycle, SyncOutcome};
 
 /// Local knowledge vault & MCP server for documentation sites and Markdown folders.
 #[derive(Debug, Parser)]
@@ -287,7 +287,13 @@ pub fn run_cli_with_writer<W: Write>(cli: Cli, out: &mut W) -> anyhow::Result<()
                     anyhow::bail!("cannot specify both a source <name> and --all")
                 }
                 (None, false) => anyhow::bail!("specify a source <name> or pass --all"),
-                (Some(name), false) => vec![block_on(lifecycle.sync(&name, prune))??],
+                (Some(name), false) => match block_on(lifecycle.sync(&name, prune))?? {
+                    SyncOutcome::Synced(summary) => vec![summary],
+                    SyncOutcome::AlreadySyncing => {
+                        writeln!(out, "Source '{name}' is already syncing; nothing started.")?;
+                        return Ok(());
+                    }
+                },
                 (None, true) => block_on(lifecycle.sync_all(prune))??,
             };
             if summaries.is_empty() {
@@ -319,7 +325,12 @@ pub fn run_cli_with_writer<W: Write>(cli: Cli, out: &mut W) -> anyhow::Result<()
                 }
             }
 
-            let removed = block_on(SourceLifecycle::new(config).remove(&name))??;
+            let removed = match block_on(SourceLifecycle::new(config).remove(&name))?? {
+                Removal::Removed(removed) => removed,
+                Removal::AlreadySyncing => anyhow::bail!(
+                    "source '{name}' is syncing; nothing was removed, try again when it finishes"
+                ),
+            };
             writeln!(
                 out,
                 "Removed source '{}' ({} pages deleted).",

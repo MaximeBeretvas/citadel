@@ -18,7 +18,10 @@ use crate::ingest::{
     sync_web_source, SourceKind, SourceRecord, SyncSummary, DEFAULT_MAX_DEPTH, DEFAULT_MAX_PAGES,
 };
 
+mod claim;
 pub(crate) mod origin;
+
+use claim::ClaimEnv;
 
 use origin::{check_private_origin, classify_origin};
 
@@ -30,6 +33,7 @@ const MAX_ALLOWED_DEPTH: u32 = 20;
 #[derive(Debug, Clone)]
 pub struct SourceLifecycle {
     config: VaultConfig,
+    claims: ClaimEnv,
 }
 
 /// A newly registered Source and, when synced immediately, its first Sync summary.
@@ -39,9 +43,38 @@ pub struct Added {
     pub summary: Option<SyncSummary>,
 }
 
+/// Result of asking for a Sync.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SyncOutcome {
+    Synced(SyncSummary),
+    /// Another Sync of this Source holds the Sync claim; nothing was done.
+    AlreadySyncing,
+}
+
+/// Result of asking to remove a Source.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Removal {
+    Removed(RemovedSource),
+    /// A Sync of this Source is running; nothing was removed.
+    AlreadySyncing,
+}
+
+impl SyncOutcome {
+    /// The summary when the Sync ran, `None` when another Sync held the claim.
+    pub fn synced(self) -> Option<SyncSummary> {
+        match self {
+            Self::Synced(summary) => Some(summary),
+            Self::AlreadySyncing => None,
+        }
+    }
+}
+
 impl SourceLifecycle {
     pub fn new(config: VaultConfig) -> Self {
-        Self { config }
+        Self {
+            config,
+            claims: ClaimEnv::current(),
+        }
     }
 
     /// Register a new Source and optionally run its first Sync.
@@ -55,18 +88,18 @@ impl SourceLifecycle {
             });
         }
 
-        let summary = self.sync_record(&source, false).await?;
-        let config = self.config.clone();
         let id = source.id;
+        let summary = match self.claim_record(source).await? {
+            Some(claimed) => Some(claimed.run(false).await?),
+            None => None,
+        };
+        let config = self.config.clone();
         let source = blocking(move || {
             let conn = open_rw_db(&config.db_path())?;
             load_source_by_id(&conn, id)
         })
         .await?;
-        Ok(Added {
-            source,
-            summary: Some(summary),
-        })
+        Ok(Added { source, summary })
     }
 
     /// Update mutable configuration fields for an existing Source.
@@ -74,29 +107,29 @@ impl SourceLifecycle {
         update_source(&self.config, name, params)
     }
 
-    /// Remove a Source by name, cascading its stored Pages.
-    pub async fn remove(&self, name: &str) -> Result<RemovedSource> {
+    /// Remove a Source by name, cascading its stored Pages. Refused while it is syncing.
+    pub async fn remove(&self, name: &str) -> Result<Removal> {
+        let Some(mut claimed) = self.claim(name).await? else {
+            return Ok(Removal::AlreadySyncing);
+        };
         let config = self.config.clone();
         let name = name.to_string();
-        blocking(move || remove_source(&config, &name)).await
+        let removed = blocking(move || remove_source(&config, &name)).await?;
+        // Deleting the Source cascaded its claim row away.
+        claimed.released = true;
+        Ok(Removal::Removed(removed))
     }
 
-    /// Sync one Source by name.
-    pub async fn sync(&self, name: &str, prune: bool) -> Result<SyncSummary> {
-        let config = self.config.clone();
-        let name = name.to_string();
-        let source = blocking(move || {
-            if !config.db_path().exists() {
-                return Err(VaultError::NotFound(format!("source '{name}' not found")));
-            }
-            let conn = open_rw_db(&config.db_path())?;
-            load_source_by_name(&conn, &name)
-        })
-        .await?;
-        self.sync_record(&source, prune).await
+    /// Sync one Source by name, unless another Sync of it is running.
+    pub async fn sync(&self, name: &str, prune: bool) -> Result<SyncOutcome> {
+        match self.claim(name).await? {
+            Some(claimed) => Ok(SyncOutcome::Synced(claimed.run(prune).await?)),
+            None => Ok(SyncOutcome::AlreadySyncing),
+        }
     }
 
     /// Sync every registered Source in name order, stopping at the first failure.
+    /// Sources that are already syncing are skipped.
     pub async fn sync_all(&self, prune: bool) -> Result<Vec<SyncSummary>> {
         let config = self.config.clone();
         let sources = blocking(move || {
@@ -109,10 +142,46 @@ impl SourceLifecycle {
         .await?;
 
         let mut summaries = Vec::with_capacity(sources.len());
-        for source in &sources {
-            summaries.push(self.sync_record(source, prune).await?);
+        for source in sources {
+            let name = source.name.clone();
+            match self.claim_record(source).await? {
+                Some(claimed) => summaries.push(claimed.run(prune).await?),
+                None => tracing::info!(source = %name, "skipped: already syncing"),
+            }
         }
         Ok(summaries)
+    }
+
+    /// Take the Sync claim on a Source so its Sync can run later via [`ClaimedSync::run`].
+    /// Returns `None` when another Sync holds it.
+    pub async fn claim(&self, name: &str) -> Result<Option<ClaimedSync>> {
+        let config = self.config.clone();
+        let name = name.to_string();
+        let source = blocking(move || {
+            if !config.db_path().exists() {
+                return Err(VaultError::NotFound(format!("source '{name}' not found")));
+            }
+            let conn = open_rw_db(&config.db_path())?;
+            load_source_by_name(&conn, &name)
+        })
+        .await?;
+        self.claim_record(source).await
+    }
+
+    async fn claim_record(&self, source: SourceRecord) -> Result<Option<ClaimedSync>> {
+        let config = self.config.clone();
+        let env = self.claims.clone();
+        let id = source.id;
+        let acquired = blocking(move || {
+            let conn = open_rw_db(&config.db_path())?;
+            claim::try_acquire(&conn, id, &env)
+        })
+        .await?;
+        Ok(acquired.then(|| ClaimedSync {
+            lifecycle: self.clone(),
+            source,
+            released: false,
+        }))
     }
 
     async fn sync_record(&self, source: &SourceRecord, prune: bool) -> Result<SyncSummary> {
@@ -139,6 +208,67 @@ impl SourceLifecycle {
                 check_private_origin(&source.origin, self.config.allow_private_origins)?;
                 sync_web_source(&self.config.db_path(), source, prune).await
             }
+        }
+    }
+}
+
+/// A held Sync claim on one Source. [`ClaimedSync::run`] runs the Sync and releases the
+/// claim; dropping it unrun releases the claim too.
+#[derive(Debug)]
+pub struct ClaimedSync {
+    lifecycle: SourceLifecycle,
+    source: SourceRecord,
+    released: bool,
+}
+
+impl ClaimedSync {
+    /// The claimed Source.
+    pub fn source(&self) -> &SourceRecord {
+        &self.source
+    }
+
+    /// Run the Sync, then release the claim whether it succeeded or failed.
+    pub async fn run(mut self, prune: bool) -> Result<SyncSummary> {
+        let result = self.lifecycle.sync_record(&self.source, prune).await;
+        self.released = true;
+        let (config, env, id) = self.release_parts();
+        let released = blocking(move || {
+            let conn = open_rw_db(&config.db_path())?;
+            claim::release(&conn, id, &env)
+        })
+        .await;
+        let summary = result?;
+        released?;
+        Ok(summary)
+    }
+
+    fn release_parts(&self) -> (VaultConfig, ClaimEnv, i64) {
+        (
+            self.lifecycle.config.clone(),
+            self.lifecycle.claims.clone(),
+            self.source.id,
+        )
+    }
+}
+
+impl Drop for ClaimedSync {
+    fn drop(&mut self) {
+        if self.released {
+            return;
+        }
+        let (config, env, id) = self.release_parts();
+        let release = move || {
+            let result =
+                open_rw_db(&config.db_path()).and_then(|conn| claim::release(&conn, id, &env));
+            if let Err(err) = result {
+                tracing::warn!(source_id = id, error = %err, "failed to release sync claim");
+            }
+        };
+        match tokio::runtime::Handle::try_current() {
+            Ok(handle) => {
+                handle.spawn_blocking(release);
+            }
+            Err(_) => release(),
         }
     }
 }

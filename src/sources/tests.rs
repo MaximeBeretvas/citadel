@@ -9,7 +9,33 @@ use tokio::net::TcpListener;
 use super::*;
 use crate::config::VaultConfig;
 use crate::error::VaultError;
-use crate::ingest::SourceKind;
+use crate::ingest::{SourceKind, SyncSummary};
+
+fn synced(outcome: SyncOutcome) -> SyncSummary {
+    match outcome {
+        SyncOutcome::Synced(summary) => summary,
+        SyncOutcome::AlreadySyncing => panic!("expected Synced, got AlreadySyncing"),
+    }
+}
+
+/// A one-page site whose page takes `delay` to respond, so a Sync holds its claim that long.
+async fn spawn_slow_site(delay: std::time::Duration) -> (SocketAddr, tokio::task::JoinHandle<()>) {
+    let app = Router::new().route(
+        "/docs/",
+        get(move || async move {
+            tokio::time::sleep(delay).await;
+            Html("<html><body><main><h1>Slow</h1><p>Eventually.</p></main></body></html>")
+        }),
+    );
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind loopback listener");
+    let addr = listener.local_addr().expect("local_addr");
+    let handle = tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+    (addr, handle)
+}
 
 async fn spawn_two_page_site() -> (SocketAddr, tokio::task::JoinHandle<()>) {
     let app = Router::new()
@@ -61,7 +87,7 @@ async fn add_local_then_sync_reports_summary() {
     assert_eq!(added.summary.expect("summary").pages_added, 2);
 
     std::fs::write(docs_dir.path().join("extra.md"), "# Extra\n\nMore.\n").expect("write");
-    let summary = lifecycle.sync("notes", false).await.expect("sync");
+    let summary = synced(lifecycle.sync("notes", false).await.expect("sync"));
     assert_eq!(summary.pages_added, 1);
     assert_eq!(summary.pages_unchanged, 2);
 
@@ -91,7 +117,7 @@ async fn add_web_then_sync_via_loopback_fixture() {
     assert_eq!(added.source.kind, SourceKind::Web);
     assert_eq!(added.summary.expect("summary").pages_added, 2);
 
-    let summary = lifecycle.sync("fixture-docs", false).await.expect("resync");
+    let summary = synced(lifecycle.sync("fixture-docs", false).await.expect("resync"));
     server.abort();
     assert_eq!(summary.pages_unchanged, 2);
 }
@@ -127,7 +153,10 @@ async fn update_and_remove_roundtrip() {
     assert_eq!(updated.tags, vec!["rust", "docs"]);
     assert_eq!(updated.refresh_interval_secs, 0);
 
-    let removed = lifecycle.remove("example-com-docs").await.expect("remove");
+    let Removal::Removed(removed) = lifecycle.remove("example-com-docs").await.expect("remove")
+    else {
+        panic!("expected Removed");
+    };
     assert_eq!(removed.name, "example-com-docs");
     assert_eq!(removed.pages_deleted, 0);
 
@@ -215,4 +244,82 @@ async fn sync_rejects_stored_private_origin_when_disabled() {
         .await
         .expect_err("stored private origin must be refused");
     assert!(matches!(err, VaultError::Validation(_)), "{err:?}");
+}
+
+#[tokio::test]
+async fn concurrent_sync_returns_already_syncing() {
+    let (addr, server) = spawn_slow_site(std::time::Duration::from_millis(400)).await;
+    let vault_dir = tempdir().expect("vault tempdir");
+    let lifecycle =
+        SourceLifecycle::new(VaultConfig::new(vault_dir.path()).allowing_private_origins());
+    lifecycle
+        .add(
+            AddSourceParams {
+                origin: format!("http://{addr}/docs/"),
+                name: Some("slow".into()),
+                ..Default::default()
+            },
+            false,
+        )
+        .await
+        .expect("register");
+
+    let (a, b) = tokio::join!(lifecycle.sync("slow", false), lifecycle.sync("slow", false));
+    let outcomes = [a.expect("first"), b.expect("second")];
+    let synced_count = outcomes
+        .iter()
+        .filter(|o| matches!(o, SyncOutcome::Synced(_)))
+        .count();
+    let refused = outcomes
+        .iter()
+        .filter(|o| matches!(o, SyncOutcome::AlreadySyncing))
+        .count();
+    assert_eq!((synced_count, refused), (1, 1), "{outcomes:?}");
+
+    // The claim is released once the Sync finishes.
+    assert!(matches!(
+        lifecycle.sync("slow", false).await.expect("third"),
+        SyncOutcome::Synced(_)
+    ));
+    server.abort();
+}
+
+#[tokio::test]
+async fn remove_while_syncing_returns_already_syncing() {
+    let vault_dir = tempdir().expect("vault tempdir");
+    let docs_dir = tempdir().expect("docs tempdir");
+    std::fs::write(docs_dir.path().join("a.md"), "# A\n\nAlpha.\n").expect("write");
+    let lifecycle = SourceLifecycle::new(VaultConfig::new(vault_dir.path()));
+    lifecycle
+        .add(
+            AddSourceParams {
+                origin: docs_dir.path().to_string_lossy().into_owned(),
+                name: Some("busy".into()),
+                ..Default::default()
+            },
+            false,
+        )
+        .await
+        .expect("register");
+
+    let held = lifecycle
+        .claim("busy")
+        .await
+        .expect("claim")
+        .expect("claim is free");
+    assert!(matches!(
+        lifecycle.remove("busy").await.expect("remove"),
+        Removal::AlreadySyncing
+    ));
+    assert!(matches!(
+        lifecycle.sync("busy", false).await.expect("sync"),
+        SyncOutcome::AlreadySyncing
+    ));
+
+    let summary = held.run(false).await.expect("held sync runs");
+    assert_eq!(summary.pages_added, 1);
+    assert!(matches!(
+        lifecycle.remove("busy").await.expect("remove"),
+        Removal::Removed(_)
+    ));
 }
