@@ -20,8 +20,8 @@ fn dockerfile_meets_multi_stage_non_root_spec() {
         "Dockerfile must use rust:1-slim AS builder"
     );
     assert!(
-        df.contains("FROM debian:bookworm-slim AS runtime"),
-        "Dockerfile must use debian:bookworm-slim AS runtime"
+        df.contains("FROM debian:trixie-slim AS runtime"),
+        "Dockerfile must use debian:trixie-slim AS runtime"
     );
     assert!(
         df.contains("ARG FEATURES=\"\""),

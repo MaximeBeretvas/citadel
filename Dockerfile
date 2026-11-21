@@ -17,11 +17,11 @@ RUN OFFLINE=""; \
     fi \
     && strip /app/target/release/web-vault || true
 
-FROM debian:bookworm-slim AS runtime
+FROM debian:trixie-slim AS runtime
 
 ARG FEATURES=""
 
-# Reuse ca-certificates from builder (rust:1-slim ships Debian bookworm-slim with ca-certificates pre-installed)
+# Reuse ca-certificates from builder (rust:1-slim ships Debian trixie-slim with ca-certificates pre-installed)
 COPY --from=builder /etc/ssl/certs /etc/ssl/certs
 COPY --from=builder /usr/share/ca-certificates /usr/share/ca-certificates
 

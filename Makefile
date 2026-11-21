@@ -15,7 +15,7 @@ build:
 	container build $(if $(FEATURES),--build-arg FEATURES=$(FEATURES),) -t $(IMAGE) .
 
 run:
-	container system start
+	container system status >/dev/null 2>&1 || container system start
 	container volume create $(VOLUME) || true
 	-container stop $(CONTAINER_NAME) 2>/dev/null || true
 	-container rm $(CONTAINER_NAME) 2>/dev/null || true
