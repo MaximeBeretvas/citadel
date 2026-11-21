@@ -7,6 +7,7 @@ pub mod ingest;
 pub mod mcp;
 pub mod serve;
 pub mod skill;
+pub mod sources;
 pub mod ui;
 
 use std::io::IsTerminal;

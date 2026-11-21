@@ -18,11 +18,8 @@ use tokio_util::sync::CancellationToken;
 use crate::config::VaultConfig;
 use crate::db::open_rw_db;
 use crate::error::{Result, VaultError};
-use crate::ingest::{
-    self,
-    local::{canonicalize_local_dir, sync_local_source},
-    map_source_record, SourceRecord,
-};
+use crate::ingest::{local::canonicalize_local_dir, map_source_record, SourceRecord};
+use crate::sources::SourceLifecycle;
 
 pub use service::{
     generate_launchd_plist, generate_systemd_unit, install_service, uninstall_service,
@@ -391,7 +388,7 @@ pub async fn run_scheduler_with_options(
 
                     let sem = Arc::clone(&semaphore);
                     let active_set = Arc::clone(&in_flight);
-                    let db_path = config.db_path();
+                    let lifecycle = SourceLifecycle::new(config.clone());
                     let task_cancel = cancel.clone();
 
                     tasks.spawn(async move {
@@ -413,7 +410,7 @@ pub async fn run_scheduler_with_options(
 
                             if proceed {
                                 tracing::info!(source = %source.name, "starting scheduled web sync");
-                                match ingest::sync_web_source(&db_path, &source, false).await {
+                                match lifecycle.sync(&source.name, false).await {
                                     Ok(summary) => {
                                         tracing::info!(
                                             source = %summary.source_name,
@@ -487,6 +484,7 @@ pub async fn run_watcher_with_debounce(
     })
     .map_err(|err| VaultError::Other(format!("failed to initialize file watcher: {err}")))?;
 
+    let lifecycle = SourceLifecycle::new(config.clone());
     let mut watched_roots: HashMap<PathBuf, SourceRecord> = HashMap::new();
     refresh_watched_local_sources(&config, &mut debouncer, &mut watched_roots);
 
@@ -521,23 +519,8 @@ pub async fn run_watcher_with_debounce(
                             else {
                                 continue;
                             };
-                            let db_path = config.db_path();
-                            let sync_res = tokio::task::spawn_blocking(move || {
-                                let mut conn = open_rw_db(&db_path)?;
-                                sync_local_source(
-                                    &mut conn,
-                                    source.id,
-                                    &source.name,
-                                    Path::new(&source.origin),
-                                    &source.include_patterns,
-                                    &source.exclude_patterns,
-                                    false,
-                                )
-                            })
-                            .await;
-
-                            match sync_res {
-                                Ok(Ok(summary)) => {
+                            match lifecycle.sync(&source.name, false).await {
+                                Ok(summary) => {
                                     tracing::info!(
                                         source = %summary.source_name,
                                         added = summary.pages_added,
@@ -547,11 +530,8 @@ pub async fn run_watcher_with_debounce(
                                         "watcher re-indexed local source"
                                     );
                                 }
-                                Ok(Err(err)) => {
-                                    tracing::warn!(error = %err, "watcher local sync failed");
-                                }
                                 Err(err) => {
-                                    tracing::warn!(error = %err, "watcher sync task panicked");
+                                    tracing::warn!(error = %err, "watcher local sync failed");
                                 }
                             }
                         }
@@ -714,7 +694,7 @@ mod tests {
     use super::*;
     use crate::db::open_rw_db;
     use crate::error::VaultError;
-    use crate::ingest::{add_source, AddSourceParams};
+    use crate::sources::{AddSourceParams, SourceLifecycle};
     use tempfile::tempdir;
 
     #[test]
@@ -833,16 +813,17 @@ mod tests {
         std::fs::write(&md_path, "# Guide\n\nInitial version.\n").expect("write initial md");
 
         let config = VaultConfig::new(vault_dir.path());
-        add_source(
-            &config,
-            AddSourceParams {
-                origin: docs_dir.path().to_string_lossy().into_owned(),
-                name: Some("watched-docs".to_string()),
-                ..Default::default()
-            },
-            true,
-        )
-        .expect("add_source should succeed");
+        SourceLifecycle::new(config.clone())
+            .add(
+                AddSourceParams {
+                    origin: docs_dir.path().to_string_lossy().into_owned(),
+                    name: Some("watched-docs".to_string()),
+                    ..Default::default()
+                },
+                true,
+            )
+            .await
+            .expect("add should succeed");
 
         let conn = open_rw_db(&config.db_path()).expect("open_rw_db");
         let initial_hash: String = conn

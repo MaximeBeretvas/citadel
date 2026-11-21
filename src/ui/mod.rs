@@ -389,7 +389,8 @@ mod tests {
             "# Vault Guide\n\n## Intro\n\nWelcome to web-vault local search.\n\n## Details\n\nFTS5 indexes sections and diffs.\n",
         )
         .expect("update guide.md");
-        crate::ingest::sync_sources_async(&config, Some("local-guide"), false, false)
+        crate::sources::SourceLifecycle::new(config.clone())
+            .sync("local-guide", false)
             .await
             .expect("sync updated file");
 
@@ -588,17 +589,18 @@ mod tests {
         std::fs::write(docs_dir.path().join("a.md"), "# Page A\n\nInitial.\n").expect("write a.md");
 
         let config = VaultConfig::new(vault_dir.path());
-        let (source, _) = crate::ingest::add_source_async(
-            &config,
-            crate::ingest::AddSourceParams {
-                origin: docs_dir.path().to_string_lossy().into_owned(),
-                name: Some("sync-target".into()),
-                ..Default::default()
-            },
-            true,
-        )
-        .await
-        .expect("add initial source");
+        let crate::sources::Added { source, .. } =
+            crate::sources::SourceLifecycle::new(config.clone())
+                .add(
+                    crate::sources::AddSourceParams {
+                        origin: docs_dir.path().to_string_lossy().into_owned(),
+                        name: Some("sync-target".into()),
+                        ..Default::default()
+                    },
+                    true,
+                )
+                .await
+                .expect("add initial source");
 
         // Add a second markdown file before triggering async sync
         std::fs::write(docs_dir.path().join("b.md"), "# Page B\n\nAdded.\n").expect("write b.md");

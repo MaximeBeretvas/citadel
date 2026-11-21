@@ -1031,7 +1031,8 @@ mod tests {
 
     use crate::config::VaultConfig;
     use crate::db::open_rw_db;
-    use crate::ingest::{add_source_async, sync_sources_async, AddSourceParams, SourceKind};
+    use crate::ingest::SourceKind;
+    use crate::sources::{AddSourceParams, Added, SourceLifecycle};
 
     type FixtureRouteMap = Arc<RwLock<HashMap<String, (StatusCode, String, String)>>>;
 
@@ -1206,17 +1207,20 @@ mod tests {
         let cfg = VaultConfig::new(vault_dir.path());
         let origin = format!("http://{addr}/docs/");
 
-        let (source, summary_opt) = add_source_async(
-            &cfg,
-            AddSourceParams {
-                origin: origin.clone(),
-                name: Some("fixture-docs".to_string()),
-                ..Default::default()
-            },
-            true,
-        )
-        .await
-        .expect("add_source_async should succeed");
+        let Added {
+            source,
+            summary: summary_opt,
+        } = SourceLifecycle::new(cfg.clone())
+            .add(
+                AddSourceParams {
+                    origin: origin.clone(),
+                    name: Some("fixture-docs".to_string()),
+                    ..Default::default()
+                },
+                true,
+            )
+            .await
+            .expect("add should succeed");
         server_handle.abort();
 
         assert_eq!(source.kind, SourceKind::Web);
@@ -1325,17 +1329,20 @@ mod tests {
         let cfg = VaultConfig::new(vault_dir.path());
         let origin = format!("http://{addr}/docs/");
 
-        let (source, summary_opt) = add_source_async(
-            &cfg,
-            AddSourceParams {
-                origin,
-                name: Some("llms-docs".to_string()),
-                ..Default::default()
-            },
-            true,
-        )
-        .await
-        .expect("add_source_async should succeed");
+        let Added {
+            source,
+            summary: summary_opt,
+        } = SourceLifecycle::new(cfg.clone())
+            .add(
+                AddSourceParams {
+                    origin,
+                    name: Some("llms-docs".to_string()),
+                    ..Default::default()
+                },
+                true,
+            )
+            .await
+            .expect("add should succeed");
         server_handle.abort();
 
         let summary = summary_opt.expect("sync summary");
@@ -1392,17 +1399,20 @@ mod tests {
         let cfg = VaultConfig::new(vault_dir.path());
         let origin = format!("http://{addr}/docs/");
 
-        let (source, first_sum) = add_source_async(
-            &cfg,
-            AddSourceParams {
-                origin,
-                name: Some("recrawl-docs".to_string()),
-                ..Default::default()
-            },
-            true,
-        )
-        .await
-        .expect("initial crawl");
+        let Added {
+            source,
+            summary: first_sum,
+        } = SourceLifecycle::new(cfg.clone())
+            .add(
+                AddSourceParams {
+                    origin,
+                    name: Some("recrawl-docs".to_string()),
+                    ..Default::default()
+                },
+                true,
+            )
+            .await
+            .expect("initial crawl");
         assert_eq!(first_sum.expect("first summary").pages_added, 4);
 
         // Phase 2: modify /docs/guide, unlink & remove /docs/api, return 500 on /docs/broken
@@ -1423,13 +1433,12 @@ mod tests {
             "<html><body><h1>500 Internal Server Error</h1></body></html>",
         );
 
-        let summaries = sync_sources_async(&cfg, Some("recrawl-docs"), false, false)
+        let second = SourceLifecycle::new(cfg.clone())
+            .sync("recrawl-docs", false)
             .await
             .expect("recrawl sync");
         server_handle.abort();
 
-        assert_eq!(summaries.len(), 1);
-        let second = &summaries[0];
         assert_eq!(second.pages_added, 0);
         assert_eq!(second.pages_updated, 1);
         assert_eq!(second.pages_unchanged, 1);
@@ -1500,18 +1509,21 @@ mod tests {
         let cfg = VaultConfig::new(vault_dir.path());
         let origin = format!("http://{addr}/docs/");
 
-        let (source, summary_opt) = add_source_async(
-            &cfg,
-            AddSourceParams {
-                origin,
-                name: Some("js-docs".to_string()),
-                render_js: true,
-                ..Default::default()
-            },
-            true,
-        )
-        .await
-        .expect("add_source_async should fall back or succeed gracefully");
+        let Added {
+            source,
+            summary: summary_opt,
+        } = SourceLifecycle::new(cfg.clone())
+            .add(
+                AddSourceParams {
+                    origin,
+                    name: Some("js-docs".to_string()),
+                    render_js: true,
+                    ..Default::default()
+                },
+                true,
+            )
+            .await
+            .expect("add should fall back or succeed gracefully");
         server_handle.abort();
 
         assert!(source.render_js);
@@ -1584,18 +1596,21 @@ mod tests {
         let cfg = VaultConfig::new(vault_dir.path());
         let origin = format!("http://{addr}/docs/");
 
-        let (source, summary_opt) = add_source_async(
-            &cfg,
-            AddSourceParams {
-                origin,
-                name: Some("sitemap-docs".to_string()),
-                exclude_patterns: vec!["docs/drafts/*".to_string()],
-                ..Default::default()
-            },
-            true,
-        )
-        .await
-        .expect("sitemap add_source_async");
+        let Added {
+            source,
+            summary: summary_opt,
+        } = SourceLifecycle::new(cfg.clone())
+            .add(
+                AddSourceParams {
+                    origin,
+                    name: Some("sitemap-docs".to_string()),
+                    exclude_patterns: vec!["docs/drafts/*".to_string()],
+                    ..Default::default()
+                },
+                true,
+            )
+            .await
+            .expect("sitemap add");
         server_handle.abort();
 
         let summary = summary_opt.expect("summary");
@@ -1629,7 +1644,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn honors_max_pages_include_override_and_sync_wrapper_inside_runtime() {
+    async fn honors_max_pages_and_include_override() {
         let state = FixtureState::default();
         state.set_html(
             "/docs/",
@@ -1663,18 +1678,21 @@ mod tests {
 
         // 1. Test include_patterns overriding /docs/ prefix to include /blog/included while ignoring /blog/ignored.
         let origin = format!("http://{addr}/docs/");
-        let (inc_source, inc_sum) = add_source_async(
-            &cfg,
-            AddSourceParams {
-                origin: origin.clone(),
-                name: Some("include-override".to_string()),
-                include_patterns: vec!["docs/*".to_string(), "blog/included*".to_string()],
-                ..Default::default()
-            },
-            true,
-        )
-        .await
-        .expect("include override crawl");
+        let Added {
+            source: inc_source,
+            summary: inc_sum,
+        } = SourceLifecycle::new(cfg.clone())
+            .add(
+                AddSourceParams {
+                    origin: origin.clone(),
+                    name: Some("include-override".to_string()),
+                    include_patterns: vec!["docs/*".to_string(), "blog/included*".to_string()],
+                    ..Default::default()
+                },
+                true,
+            )
+            .await
+            .expect("include override crawl");
         assert_eq!(inc_sum.expect("inc summary").pages_added, 4);
 
         let conn = open_rw_db(&cfg.db_path()).expect("open_rw_db");
@@ -1688,20 +1706,25 @@ mod tests {
         assert!(inc_uris.contains(&format!("http://{addr}/blog/included")));
         assert!(!inc_uris.iter().any(|u| u.contains("/blog/ignored")));
 
-        // 2. Test max_pages cap and sync `add_source` / `sync_sources` directly inside an active Tokio runtime!
+        // 2. Test the max_pages cap.
         let vault_dir2 = tempdir().expect("vault tempdir 2");
         let cfg2 = VaultConfig::new(vault_dir2.path());
-        let (source, summary_opt) = crate::ingest::add_source(
-            &cfg2,
-            AddSourceParams {
-                origin,
-                name: Some("capped-docs".to_string()),
-                max_pages: Some(2),
-                ..Default::default()
-            },
-            true,
-        )
-        .expect("sync add_source inside active tokio runtime should not panic");
+        let lifecycle2 = SourceLifecycle::new(cfg2.clone());
+        let Added {
+            source,
+            summary: summary_opt,
+        } = lifecycle2
+            .add(
+                AddSourceParams {
+                    origin,
+                    name: Some("capped-docs".to_string()),
+                    max_pages: Some(2),
+                    ..Default::default()
+                },
+                true,
+            )
+            .await
+            .expect("capped add");
 
         let summary = summary_opt.expect("summary");
         assert_eq!(
@@ -1709,28 +1732,32 @@ mod tests {
             "must cap at max_pages=2: {summary:?}"
         );
 
-        let sync_res = crate::ingest::sync_sources(&cfg2, Some(&source.name), false, false)
-            .expect("sync_sources inside active tokio runtime should not panic");
-        assert_eq!(sync_res.len(), 1);
-        assert_eq!(sync_res[0].pages_unchanged, 2);
+        let resync = lifecycle2
+            .sync(&source.name, false)
+            .await
+            .expect("resync capped source");
+        // Which 2 of the 3 linked pages a capped crawl visits is not deterministic.
+        assert_eq!(resync.pages_added + resync.pages_unchanged, 2);
+        assert_eq!(resync.pages_stale, 0);
 
-        // 3. When a capped crawl (max_pages=2) visits a different 2-page subset on recrawl,
-        // previously stored pages that were not revisited due to the cap must NOT be marked stale.
+        // 3. Pages a capped crawl (max_pages=2) does not revisit must NOT be marked stale.
         let conn2 = open_rw_db(&cfg2.db_path()).expect("open_rw_db cfg2");
         conn2
             .execute(
                 "INSERT INTO pages (source_id, uri, title, content_md, content_hash, word_count, status)
-                 VALUES (?1, ?2, 'Page 2', '# Page 2\n\nSecond page.\n', 'hash-p2', 4, 'active')",
-                rusqlite::params![source.id, format!("http://{addr}/docs/p2")],
+                 VALUES (?1, ?2, 'Archived', '# Archived\n\nOld page.\n', 'hash-old', 3, 'active')",
+                rusqlite::params![source.id, format!("http://{addr}/docs/archived")],
             )
             .expect("insert extra active page outside cap");
         drop(conn2);
 
-        let recapped = crate::ingest::sync_sources(&cfg2, Some(&source.name), false, false)
+        let recapped = lifecycle2
+            .sync(&source.name, false)
+            .await
             .expect("recrawl capped source");
         server_handle.abort();
         assert_eq!(
-            recapped[0].pages_stale, 0,
+            recapped.pages_stale, 0,
             "capped crawl must not mark unvisited pages beyond max_pages as stale"
         );
     }

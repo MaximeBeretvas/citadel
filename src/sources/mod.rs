@@ -1,0 +1,561 @@
+//! Source lifecycle: everything that changes a Source (add, update, remove, sync).
+//!
+//! Every entry point (CLI, MCP, UI, daemon) crosses [`SourceLifecycle`]. The local
+//! folder walk and all SQLite work run on Tokio's blocking pool, so the futures
+//! returned here never block a runtime worker and are `Send`.
+
+use std::path::Path;
+
+use rusqlite::{params, Connection, OptionalExtension};
+use serde::{Deserialize, Serialize};
+use url::Url;
+
+use crate::config::VaultConfig;
+use crate::db::open_rw_db;
+use crate::error::{Result, VaultError};
+use crate::ingest::{
+    canonicalize_local_dir, load_all_sources, load_source_by_id, load_source_by_name, local,
+    sync_local_source, sync_web_source, SourceKind, SourceRecord, SyncSummary, DEFAULT_MAX_DEPTH,
+    DEFAULT_MAX_PAGES,
+};
+
+const DEFAULT_REFRESH_INTERVAL_SECS: i64 = 86_400;
+const MAX_ALLOWED_PAGES: u32 = 5_000;
+const MAX_ALLOWED_DEPTH: u32 = 20;
+
+/// The one interface for changing Sources.
+#[derive(Debug, Clone)]
+pub struct SourceLifecycle {
+    config: VaultConfig,
+}
+
+/// A newly registered Source and, when synced immediately, its first Sync summary.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Added {
+    pub source: SourceRecord,
+    pub summary: Option<SyncSummary>,
+}
+
+impl SourceLifecycle {
+    pub fn new(config: VaultConfig) -> Self {
+        Self { config }
+    }
+
+    /// Register a new Source and optionally run its first Sync.
+    pub async fn add(&self, params: AddSourceParams, sync_now: bool) -> Result<Added> {
+        let config = self.config.clone();
+        let source = blocking(move || register_source_row(&config, params)).await?;
+        if !sync_now {
+            return Ok(Added {
+                source,
+                summary: None,
+            });
+        }
+
+        let summary = self.sync_record(&source, false).await?;
+        let config = self.config.clone();
+        let id = source.id;
+        let source = blocking(move || {
+            let conn = open_rw_db(&config.db_path())?;
+            load_source_by_id(&conn, id)
+        })
+        .await?;
+        Ok(Added {
+            source,
+            summary: Some(summary),
+        })
+    }
+
+    /// Update mutable configuration fields for an existing Source.
+    pub fn update(&self, name: &str, params: UpdateSourceParams) -> Result<SourceRecord> {
+        update_source(&self.config, name, params)
+    }
+
+    /// Remove a Source by name, cascading its stored Pages.
+    pub async fn remove(&self, name: &str) -> Result<RemovedSource> {
+        let config = self.config.clone();
+        let name = name.to_string();
+        blocking(move || remove_source(&config, &name)).await
+    }
+
+    /// Sync one Source by name.
+    pub async fn sync(&self, name: &str, prune: bool) -> Result<SyncSummary> {
+        let config = self.config.clone();
+        let name = name.to_string();
+        let source = blocking(move || {
+            if !config.db_path().exists() {
+                return Err(VaultError::NotFound(format!("source '{name}' not found")));
+            }
+            let conn = open_rw_db(&config.db_path())?;
+            load_source_by_name(&conn, &name)
+        })
+        .await?;
+        self.sync_record(&source, prune).await
+    }
+
+    /// Sync every registered Source in name order, stopping at the first failure.
+    pub async fn sync_all(&self, prune: bool) -> Result<Vec<SyncSummary>> {
+        let config = self.config.clone();
+        let sources = blocking(move || {
+            if !config.db_path().exists() {
+                return Ok(Vec::new());
+            }
+            let conn = open_rw_db(&config.db_path())?;
+            load_all_sources(&conn)
+        })
+        .await?;
+
+        let mut summaries = Vec::with_capacity(sources.len());
+        for source in &sources {
+            summaries.push(self.sync_record(source, prune).await?);
+        }
+        Ok(summaries)
+    }
+
+    async fn sync_record(&self, source: &SourceRecord, prune: bool) -> Result<SyncSummary> {
+        match source.kind {
+            SourceKind::Local => {
+                let config = self.config.clone();
+                let src = source.clone();
+                blocking(move || {
+                    let mut conn = open_rw_db(&config.db_path())?;
+                    sync_local_source(
+                        &mut conn,
+                        src.id,
+                        &src.name,
+                        Path::new(&src.origin),
+                        &src.include_patterns,
+                        &src.exclude_patterns,
+                        prune,
+                    )
+                    .inspect_err(|err| record_pre_walk_error(&conn, src.id, &err.to_string()))
+                })
+                .await
+            }
+            SourceKind::Web => sync_web_source(&self.config.db_path(), source, prune).await,
+        }
+    }
+}
+
+/// Run blocking work (SQLite, folder walks) on Tokio's blocking pool.
+async fn blocking<T, F>(work: F) -> Result<T>
+where
+    F: FnOnce() -> Result<T> + Send + 'static,
+    T: Send + 'static,
+{
+    tokio::task::spawn_blocking(work)
+        .await
+        .map_err(|err| VaultError::Other(format!("blocking task failed: {err}")))?
+}
+
+/// Parameters for registering a new source.
+#[derive(Debug, Clone, Default)]
+pub struct AddSourceParams {
+    pub origin: String,
+    pub name: Option<String>,
+    pub tags: Vec<String>,
+    pub refresh_interval_secs: Option<i64>,
+    pub max_pages: Option<u32>,
+    pub max_depth: Option<u32>,
+    pub include_patterns: Vec<String>,
+    pub exclude_patterns: Vec<String>,
+    pub render_js: bool,
+}
+
+/// Partial update parameters for an existing source.
+#[derive(Debug, Clone, Default)]
+pub struct UpdateSourceParams {
+    pub tags: Option<Vec<String>>,
+    pub refresh_interval_secs: Option<i64>,
+    pub max_pages: Option<u32>,
+    pub max_depth: Option<u32>,
+    pub include_patterns: Option<Vec<String>>,
+    pub exclude_patterns: Option<Vec<String>>,
+    pub render_js: Option<bool>,
+}
+
+/// Metadata returned when removing a source.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RemovedSource {
+    pub id: i64,
+    pub name: String,
+    pub pages_deleted: usize,
+}
+
+fn register_source_row(config: &VaultConfig, params: AddSourceParams) -> Result<SourceRecord> {
+    let (kind, normalized_origin) = classify_origin(&params.origin)?;
+    let refresh_interval_secs = params
+        .refresh_interval_secs
+        .unwrap_or(DEFAULT_REFRESH_INTERVAL_SECS);
+    let max_pages = params.max_pages.unwrap_or(DEFAULT_MAX_PAGES);
+    let max_depth = params.max_depth.unwrap_or(DEFAULT_MAX_DEPTH);
+
+    validate_source_limits(refresh_interval_secs, max_pages, max_depth)?;
+    local::validate_patterns(&params.include_patterns)?;
+    local::validate_patterns(&params.exclude_patterns)?;
+
+    let tags = normalize_string_list(params.tags);
+    let includes = normalize_string_list(params.include_patterns);
+    let excludes = normalize_string_list(params.exclude_patterns);
+
+    let conn = open_rw_db(&config.db_path())?;
+
+    if let Some(existing_name) = conn
+        .query_row(
+            "SELECT name FROM sources WHERE origin = ?1",
+            [&normalized_origin],
+            |r| r.get::<_, String>(0),
+        )
+        .optional()?
+    {
+        return Err(VaultError::Validation(format!(
+            "origin '{normalized_origin}' is already registered as source '{existing_name}'"
+        )));
+    }
+
+    let slug = resolve_unique_slug(&conn, kind, &normalized_origin, params.name.as_deref())?;
+    let tags_json = serialize_json_list(&tags)?;
+    let includes_json = serialize_json_list(&includes)?;
+    let excludes_json = serialize_json_list(&excludes)?;
+
+    conn.execute(
+        "INSERT INTO sources (
+             name, kind, origin, tags, include_patterns, exclude_patterns,
+             max_pages, max_depth, render_js, refresh_interval_secs
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+        params![
+            slug,
+            kind.as_str(),
+            normalized_origin,
+            tags_json,
+            includes_json,
+            excludes_json,
+            i64::from(max_pages),
+            i64::from(max_depth),
+            i64::from(params.render_js),
+            refresh_interval_secs,
+        ],
+    )?;
+
+    let source_id = conn.last_insert_rowid();
+    load_source_by_id(&conn, source_id)
+}
+
+fn record_pre_walk_error(conn: &Connection, source_id: i64, message: &str) {
+    let has_running: bool = conn
+        .query_row(
+            "SELECT COUNT(*) FROM sync_runs WHERE source_id = ?1 AND status = 'running'",
+            [source_id],
+            |r| r.get::<_, i64>(0),
+        )
+        .map(|count| count > 0)
+        .unwrap_or(false);
+
+    if !has_running {
+        let _ = conn.execute(
+            "INSERT INTO sync_runs (source_id, started_at, finished_at, status, error_message)
+             VALUES (?1, strftime('%Y-%m-%dT%H:%M:%SZ', 'now'), strftime('%Y-%m-%dT%H:%M:%SZ', 'now'), 'error', ?2)",
+            params![source_id, message],
+        );
+    }
+    let _ = conn.execute(
+        "UPDATE sources SET status = 'error', last_error = ?2 WHERE id = ?1",
+        params![source_id, message],
+    );
+}
+
+fn classify_origin(raw_origin: &str) -> Result<(SourceKind, String)> {
+    let trimmed = raw_origin.trim();
+    if trimmed.is_empty() {
+        return Err(VaultError::Validation(
+            "origin must not be empty; pass an http(s):// URL or local directory path".into(),
+        ));
+    }
+
+    if trimmed.contains("://") {
+        let parsed = Url::parse(trimmed).map_err(|err| {
+            VaultError::Validation(format!("invalid origin URL '{trimmed}': {err}"))
+        })?;
+
+        if !matches!(parsed.scheme(), "http" | "https") || parsed.host_str().is_none() {
+            return Err(VaultError::Validation(format!(
+                "origin URL '{trimmed}' must use http:// or https:// with a valid host"
+            )));
+        }
+
+        if !parsed.username().is_empty() || parsed.password().is_some() {
+            return Err(VaultError::Validation(
+                "origin URL must not contain embedded user credentials".into(),
+            ));
+        }
+
+        return Ok((SourceKind::Web, parsed.into()));
+    }
+
+    let canon = canonicalize_local_dir(Path::new(trimmed))?;
+    let canon_str = canon.to_str().ok_or_else(|| {
+        VaultError::Validation(format!(
+            "local origin directory '{}' contains non-UTF-8 characters",
+            canon.display()
+        ))
+    })?;
+    Ok((SourceKind::Local, canon_str.to_string()))
+}
+
+fn validate_source_limits(
+    refresh_interval_secs: i64,
+    max_pages: u32,
+    max_depth: u32,
+) -> Result<()> {
+    if refresh_interval_secs < 0 {
+        return Err(VaultError::Validation(
+            "refresh_interval_secs must be >= 0".into(),
+        ));
+    }
+    if !(1..=MAX_ALLOWED_PAGES).contains(&max_pages) {
+        return Err(VaultError::Validation(format!(
+            "max_pages must be between 1 and {MAX_ALLOWED_PAGES}"
+        )));
+    }
+    if !(1..=MAX_ALLOWED_DEPTH).contains(&max_depth) {
+        return Err(VaultError::Validation(format!(
+            "max_depth must be between 1 and {MAX_ALLOWED_DEPTH}"
+        )));
+    }
+    Ok(())
+}
+
+fn validate_explicit_slug(raw: &str) -> Result<String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Err(VaultError::Validation(
+            "source name must not be empty".into(),
+        ));
+    }
+    if trimmed.starts_with('.') {
+        return Err(VaultError::Validation(
+            "source name must not start with '.'".into(),
+        ));
+    }
+    let valid_chars = trimmed
+        .chars()
+        .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.'));
+    let has_alnum = trimmed.chars().any(|ch| ch.is_ascii_alphanumeric());
+    if !valid_chars || !has_alnum {
+        return Err(VaultError::Validation(format!(
+            "invalid source name '{trimmed}'; use ASCII letters, digits, '-', '_', or '.'"
+        )));
+    }
+    Ok(trimmed.to_string())
+}
+
+fn slugify_text(raw: &str) -> String {
+    let mut slug = String::with_capacity(raw.len());
+    let mut prev_dash = false;
+    for ch in raw.chars() {
+        if ch.is_ascii_alphanumeric() {
+            slug.push(ch.to_ascii_lowercase());
+            prev_dash = false;
+        } else if !prev_dash && !slug.is_empty() {
+            slug.push('-');
+            prev_dash = true;
+        }
+    }
+    slug.trim_matches('-').to_string()
+}
+
+fn derive_slug(kind: SourceKind, origin: &str) -> String {
+    let derived = match kind {
+        SourceKind::Local => {
+            let folder_name = Path::new(origin)
+                .file_name()
+                .map(|s| s.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            slugify_text(&folder_name)
+        }
+        SourceKind::Web => match Url::parse(origin) {
+            Ok(url) => {
+                let mut parts: Vec<String> = Vec::new();
+                if let Some(host) = url.host_str() {
+                    parts.push(host.to_string());
+                }
+                if let Some(segments) = url.path_segments() {
+                    for seg in segments.filter(|s| !s.is_empty()).take(2) {
+                        parts.push(seg.to_string());
+                    }
+                }
+                slugify_text(&parts.join("-"))
+            }
+            Err(_) => String::new(),
+        },
+    };
+
+    if derived.is_empty() {
+        match kind {
+            SourceKind::Local => "local-source".to_string(),
+            SourceKind::Web => "web-source".to_string(),
+        }
+    } else {
+        derived
+    }
+}
+
+fn resolve_unique_slug(
+    conn: &Connection,
+    kind: SourceKind,
+    origin: &str,
+    explicit_name: Option<&str>,
+) -> Result<String> {
+    if let Some(raw_name) = explicit_name {
+        let slug = validate_explicit_slug(raw_name)?;
+        let exists: bool = conn.query_row(
+            "SELECT COUNT(*) > 0 FROM sources WHERE name = ?1",
+            [&slug],
+            |r| r.get(0),
+        )?;
+        if exists {
+            return Err(VaultError::Validation(format!(
+                "source name '{slug}' already exists"
+            )));
+        }
+        return Ok(slug);
+    }
+
+    let base = derive_slug(kind, origin);
+    let mut candidate = base.clone();
+    let mut suffix = 2usize;
+
+    loop {
+        let exists: bool = conn.query_row(
+            "SELECT COUNT(*) > 0 FROM sources WHERE name = ?1",
+            [&candidate],
+            |r| r.get(0),
+        )?;
+        if !exists {
+            return Ok(candidate);
+        }
+        candidate = format!("{base}-{suffix}");
+        suffix += 1;
+    }
+}
+
+fn normalize_string_list(items: Vec<String>) -> Vec<String> {
+    let mut out = Vec::new();
+    for item in items {
+        let trimmed = item.trim();
+        if !trimmed.is_empty() && !out.iter().any(|existing| existing == trimmed) {
+            out.push(trimmed.to_string());
+        }
+    }
+    out
+}
+
+fn serialize_json_list(items: &[String]) -> Result<String> {
+    serde_json::to_string(items)
+        .map_err(|err| VaultError::Other(format!("failed to serialize list: {err}")))
+}
+
+/// Update mutable configuration fields for an existing source.
+fn update_source(
+    config: &VaultConfig,
+    name: &str,
+    params: UpdateSourceParams,
+) -> Result<SourceRecord> {
+    if !config.db_path().exists() {
+        return Err(VaultError::NotFound(format!("source '{name}' not found")));
+    }
+
+    let conn = open_rw_db(&config.db_path())?;
+    let existing = load_source_by_name(&conn, name)?;
+
+    let tags = params
+        .tags
+        .map(normalize_string_list)
+        .unwrap_or(existing.tags);
+    let includes = match params.include_patterns {
+        Some(list) => {
+            local::validate_patterns(&list)?;
+            normalize_string_list(list)
+        }
+        None => existing.include_patterns,
+    };
+    let excludes = match params.exclude_patterns {
+        Some(list) => {
+            local::validate_patterns(&list)?;
+            normalize_string_list(list)
+        }
+        None => existing.exclude_patterns,
+    };
+
+    let refresh_interval_secs = params
+        .refresh_interval_secs
+        .unwrap_or(existing.refresh_interval_secs);
+    let max_pages = params.max_pages.unwrap_or(existing.max_pages);
+    let max_depth = params.max_depth.unwrap_or(existing.max_depth);
+    let render_js = params.render_js.unwrap_or(existing.render_js);
+
+    validate_source_limits(refresh_interval_secs, max_pages, max_depth)?;
+
+    let tags_json = serialize_json_list(&tags)?;
+    let includes_json = serialize_json_list(&includes)?;
+    let excludes_json = serialize_json_list(&excludes)?;
+
+    conn.execute(
+        "UPDATE sources
+         SET tags = ?2,
+             include_patterns = ?3,
+             exclude_patterns = ?4,
+             max_pages = ?5,
+             max_depth = ?6,
+             render_js = ?7,
+             refresh_interval_secs = ?8
+         WHERE id = ?1",
+        params![
+            existing.id,
+            tags_json,
+            includes_json,
+            excludes_json,
+            i64::from(max_pages),
+            i64::from(max_depth),
+            i64::from(render_js),
+            refresh_interval_secs,
+        ],
+    )?;
+
+    load_source_by_id(&conn, existing.id)
+}
+
+/// Remove a source by slug name, cascading stored pages and returning deleted count.
+fn remove_source(config: &VaultConfig, name: &str) -> Result<RemovedSource> {
+    if !config.db_path().exists() {
+        return Err(VaultError::NotFound(format!("source '{name}' not found")));
+    }
+
+    let mut conn = open_rw_db(&config.db_path())?;
+    let tx = conn.transaction()?;
+
+    let source_id: i64 = tx
+        .query_row("SELECT id FROM sources WHERE name = ?1", [name], |r| {
+            r.get(0)
+        })
+        .optional()?
+        .ok_or_else(|| VaultError::NotFound(format!("source '{name}' not found")))?;
+
+    let pages_count: i64 = tx.query_row(
+        "SELECT COUNT(*) FROM pages WHERE source_id = ?1",
+        [source_id],
+        |r| r.get(0),
+    )?;
+
+    tx.execute("DELETE FROM sources WHERE id = ?1", [source_id])?;
+    tx.commit()?;
+
+    Ok(RemovedSource {
+        id: source_id,
+        name: name.to_string(),
+        pages_deleted: usize::try_from(pages_count).unwrap_or(0),
+    })
+}
+
+#[cfg(test)]
+mod tests;

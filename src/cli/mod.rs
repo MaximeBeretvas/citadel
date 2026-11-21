@@ -8,9 +8,8 @@ pub use crate::skill::SkillTarget;
 
 use crate::config::VaultConfig;
 use crate::db::{execute_readonly_query, QueryResult};
-use crate::ingest::{
-    self, parse_duration_secs, AddSourceParams, SourceDetail, SourceSummary, SyncSummary,
-};
+use crate::ingest::{self, parse_duration_secs, SourceDetail, SourceSummary, SyncSummary};
+use crate::sources::{AddSourceParams, SourceLifecycle};
 
 /// Local knowledge vault & MCP server for documentation sites and Markdown folders.
 #[derive(Debug, Parser)]
@@ -201,6 +200,14 @@ pub enum SkillCommands {
     },
 }
 
+/// Run a Source lifecycle future to completion on a fresh multi-threaded runtime.
+fn block_on<T>(fut: impl std::future::Future<Output = T>) -> anyhow::Result<T> {
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?;
+    Ok(rt.block_on(fut))
+}
+
 /// Parse CLI arguments from the process environment and execute.
 pub fn run_from_args() -> anyhow::Result<()> {
     let cli = Cli::parse();
@@ -243,7 +250,9 @@ pub fn run_cli_with_writer<W: Write>(cli: Cli, out: &mut W) -> anyhow::Result<()
                 exclude_patterns: exclude,
                 render_js,
             };
-            let (source, summary) = ingest::add_source(&config, params, !no_sync)?;
+            let lifecycle = SourceLifecycle::new(config);
+            let added = block_on(lifecycle.add(params, !no_sync))??;
+            let (source, summary) = (added.source, added.summary);
             writeln!(
                 out,
                 "Added {} source '{}' ({})",
@@ -272,7 +281,15 @@ pub fn run_cli_with_writer<W: Write>(cli: Cli, out: &mut W) -> anyhow::Result<()
             Ok(())
         }
         Commands::Sync { name, all, prune } => {
-            let summaries = ingest::sync_sources(&config, name.as_deref(), all, prune)?;
+            let lifecycle = SourceLifecycle::new(config);
+            let summaries = match (name, all) {
+                (Some(_), true) => {
+                    anyhow::bail!("cannot specify both a source <name> and --all")
+                }
+                (None, false) => anyhow::bail!("specify a source <name> or pass --all"),
+                (Some(name), false) => vec![block_on(lifecycle.sync(&name, prune))??],
+                (None, true) => block_on(lifecycle.sync_all(prune))??,
+            };
             if summaries.is_empty() {
                 writeln!(out, "No sources configured.")?;
             } else {
@@ -302,7 +319,7 @@ pub fn run_cli_with_writer<W: Write>(cli: Cli, out: &mut W) -> anyhow::Result<()
                 }
             }
 
-            let removed = ingest::remove_source(&config, &name)?;
+            let removed = block_on(SourceLifecycle::new(config).remove(&name))??;
             writeln!(
                 out,
                 "Removed source '{}' ({} pages deleted).",

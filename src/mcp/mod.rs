@@ -10,7 +10,7 @@ use serde_json::{json, Value};
 use crate::config::VaultConfig;
 use crate::db::{execute_readonly_query, open_rw_db};
 use crate::error::{Result, VaultError};
-use crate::ingest::{self, AddSourceParams, UpdateSourceParams};
+use crate::sources::{AddSourceParams, SourceLifecycle, UpdateSourceParams};
 
 const DEFAULT_PROTOCOL_VERSION: &str = "2024-11-05";
 const SUPPORTED_PROTOCOL_VERSIONS: &[&str] = &["2025-03-26", "2024-11-05"];
@@ -51,7 +51,7 @@ struct ManageArgs {
 ///
 /// Returns `None` for notifications (missing `"id"` or `notifications/*` methods),
 /// so both `stdio` and Streamable HTTP transports can share identical dispatch logic.
-pub fn handle_jsonrpc_value(config: &VaultConfig, request: Value) -> Option<Value> {
+pub async fn handle_jsonrpc_value(config: &VaultConfig, request: Value) -> Option<Value> {
     let Some(obj) = request.as_object() else {
         return Some(jsonrpc_error(
             Value::Null,
@@ -108,7 +108,7 @@ pub fn handle_jsonrpc_value(config: &VaultConfig, request: Value) -> Option<Valu
         "initialize" => handle_initialize(req_id, &params),
         "ping" => jsonrpc_result(req_id, json!({})),
         "tools/list" => jsonrpc_result(req_id, prompt::tools_list_json()),
-        "tools/call" => handle_tools_call(config, req_id, &params),
+        "tools/call" => handle_tools_call(config, req_id, &params).await,
         other => jsonrpc_error(req_id, -32601, &format!("Method not found: {other}")),
     };
 
@@ -118,7 +118,7 @@ pub fn handle_jsonrpc_value(config: &VaultConfig, request: Value) -> Option<Valu
 /// Dispatch a parsed JSON-RPC 2.0 payload (single object or batch array).
 ///
 /// Returns `None` when the payload consists solely of notifications.
-pub fn handle_jsonrpc_payload(config: &VaultConfig, payload: Value) -> Option<Value> {
+pub async fn handle_jsonrpc_payload(config: &VaultConfig, payload: Value) -> Option<Value> {
     match payload {
         Value::Array(items) => {
             if items.is_empty() {
@@ -128,17 +128,19 @@ pub fn handle_jsonrpc_payload(config: &VaultConfig, payload: Value) -> Option<Va
                     "Invalid Request: empty JSON-RPC batch",
                 ));
             }
-            let responses: Vec<Value> = items
-                .into_iter()
-                .filter_map(|item| handle_jsonrpc_value(config, item))
-                .collect();
+            let mut responses = Vec::with_capacity(items.len());
+            for item in items {
+                if let Some(resp) = handle_jsonrpc_value(config, item).await {
+                    responses.push(resp);
+                }
+            }
             if responses.is_empty() {
                 None
             } else {
                 Some(Value::Array(responses))
             }
         }
-        single => handle_jsonrpc_value(config, single),
+        single => handle_jsonrpc_value(config, single).await,
     }
 }
 
@@ -150,6 +152,9 @@ pub fn run_stdio_with_io<R: BufRead, W: Write>(
 ) -> Result<()> {
     ensure_db_initialized(config)?;
     tracing::debug!(db_path = %config.db_path().display(), "MCP stdio server ready");
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?;
 
     let mut line = String::new();
     loop {
@@ -166,7 +171,7 @@ pub fn run_stdio_with_io<R: BufRead, W: Write>(
 
         match serde_json::from_str::<Value>(trimmed) {
             Ok(payload) => {
-                if let Some(resp) = handle_jsonrpc_payload(config, payload) {
+                if let Some(resp) = rt.block_on(handle_jsonrpc_payload(config, payload)) {
                     write_json_frame(&mut writer, &resp)?;
                 }
             }
@@ -224,7 +229,7 @@ fn handle_initialize(req_id: Value, params: &Value) -> Value {
     )
 }
 
-fn handle_tools_call(config: &VaultConfig, req_id: Value, params: &Value) -> Value {
+async fn handle_tools_call(config: &VaultConfig, req_id: Value, params: &Value) -> Value {
     let Some(tool_name) = params.get("name").and_then(Value::as_str) else {
         return jsonrpc_error(req_id, -32602, "Invalid params: missing tool 'name'");
     };
@@ -245,14 +250,14 @@ fn handle_tools_call(config: &VaultConfig, req_id: Value, params: &Value) -> Val
 
     match tool_name {
         "query" => {
-            let outcome = match call_query_tool(config, arguments) {
+            let outcome = match call_query_tool(config, arguments).await {
                 Ok(payload) => tool_ok_json(&payload),
                 Err(msg) => tool_error(&msg),
             };
             jsonrpc_result(req_id, outcome)
         }
         "manage" => {
-            let outcome = match call_manage_tool(config, arguments) {
+            let outcome = match call_manage_tool(config, arguments).await {
                 Ok(payload) => tool_ok_json(&payload),
                 Err(msg) => tool_error(&msg),
             };
@@ -266,34 +271,47 @@ fn handle_tools_call(config: &VaultConfig, req_id: Value, params: &Value) -> Val
     }
 }
 
-fn call_query_tool(config: &VaultConfig, arguments: Value) -> std::result::Result<Value, String> {
+async fn call_query_tool(
+    config: &VaultConfig,
+    arguments: Value,
+) -> std::result::Result<Value, String> {
     let args: QueryArgs = serde_json::from_value(arguments)
         .map_err(|err| format!("invalid arguments for 'query': {err}"))?;
 
-    ensure_db_initialized(config).map_err(|err| err.to_string())?;
-
-    let result = execute_readonly_query(&config.db_path(), &args.sql, args.limit)
-        .map_err(|err| err.to_string())?;
+    let config = config.clone();
+    let result = tokio::task::spawn_blocking(move || {
+        ensure_db_initialized(&config)?;
+        execute_readonly_query(&config.db_path(), &args.sql, args.limit)
+    })
+    .await
+    .map_err(|err| format!("query task failed: {err}"))?
+    .map_err(|err| err.to_string())?;
 
     serde_json::to_value(result).map_err(|err| format!("failed to serialize query result: {err}"))
 }
 
-fn call_manage_tool(config: &VaultConfig, arguments: Value) -> std::result::Result<Value, String> {
+async fn call_manage_tool(
+    config: &VaultConfig,
+    arguments: Value,
+) -> std::result::Result<Value, String> {
     let args: ManageArgs = serde_json::from_value(arguments)
         .map_err(|err| format!("invalid arguments for 'manage': {err}"))?;
 
     match args.action.trim() {
-        "add" => call_manage_add(config, args),
-        "sync" => call_manage_sync(config, args),
-        "update" => call_manage_update(config, args),
-        "remove" => call_manage_remove(config, args),
+        "add" => call_manage_add(config, args).await,
+        "sync" => call_manage_sync(config, args).await,
+        "update" => call_manage_update(config, args).await,
+        "remove" => call_manage_remove(config, args).await,
         other => Err(format!(
             "unsupported manage action '{other}'; expected one of: add, sync, update, remove"
         )),
     }
 }
 
-fn call_manage_add(config: &VaultConfig, args: ManageArgs) -> std::result::Result<Value, String> {
+async fn call_manage_add(
+    config: &VaultConfig,
+    args: ManageArgs,
+) -> std::result::Result<Value, String> {
     let raw_origin = args
         .origin
         .as_deref()
@@ -331,19 +349,25 @@ fn call_manage_add(config: &VaultConfig, args: ManageArgs) -> std::result::Resul
         render_js: args.render_js.unwrap_or(false),
     };
 
-    let (source, summary) = ingest::add_source(config, params, sync_now).map_err(|err| {
-        let msg = err.to_string();
-        msg.replace("pass --no-sync", "pass sync_now: false")
-    })?;
+    let added = SourceLifecycle::new(config.clone())
+        .add(params, sync_now)
+        .await
+        .map_err(|err| {
+            let msg = err.to_string();
+            msg.replace("pass --no-sync", "pass sync_now: false")
+        })?;
 
     Ok(json!({
         "action": "add",
-        "source": source,
-        "sync_summary": summary,
+        "source": added.source,
+        "sync_summary": added.summary,
     }))
 }
 
-fn call_manage_sync(config: &VaultConfig, args: ManageArgs) -> std::result::Result<Value, String> {
+async fn call_manage_sync(
+    config: &VaultConfig,
+    args: ManageArgs,
+) -> std::result::Result<Value, String> {
     let target_name = match args.name.as_deref() {
         Some(raw) => {
             let trimmed = raw.trim();
@@ -355,9 +379,15 @@ fn call_manage_sync(config: &VaultConfig, args: ManageArgs) -> std::result::Resu
         None => None,
     };
 
-    let all = target_name.is_none();
-    let summaries =
-        ingest::sync_sources(config, target_name, all, false).map_err(|err| err.to_string())?;
+    let lifecycle = SourceLifecycle::new(config.clone());
+    let summaries = match target_name {
+        Some(name) => lifecycle
+            .sync(name, false)
+            .await
+            .map(|summary| vec![summary]),
+        None => lifecycle.sync_all(false).await,
+    }
+    .map_err(|err| err.to_string())?;
 
     Ok(json!({
         "action": "sync",
@@ -365,7 +395,7 @@ fn call_manage_sync(config: &VaultConfig, args: ManageArgs) -> std::result::Resu
     }))
 }
 
-fn call_manage_update(
+async fn call_manage_update(
     config: &VaultConfig,
     args: ManageArgs,
 ) -> std::result::Result<Value, String> {
@@ -380,7 +410,12 @@ fn call_manage_update(
         render_js: args.render_js,
     };
 
-    let source = ingest::update_source(config, name, params).map_err(|err| err.to_string())?;
+    let lifecycle = SourceLifecycle::new(config.clone());
+    let name = name.to_string();
+    let source = tokio::task::spawn_blocking(move || lifecycle.update(&name, params))
+        .await
+        .map_err(|err| format!("update task failed: {err}"))?
+        .map_err(|err| err.to_string())?;
 
     Ok(json!({
         "action": "update",
@@ -388,12 +423,15 @@ fn call_manage_update(
     }))
 }
 
-fn call_manage_remove(
+async fn call_manage_remove(
     config: &VaultConfig,
     args: ManageArgs,
 ) -> std::result::Result<Value, String> {
     let name = require_non_empty_name(args.name.as_deref(), "remove")?;
-    let removed = ingest::remove_source(config, name).map_err(|err| err.to_string())?;
+    let removed = SourceLifecycle::new(config.clone())
+        .remove(name)
+        .await
+        .map_err(|err| err.to_string())?;
 
     Ok(json!({
         "action": "remove",
@@ -480,8 +518,8 @@ mod tests {
     use std::io::Cursor;
     use tempfile::tempdir;
 
-    #[test]
-    fn initialize_and_tools_list_exposes_exactly_two_tools() {
+    #[tokio::test]
+    async fn initialize_and_tools_list_exposes_exactly_two_tools() {
         let vault_dir = tempdir().expect("vault tempdir");
         let cfg = VaultConfig::new(vault_dir.path());
 
@@ -498,6 +536,7 @@ mod tests {
                 }
             }),
         )
+        .await
         .expect("initialize should emit response");
         assert_eq!(init_resp["jsonrpc"], "2.0");
         assert_eq!(init_resp["id"], 1);
@@ -511,7 +550,8 @@ mod tests {
                 "jsonrpc": "2.0",
                 "method": "notifications/initialized"
             }),
-        );
+        )
+        .await;
         assert!(notif_resp.is_none(), "notification must not emit response");
 
         let list_resp = handle_jsonrpc_value(
@@ -523,6 +563,7 @@ mod tests {
                 "params": {}
             }),
         )
+        .await
         .expect("tools/list should emit response");
 
         let tools = list_resp["result"]["tools"]
@@ -582,8 +623,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn query_tool_executes_fts5_and_blocks_writes() {
+    #[tokio::test]
+    async fn query_tool_executes_fts5_and_blocks_writes() {
         let vault_dir = tempdir().expect("vault tempdir");
         let docs_dir = tempdir().expect("docs tempdir");
         std::fs::write(
@@ -593,16 +634,17 @@ mod tests {
         .expect("write wal.md");
 
         let cfg = VaultConfig::new(vault_dir.path());
-        crate::ingest::add_source(
-            &cfg,
-            crate::ingest::AddSourceParams {
-                origin: docs_dir.path().to_string_lossy().into_owned(),
-                name: Some("sqlite-docs".to_string()),
-                ..Default::default()
-            },
-            true,
-        )
-        .expect("seed local source");
+        crate::sources::SourceLifecycle::new(cfg.clone())
+            .add(
+                crate::sources::AddSourceParams {
+                    origin: docs_dir.path().to_string_lossy().into_owned(),
+                    name: Some("sqlite-docs".to_string()),
+                    ..Default::default()
+                },
+                true,
+            )
+            .await
+            .expect("seed local source");
 
         let ok_resp = handle_jsonrpc_value(
             &cfg,
@@ -618,6 +660,7 @@ mod tests {
                 }
             }),
         )
+        .await
         .expect("query response");
 
         let result = &ok_resp["result"];
@@ -642,6 +685,7 @@ mod tests {
                     }
                 }),
             )
+            .await
             .expect("error response");
             assert_eq!(
                 err_resp["result"]["isError"], true,
@@ -650,8 +694,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn manage_tool_add_sync_update_remove_local_source() {
+    #[tokio::test]
+    async fn manage_tool_add_sync_update_remove_local_source() {
         let vault_dir = tempdir().expect("vault tempdir");
         let docs_dir = tempdir().expect("docs tempdir");
         std::fs::write(
@@ -681,6 +725,7 @@ mod tests {
                 }
             }),
         )
+        .await
         .expect("add response");
         assert_eq!(add_resp["result"]["isError"], false);
         let add_payload: Value =
@@ -704,6 +749,7 @@ mod tests {
                 }
             }),
         )
+        .await
         .expect("query response");
         assert_eq!(query_resp["result"]["isError"], false);
         let query_payload: Value =
@@ -729,6 +775,7 @@ mod tests {
                 }
             }),
         )
+        .await
         .expect("sync response");
         assert_eq!(sync_resp["result"]["isError"], false);
         let sync_payload: Value =
@@ -753,6 +800,7 @@ mod tests {
                 }
             }),
         )
+        .await
         .expect("update response");
         assert_eq!(update_resp["result"]["isError"], false);
         let update_payload: Value = serde_json::from_str(
@@ -782,6 +830,7 @@ mod tests {
                 }
             }),
         )
+        .await
         .expect("ssrf response");
         assert_eq!(ssrf_resp["result"]["isError"], true);
 
@@ -802,6 +851,7 @@ mod tests {
                 }
             }),
         )
+        .await
         .expect("web add response");
         assert_eq!(web_resp["result"]["isError"], false);
         let web_payload: Value =
@@ -827,6 +877,7 @@ mod tests {
                 }
             }),
         )
+        .await
         .expect("remove response");
         assert_eq!(rm_resp["result"]["isError"], false);
         let rm_payload: Value =

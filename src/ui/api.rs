@@ -9,9 +9,8 @@ use serde_json::json;
 use crate::db::open_rw_db;
 use crate::db::readonly::{execute_readonly_query, QueryResult};
 use crate::error::{Result, VaultError};
-use crate::ingest::{
-    self, AddSourceParams, RemovedSource, SourceRecord, SourceSummary, SyncSummary,
-};
+use crate::ingest::{self, SourceRecord, SourceSummary, SyncSummary};
+use crate::sources::{AddSourceParams, RemovedSource, SourceLifecycle};
 use crate::ui::UiState;
 
 /// HTTP error wrapper mapping [`VaultError`] variants to structured JSON responses.
@@ -194,11 +193,15 @@ pub async fn create_source(
         render_js: payload.render_js,
     };
 
-    let (source, summary) =
-        ingest::add_source_async(&state.config, params, payload.sync_now).await?;
+    let added = SourceLifecycle::new(state.config.clone())
+        .add(params, payload.sync_now)
+        .await?;
     Ok((
         StatusCode::CREATED,
-        Json(CreateSourceResponse { source, summary }),
+        Json(CreateSourceResponse {
+            source: added.source,
+            summary: added.summary,
+        }),
     ))
 }
 
@@ -208,7 +211,9 @@ pub async fn delete_source(
     Path(id_or_slug): Path<String>,
 ) -> ApiResult<(StatusCode, Json<RemovedSource>)> {
     let (_source_id, source_name) = resolve_source_in_vault(&state.config, &id_or_slug)?;
-    let removed = ingest::remove_source(&state.config, &source_name)?;
+    let removed = SourceLifecycle::new(state.config.clone())
+        .remove(&source_name)
+        .await?;
     Ok((StatusCode::OK, Json(removed)))
 }
 
@@ -220,13 +225,11 @@ pub async fn sync_source(
 ) -> ApiResult<(StatusCode, Json<SyncAcceptedResponse>)> {
     let (source_id, source_name) = resolve_source_in_vault(&state.config, &id_or_slug)?;
 
-    let config = state.config.clone();
+    let lifecycle = SourceLifecycle::new(state.config.clone());
     let name_for_task = source_name.clone();
     let prune = query.prune;
     tokio::spawn(async move {
-        if let Err(err) =
-            ingest::sync_sources_async(&config, Some(&name_for_task), false, prune).await
-        {
+        if let Err(err) = lifecycle.sync(&name_for_task, prune).await {
             tracing::error!(
                 source = %name_for_task,
                 error = %err,

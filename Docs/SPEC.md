@@ -94,8 +94,12 @@ src/
     mod.rs           # Connection pool/open helpers, WAL pragmas, migrations
     schema.sql       # Versioned SQLite DDL
     readonly.rs      # Read-only MCP query executor + authorizer + limits
+  sources/
+    mod.rs           # Source lifecycle: async-only `SourceLifecycle` (add, update, remove, sync,
+                     # sync_all); registration, slugging, origin classification, limits.
+                     # Every entry point (CLI, MCP, UI, daemon) goes through it.
   ingest/
-    mod.rs           # Source orchestration, sync_runs tracking
+    mod.rs           # Source/Page record types, row mappers, read views (list/show)
     web.rs           # spider + spider_transformations integration
     local.rs         # Local Markdown folder walker + frontmatter stripping
     normalize.rs     # Noise stripping, SHA-256 hashing, unified diff generation

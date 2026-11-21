@@ -26,18 +26,9 @@ async fn post_mcp(State(config): State<VaultConfig>, body: Bytes) -> Response {
         }
     };
 
-    match tokio::task::spawn_blocking(move || handle_jsonrpc_payload(&config, payload)).await {
-        Ok(Some(response)) => (StatusCode::OK, Json(response)).into_response(),
-        Ok(None) => StatusCode::ACCEPTED.into_response(),
-        Err(err) => {
-            tracing::error!(error = %err, "MCP dispatch task failed");
-            let err_frame = jsonrpc_error(
-                Value::Null,
-                -32603,
-                &format!("Internal server error: {err}"),
-            );
-            (StatusCode::INTERNAL_SERVER_ERROR, Json(err_frame)).into_response()
-        }
+    match handle_jsonrpc_payload(&config, payload).await {
+        Some(response) => (StatusCode::OK, Json(response)).into_response(),
+        None => StatusCode::ACCEPTED.into_response(),
     }
 }
 
