@@ -52,4 +52,4 @@ flowchart TD
 - [x] [10-embedded-web-ui-assets.md](./10-embedded-web-ui-assets.md) — Offline `rust-embed` HTML/CSS/JS (Sources, Browser, Diffs/Health, SQL Explorer)
 - [x] [11-daemon-scheduler-and-watcher.md](./11-daemon-scheduler-and-watcher.md) — PID lock, 60s scheduler, `notify` watcher, `launchd`/`systemd` service install
 - [x] [12-serve-and-mcp-http.md](./12-serve-and-mcp-http.md) — Unified `web-vault serve` (Daemon + UI + MCP Streamable HTTP `/mcp`)
-- [ ] [13-apple-container-packaging.md](./13-apple-container-packaging.md) — Multi-stage `Dockerfile`, `Makefile` for Apple `container` CLI, build verification
+- [x] [13-apple-container-packaging.md](./13-apple-container-packaging.md) — Multi-stage `Dockerfile`, `Makefile` for Apple `container` CLI, build verification
