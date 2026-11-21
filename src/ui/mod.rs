@@ -32,9 +32,19 @@ pub struct UiState {
 }
 
 /// Build the Axum router for the local Web UI REST API and embedded static assets.
-///
-/// Exported cleanly so Task 12 (`/mcp`) can compose it directly.
 pub fn build_router(config: VaultConfig) -> Router {
+    build_ui_routes(config).layer(middleware::from_fn(origin_host_guard))
+}
+
+/// Build the unified `web-vault serve` router combining the embedded Web UI (`/`),
+/// REST API (`/api/*`), and MCP Streamable HTTP endpoint (`/mcp`).
+pub fn build_serve_router(config: VaultConfig) -> Router {
+    build_ui_routes(config.clone())
+        .merge(crate::mcp::http::mcp_router(config))
+        .layer(middleware::from_fn(origin_host_guard))
+}
+
+fn build_ui_routes(config: VaultConfig) -> Router {
     let state = UiState { config };
 
     Router::new()
@@ -51,7 +61,6 @@ pub fn build_router(config: VaultConfig) -> Router {
         .route("/api/query", post(api::query))
         .route("/", get(serve_index))
         .route("/{*path}", get(serve_static_asset))
-        .layer(middleware::from_fn(origin_host_guard))
         .with_state(state)
 }
 
@@ -765,5 +774,103 @@ mod tests {
                 "expected 404 Not Found for `{uri}`"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn serve_router_mounts_ui_api_and_mcp_with_origin_guard() {
+        let vault_dir = tempdir().expect("vault tempdir");
+        let app = build_serve_router(VaultConfig::new(vault_dir.path()));
+
+        // GET / -> 200 HTML
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri("/")
+                    .body(Body::empty())
+                    .expect("GET /"),
+            )
+            .await
+            .expect("GET / resp");
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        // GET /api/health -> 200 OK
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri("/api/health")
+                    .body(Body::empty())
+                    .expect("GET /api/health"),
+            )
+            .await
+            .expect("GET /api/health resp");
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        // GET /mcp -> 200 JSON (overrides /{*path})
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri("/mcp")
+                    .body(Body::empty())
+                    .expect("GET /mcp"),
+            )
+            .await
+            .expect("GET /mcp resp");
+        assert_eq!(resp.status(), StatusCode::OK);
+        let info = read_json_body(resp).await;
+        assert_eq!(info["transport"], "streamable-http");
+
+        // POST /mcp with loopback Host -> 200 OK
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/mcp")
+                    .header(header::HOST, "127.0.0.1:4317")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        json!({
+                            "jsonrpc": "2.0",
+                            "id": 1,
+                            "method": "tools/list",
+                            "params": {}
+                        })
+                        .to_string(),
+                    ))
+                    .expect("POST /mcp"),
+            )
+            .await
+            .expect("POST /mcp resp");
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        // Cross-origin POST /mcp -> 403 Forbidden
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/mcp")
+                    .header(header::ORIGIN, "https://evil.example")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        json!({
+                            "jsonrpc": "2.0",
+                            "id": 2,
+                            "method": "tools/list",
+                            "params": {}
+                        })
+                        .to_string(),
+                    ))
+                    .expect("evil POST /mcp"),
+            )
+            .await
+            .expect("evil POST /mcp resp");
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
     }
 }

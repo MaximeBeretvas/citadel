@@ -275,7 +275,7 @@ pub async fn run_daemon_foreground(config: VaultConfig) -> Result<()> {
     Ok(())
 }
 
-async fn wait_for_shutdown_signal() {
+pub(crate) async fn wait_for_shutdown_signal() {
     #[cfg(unix)]
     {
         use tokio::signal::unix::{signal, SignalKind};

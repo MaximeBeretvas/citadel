@@ -5,6 +5,7 @@ pub mod db;
 pub mod error;
 pub mod ingest;
 pub mod mcp;
+pub mod serve;
 pub mod skill;
 pub mod ui;
 

@@ -1,3 +1,4 @@
+pub mod http;
 pub mod prompt;
 pub mod validate;
 
@@ -114,6 +115,33 @@ pub fn handle_jsonrpc_value(config: &VaultConfig, request: Value) -> Option<Valu
     Some(response)
 }
 
+/// Dispatch a parsed JSON-RPC 2.0 payload (single object or batch array).
+///
+/// Returns `None` when the payload consists solely of notifications.
+pub fn handle_jsonrpc_payload(config: &VaultConfig, payload: Value) -> Option<Value> {
+    match payload {
+        Value::Array(items) => {
+            if items.is_empty() {
+                return Some(jsonrpc_error(
+                    Value::Null,
+                    -32600,
+                    "Invalid Request: empty JSON-RPC batch",
+                ));
+            }
+            let responses: Vec<Value> = items
+                .into_iter()
+                .filter_map(|item| handle_jsonrpc_value(config, item))
+                .collect();
+            if responses.is_empty() {
+                None
+            } else {
+                Some(Value::Array(responses))
+            }
+        }
+        single => handle_jsonrpc_value(config, single),
+    }
+}
+
 /// Run the newline-delimited JSON-RPC 2.0 `stdio` loop over arbitrary `BufRead` / `Write` streams.
 pub fn run_stdio_with_io<R: BufRead, W: Write>(
     config: &VaultConfig,
@@ -137,23 +165,8 @@ pub fn run_stdio_with_io<R: BufRead, W: Write>(
         }
 
         match serde_json::from_str::<Value>(trimmed) {
-            Ok(Value::Array(items)) => {
-                if items.is_empty() {
-                    let err =
-                        jsonrpc_error(Value::Null, -32600, "Invalid Request: empty JSON-RPC batch");
-                    write_json_frame(&mut writer, &err)?;
-                    continue;
-                }
-                let responses: Vec<Value> = items
-                    .into_iter()
-                    .filter_map(|item| handle_jsonrpc_value(config, item))
-                    .collect();
-                if !responses.is_empty() {
-                    write_json_frame(&mut writer, &Value::Array(responses))?;
-                }
-            }
-            Ok(req) => {
-                if let Some(resp) = handle_jsonrpc_value(config, req) {
+            Ok(payload) => {
+                if let Some(resp) = handle_jsonrpc_payload(config, payload) {
                     write_json_frame(&mut writer, &resp)?;
                 }
             }
@@ -442,7 +455,7 @@ fn jsonrpc_result(id: Value, result: Value) -> Value {
     })
 }
 
-fn jsonrpc_error(id: Value, code: i64, message: &str) -> Value {
+pub(crate) fn jsonrpc_error(id: Value, code: i64, message: &str) -> Value {
     json!({
         "jsonrpc": "2.0",
         "id": id,

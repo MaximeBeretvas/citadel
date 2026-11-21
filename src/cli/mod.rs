@@ -122,8 +122,8 @@ pub enum Commands {
 
     /// Run the all-in-one server (daemon + Web UI + MCP Streamable HTTP on /mcp).
     Serve {
-        /// Socket address to bind.
-        #[arg(long, default_value = "0.0.0.0:4317")]
+        /// Socket address to bind (also respects WEB_VAULT_BIND).
+        #[arg(long, env = "WEB_VAULT_BIND", default_value = "0.0.0.0:4317")]
         bind: String,
     },
 
@@ -315,6 +315,13 @@ pub fn run_cli_with_writer<W: Write>(cli: Cli, out: &mut W) -> anyhow::Result<()
             write_query_result(out, &result, format)?;
             Ok(())
         }
+        Commands::Serve { bind } => {
+            let rt = tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .build()?;
+            rt.block_on(crate::serve::run_serve_until_signal(config, &bind))?;
+            Ok(())
+        }
         Commands::Mcp => {
             crate::mcp::run_stdio_with_io(&config, std::io::stdin().lock(), &mut *out)?;
             Ok(())
@@ -399,34 +406,6 @@ pub fn run_cli_with_writer<W: Write>(cli: Cli, out: &mut W) -> anyhow::Result<()
                 }
                 Ok(())
             }
-        },
-        other => {
-            let name = unimplemented_command_name(&other);
-            anyhow::bail!("subcommand `{name}` is not implemented yet");
-        }
-    }
-}
-
-fn unimplemented_command_name(command: &Commands) -> &'static str {
-    match command {
-        Commands::Add { .. } => "add",
-        Commands::List { .. } => "list",
-        Commands::Show { .. } => "show",
-        Commands::Sync { .. } => "sync",
-        Commands::Rm { .. } => "rm",
-        Commands::Query { .. } => "query",
-        Commands::Serve { .. } => "serve",
-        Commands::Mcp => "mcp",
-        Commands::Ui { .. } => "ui",
-        Commands::Daemon { command } => match command {
-            DaemonCommands::Start { .. } => "daemon start",
-            DaemonCommands::Stop => "daemon stop",
-            DaemonCommands::Status => "daemon status",
-            DaemonCommands::Install => "daemon install",
-            DaemonCommands::Uninstall => "daemon uninstall",
-        },
-        Commands::Skill { command } => match command {
-            SkillCommands::Install { .. } => "skill install",
         },
     }
 }
