@@ -1,0 +1,590 @@
+pub mod api;
+
+use std::net::SocketAddr;
+
+use axum::extract::Request;
+use axum::http::{header, HeaderMap, Method, StatusCode};
+use axum::middleware::{self, Next};
+use axum::response::{IntoResponse, Response};
+use axum::routing::{delete, get, post};
+use axum::{Json, Router};
+use serde_json::json;
+use tokio::net::TcpListener;
+use url::{Host, Url};
+
+use crate::config::VaultConfig;
+use crate::db::open_rw_db;
+use crate::error::{Result, VaultError};
+
+/// Default localhost port for `web-vault ui`.
+pub const DEFAULT_UI_PORT: u16 = 4317;
+
+/// Shared state passed to Axum UI handlers.
+#[derive(Debug, Clone)]
+pub struct UiState {
+    pub config: VaultConfig,
+}
+
+/// Build the Axum router for the local Web UI REST API.
+///
+/// Exported cleanly so Task 10 (embedded static assets) and Task 12 (`/mcp`) can compose it directly.
+pub fn build_router(config: VaultConfig) -> Router {
+    let state = UiState { config };
+
+    Router::new()
+        .route("/api/health", get(api::health))
+        .route(
+            "/api/sources",
+            get(api::list_sources).post(api::create_source),
+        )
+        .route("/api/sources/{id}", delete(api::delete_source))
+        .route("/api/sources/{id}/sync", post(api::sync_source))
+        .route("/api/sources/{id}/pages", get(api::list_source_pages))
+        .route("/api/pages/{id}", get(api::get_page))
+        .route("/api/pages/{id}/diff", get(api::get_page_diff))
+        .route("/api/query", post(api::query))
+        .layer(middleware::from_fn(origin_host_guard))
+        .with_state(state)
+}
+
+/// Bind and serve the local Web UI HTTP server strictly on `127.0.0.1`.
+pub async fn run_ui_server(config: VaultConfig, port: Option<u16>, no_open: bool) -> Result<()> {
+    // Ensure vault.db and schema exist on fresh vaults before serving requests.
+    let _conn = open_rw_db(&config.db_path())?;
+
+    let listener = bind_loopback_listener(port).await?;
+    let actual_port = listener.local_addr()?.port();
+    let url = format!("http://127.0.0.1:{actual_port}");
+
+    println!("web-vault UI listening on {url}");
+    tracing::info!(%url, "started local web UI server");
+
+    if !no_open {
+        if let Err(err) = open::that_detached(&url) {
+            tracing::warn!(%url, error = %err, "failed to open browser automatically");
+        }
+    }
+
+    axum::serve(listener, build_router(config))
+        .with_graceful_shutdown(shutdown_signal())
+        .await
+        .map_err(|err| VaultError::Other(format!("UI server error: {err}")))?;
+
+    Ok(())
+}
+
+async fn bind_loopback_listener(port: Option<u16>) -> Result<TcpListener> {
+    match port {
+        Some(explicit_port) => {
+            let addr = SocketAddr::from(([127, 0, 0, 1], explicit_port));
+            Ok(TcpListener::bind(addr).await?)
+        }
+        None => {
+            let default_addr = SocketAddr::from(([127, 0, 0, 1], DEFAULT_UI_PORT));
+            match TcpListener::bind(default_addr).await {
+                Ok(listener) => Ok(listener),
+                Err(err) if err.kind() == std::io::ErrorKind::AddrInUse => {
+                    tracing::warn!(
+                        port = DEFAULT_UI_PORT,
+                        "default UI port is in use; binding ephemeral loopback port"
+                    );
+                    let ephemeral = SocketAddr::from(([127, 0, 0, 1], 0));
+                    Ok(TcpListener::bind(ephemeral).await?)
+                }
+                Err(err) => Err(err.into()),
+            }
+        }
+    }
+}
+
+async fn shutdown_signal() {
+    if let Err(err) = tokio::signal::ctrl_c().await {
+        tracing::warn!(error = %err, "failed to listen for ctrl-c shutdown signal");
+    }
+}
+
+/// CSRF guard rejecting cross-origin or non-loopback `Origin`/`Host` headers on mutating requests.
+async fn origin_host_guard(request: Request, next: Next) -> Response {
+    if matches!(
+        *request.method(),
+        Method::POST | Method::DELETE | Method::PUT | Method::PATCH
+    ) {
+        if let Err(msg) = validate_mutating_headers(request.headers()) {
+            return (StatusCode::FORBIDDEN, Json(json!({ "error": msg }))).into_response();
+        }
+    }
+    next.run(request).await
+}
+
+fn validate_mutating_headers(headers: &HeaderMap) -> std::result::Result<(), &'static str> {
+    if let Some(origin_val) = headers.get(header::ORIGIN) {
+        let origin_str = origin_val
+            .to_str()
+            .map_err(|_| "invalid Origin header encoding")?;
+        let parsed = Url::parse(origin_str).map_err(|_| "invalid Origin header URL")?;
+        if !matches!(parsed.scheme(), "http" | "https") || !is_loopback_host(parsed.host()) {
+            return Err("cross-origin mutating requests are forbidden");
+        }
+    }
+
+    if let Some(host_val) = headers.get(header::HOST) {
+        let host_str = host_val
+            .to_str()
+            .map_err(|_| "invalid Host header encoding")?;
+        let parsed =
+            Url::parse(&format!("http://{host_str}")).map_err(|_| "invalid Host header value")?;
+        if parsed.path() != "/"
+            || parsed.query().is_some()
+            || parsed.fragment().is_some()
+            || !parsed.username().is_empty()
+            || parsed.password().is_some()
+            || !is_loopback_host(parsed.host())
+        {
+            return Err("non-loopback Host header is forbidden on mutating requests");
+        }
+    }
+
+    Ok(())
+}
+
+fn is_loopback_host(host: Option<Host<&str>>) -> bool {
+    match host {
+        Some(Host::Domain(domain)) => domain.eq_ignore_ascii_case("localhost"),
+        Some(Host::Ipv4(ip)) => ip.is_loopback(),
+        Some(Host::Ipv6(ip)) => ip.is_loopback(),
+        None => false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use axum::body::Body;
+    use axum::http::{header, Method, Request, StatusCode};
+    use http_body_util::BodyExt;
+    use serde_json::{json, Value};
+    use tempfile::tempdir;
+    use tower::ServiceExt;
+
+    use super::*;
+    use crate::db::open_rw_db;
+
+    async fn read_json_body(resp: axum::response::Response) -> Value {
+        let bytes = resp
+            .into_body()
+            .collect()
+            .await
+            .expect("collect response body")
+            .to_bytes();
+        serde_json::from_slice(&bytes).unwrap_or_else(|e| {
+            panic!(
+                "invalid JSON body ({e}): {}",
+                String::from_utf8_lossy(&bytes)
+            )
+        })
+    }
+
+    #[tokio::test]
+    async fn health_and_sources_crud_api() {
+        let vault_dir = tempdir().expect("vault tempdir");
+        let docs_dir = tempdir().expect("docs tempdir");
+
+        std::fs::write(
+            docs_dir.path().join("guide.md"),
+            "# Vault Guide\n\n## Intro\n\nWelcome to web-vault local search.\n\n## Details\n\nFTS5 indexes sections.\n",
+        )
+        .expect("write guide.md");
+
+        let config = VaultConfig::new(vault_dir.path());
+        let app = build_router(config.clone());
+
+        // 1. GET /api/health
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri("/api/health")
+                    .body(Body::empty())
+                    .expect("build health request"),
+            )
+            .await
+            .expect("health response");
+        assert_eq!(resp.status(), StatusCode::OK);
+        let health = read_json_body(resp).await;
+        assert_eq!(health["status"], "ok");
+        assert_eq!(health["version"], env!("CARGO_PKG_VERSION"));
+
+        // 2. POST /api/sources (local Markdown folder)
+        let create_body = json!({
+            "origin": docs_dir.path().to_string_lossy(),
+            "name": "local-guide",
+            "tags": ["docs", "local"]
+        });
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/api/sources")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(create_body.to_string()))
+                    .expect("build create source request"),
+            )
+            .await
+            .expect("create source response");
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        let created = read_json_body(resp).await;
+        let source_id = created["source"]["id"].as_i64().expect("source id");
+        assert_eq!(created["source"]["name"], "local-guide");
+        assert_eq!(created["summary"]["pages_added"], 1);
+
+        // 3. GET /api/sources
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri("/api/sources")
+                    .body(Body::empty())
+                    .expect("build list sources request"),
+            )
+            .await
+            .expect("list sources response");
+        assert_eq!(resp.status(), StatusCode::OK);
+        let sources = read_json_body(resp).await;
+        let sources_arr = sources.as_array().expect("sources array");
+        assert_eq!(sources_arr.len(), 1);
+        assert_eq!(sources_arr[0]["id"], source_id);
+        assert_eq!(sources_arr[0]["active_pages"], 1);
+
+        // 4. GET /api/sources/{id}/pages (with status and q filter)
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri(format!(
+                        "/api/sources/{source_id}/pages?status=active&q=FTS5"
+                    ))
+                    .body(Body::empty())
+                    .expect("build list pages request"),
+            )
+            .await
+            .expect("list pages response");
+        assert_eq!(resp.status(), StatusCode::OK);
+        let pages = read_json_body(resp).await;
+        let pages_arr = pages.as_array().expect("pages array");
+        assert_eq!(pages_arr.len(), 1);
+        let page_id = pages_arr[0]["id"].as_i64().expect("page id");
+        assert_eq!(pages_arr[0]["uri"], "guide.md");
+
+        // 5. GET /api/pages/{id}
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri(format!("/api/pages/{page_id}"))
+                    .body(Body::empty())
+                    .expect("build get page request"),
+            )
+            .await
+            .expect("get page response");
+        assert_eq!(resp.status(), StatusCode::OK);
+        let page_detail = read_json_body(resp).await;
+        assert_eq!(page_detail["id"], page_id);
+        assert_eq!(page_detail["uri"], "guide.md");
+        assert!(page_detail["content_md"]
+            .as_str()
+            .expect("content_md")
+            .contains("FTS5 indexes sections."));
+        let sections = page_detail["sections"].as_array().expect("sections array");
+        assert!(sections.len() >= 2);
+
+        // 6. GET /api/pages/{id}/diff (initially no revision)
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri(format!("/api/pages/{page_id}/diff"))
+                    .body(Body::empty())
+                    .expect("build get diff request"),
+            )
+            .await
+            .expect("get diff response");
+        assert_eq!(resp.status(), StatusCode::OK);
+        let diff_empty = read_json_body(resp).await;
+        assert_eq!(diff_empty["page_id"], page_id);
+        assert_eq!(diff_empty["has_revision"], false);
+        assert!(diff_empty["unified_diff"].is_null());
+
+        // Modify file and sync to produce a revision diff
+        std::fs::write(
+            docs_dir.path().join("guide.md"),
+            "# Vault Guide\n\n## Intro\n\nWelcome to web-vault local search.\n\n## Details\n\nFTS5 indexes sections and diffs.\n",
+        )
+        .expect("update guide.md");
+        crate::ingest::sync_sources_async(&config, Some("local-guide"), false, false)
+            .await
+            .expect("sync updated file");
+
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri(format!("/api/pages/{page_id}/diff"))
+                    .body(Body::empty())
+                    .expect("build get diff after edit request"),
+            )
+            .await
+            .expect("get diff after edit response");
+        assert_eq!(resp.status(), StatusCode::OK);
+        let diff_present = read_json_body(resp).await;
+        assert_eq!(diff_present["has_revision"], true);
+        assert!(diff_present["unified_diff"]
+            .as_str()
+            .expect("unified_diff string")
+            .contains("+FTS5 indexes sections and diffs."));
+
+        // 7. DELETE /api/sources/{id}
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::DELETE)
+                    .uri(format!("/api/sources/{source_id}"))
+                    .body(Body::empty())
+                    .expect("build delete source request"),
+            )
+            .await
+            .expect("delete source response");
+        assert_eq!(resp.status(), StatusCode::OK);
+        let deleted = read_json_body(resp).await;
+        assert_eq!(deleted["id"], source_id);
+        assert_eq!(deleted["name"], "local-guide");
+        assert_eq!(deleted["pages_deleted"], 1);
+
+        // Deleting again returns 404
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::DELETE)
+                    .uri(format!("/api/sources/{source_id}"))
+                    .body(Body::empty())
+                    .expect("build second delete request"),
+            )
+            .await
+            .expect("second delete response");
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn post_query_enforces_readonly_boundary() {
+        let vault_dir = tempdir().expect("vault tempdir");
+        let config = VaultConfig::new(vault_dir.path());
+        let conn = open_rw_db(&config.db_path()).expect("init db");
+        conn.execute(
+            "INSERT INTO sources (name, kind, origin, status) VALUES ('demo', 'local', '/tmp/demo', 'ok')",
+            [],
+        )
+        .expect("insert demo source");
+        drop(conn);
+
+        let app = build_router(config);
+
+        // Allowed SELECT
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/api/query")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        json!({ "sql": "SELECT name FROM v_sources", "limit": 10 }).to_string(),
+                    ))
+                    .expect("build select query request"),
+            )
+            .await
+            .expect("select query response");
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = read_json_body(resp).await;
+        assert_eq!(body["row_count"], 1);
+        assert_eq!(body["rows"][0][0], "demo");
+
+        // Blocked DELETE / DROP
+        for bad_sql in ["DELETE FROM sources", "DROP TABLE sources"] {
+            let resp = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method(Method::POST)
+                        .uri("/api/query")
+                        .header(header::CONTENT_TYPE, "application/json")
+                        .body(Body::from(json!({ "sql": bad_sql }).to_string()))
+                        .expect("build bad query request"),
+                )
+                .await
+                .expect("bad query response");
+            assert_eq!(
+                resp.status(),
+                StatusCode::BAD_REQUEST,
+                "expected 400 for `{bad_sql}`"
+            );
+            let err_body = read_json_body(resp).await;
+            assert!(err_body["error"].as_str().is_some());
+        }
+    }
+
+    #[tokio::test]
+    async fn rejects_cross_origin_mutating_requests() {
+        let vault_dir = tempdir().expect("vault tempdir");
+        let docs_dir = tempdir().expect("docs tempdir");
+        std::fs::write(docs_dir.path().join("doc.md"), "# Doc\n\nBody.\n").expect("write doc.md");
+
+        let config = VaultConfig::new(vault_dir.path());
+        let app = build_router(config);
+
+        // Cross-origin POST /api/sources -> 403 Forbidden
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/api/sources")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .header(header::ORIGIN, "https://evil.example")
+                    .body(Body::from(
+                        json!({ "origin": docs_dir.path().to_string_lossy() }).to_string(),
+                    ))
+                    .expect("build evil post request"),
+            )
+            .await
+            .expect("evil post response");
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+
+        // Cross-origin DELETE /api/sources/1 -> 403 Forbidden
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::DELETE)
+                    .uri("/api/sources/1")
+                    .header(header::ORIGIN, "https://evil.example")
+                    .body(Body::empty())
+                    .expect("build evil delete request"),
+            )
+            .await
+            .expect("evil delete response");
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+
+        // Non-loopback Host header on mutating request -> 403 Forbidden
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::DELETE)
+                    .uri("/api/sources/1")
+                    .header(header::HOST, "evil.example:4317")
+                    .body(Body::empty())
+                    .expect("build evil host request"),
+            )
+            .await
+            .expect("evil host response");
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+
+        // Valid loopback Origin: http://127.0.0.1:4317 succeeds
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/api/sources")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .header(header::ORIGIN, "http://127.0.0.1:4317")
+                    .header(header::HOST, "127.0.0.1:4317")
+                    .body(Body::from(
+                        json!({ "origin": docs_dir.path().to_string_lossy(), "name": "safe-docs" })
+                            .to_string(),
+                    ))
+                    .expect("build loopback post request"),
+            )
+            .await
+            .expect("loopback post response");
+        assert_eq!(resp.status(), StatusCode::CREATED);
+    }
+
+    #[tokio::test]
+    async fn post_sync_triggers_async_source_refresh() {
+        let vault_dir = tempdir().expect("vault tempdir");
+        let docs_dir = tempdir().expect("docs tempdir");
+        std::fs::write(docs_dir.path().join("a.md"), "# Page A\n\nInitial.\n").expect("write a.md");
+
+        let config = VaultConfig::new(vault_dir.path());
+        let (source, _) = crate::ingest::add_source_async(
+            &config,
+            crate::ingest::AddSourceParams {
+                origin: docs_dir.path().to_string_lossy().into_owned(),
+                name: Some("sync-target".into()),
+                ..Default::default()
+            },
+            true,
+        )
+        .await
+        .expect("add initial source");
+
+        // Add a second markdown file before triggering async sync
+        std::fs::write(docs_dir.path().join("b.md"), "# Page B\n\nAdded.\n").expect("write b.md");
+
+        let app = build_router(config.clone());
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri(format!("/api/sources/{}/sync", source.id))
+                    .body(Body::empty())
+                    .expect("build sync request"),
+            )
+            .await
+            .expect("sync response");
+        assert_eq!(resp.status(), StatusCode::ACCEPTED);
+        let accepted = read_json_body(resp).await;
+        assert_eq!(accepted["status"], "accepted");
+        assert_eq!(accepted["source"], "sync-target");
+
+        // Poll sync_runs briefly until the background sync finishes (2 total runs: initial + async)
+        let mut completed = false;
+        for _ in 0..40 {
+            let conn = open_rw_db(&config.db_path()).expect("open db for poll");
+            let ok_runs: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM sync_runs WHERE source_id = ?1 AND status = 'ok'",
+                    [source.id],
+                    |r| r.get(0),
+                )
+                .expect("count sync_runs");
+            let page_count: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM pages WHERE source_id = ?1 AND status = 'active'",
+                    [source.id],
+                    |r| r.get(0),
+                )
+                .expect("count active pages");
+            if ok_runs >= 2 && page_count == 2 {
+                completed = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        assert!(
+            completed,
+            "background sync did not record a completed sync_run and ingest b.md within timeout"
+        );
+    }
+}

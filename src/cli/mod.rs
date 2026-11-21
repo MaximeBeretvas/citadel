@@ -319,6 +319,13 @@ pub fn run_cli_with_writer<W: Write>(cli: Cli, out: &mut W) -> anyhow::Result<()
             crate::mcp::run_stdio_with_io(&config, std::io::stdin().lock(), &mut *out)?;
             Ok(())
         }
+        Commands::Ui { port, no_open } => {
+            let rt = tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .build()?;
+            rt.block_on(crate::ui::run_ui_server(config, port, no_open))?;
+            Ok(())
+        }
         Commands::Skill { command } => match command {
             SkillCommands::Install {
                 path,
