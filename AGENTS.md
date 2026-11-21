@@ -3,7 +3,7 @@
 ## Context Pointers
 Read the authoritative doc before acting on its branch; never duplicate its details here:
 - [PRD.md](./PRD.md) — product scope, user journeys, functional & non-functional requirements.
-- [SPEC.md](./SPEC.md) — Rust crate stack, module layout, SQLite + FTS5 schema, MCP `query`/`manage` contracts, CLI, embedded UI, and Docker/native deployment.
+- [SPEC.md](./SPEC.md) — Rust crate stack, module layout, SQLite + FTS5 schema, MCP `query`/`manage` contracts, CLI, embedded UI, and Apple `container`/native deployment.
 - `TASKS.md` *(created in AtomicTasks)* — ordered atomic tasks and acceptance criteria.
 
 ## Execution Loop
@@ -17,9 +17,9 @@ Follow `AtomicTasks -> LLMCode -> Checks -> HumanAudit` for every change:
    cargo clippy --all-targets -- -D warnings
    cargo test
    ```
-   When `Dockerfile` or `docker-compose.yml` changes, also verify:
+   When `Dockerfile` changes, also verify using Apple's `container` CLI (never `docker`):
    ```bash
-   docker build -t web-vault:check .
+   container build -t web-vault:check .
    ```
    If any check fails, fix the root cause and re-run the full gate.
 4. **HumanAudit handoff:** Summarize changed files, exact command results, and any risks or assumptions; wait for human review before merging.

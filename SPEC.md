@@ -9,7 +9,7 @@
 ## 1. Architecture Overview
 
 **web-vault** is built as a **single native Rust binary** (`web-vault`) backed by a local **SQLite (WAL mode) + FTS5** database.
-- **Default deployment (Docker):** Runs `web-vault serve` inside a minimal container (`Dockerfile` + `docker-compose.yml`), combining the background scheduler/watcher, embedded Web UI (`/`), REST API (`/api/*`), and MCP Streamable HTTP endpoint (`/mcp`) in one low-resource process (~15–25 MB RAM).
+- **Default deployment (Apple `container`):** Runs `web-vault serve` inside a minimal OCI Linux container managed by Apple's **`container`** CLI (`https://github.com/apple/container`, built from `Containerfile`/`Dockerfile`), combining the background scheduler/watcher, embedded Web UI (`/`), REST API (`/api/*`), and MCP Streamable HTTP endpoint (`/mcp`) in one low-resource process (~15–25 MB RAM).
 - **Native installation (macOS/Linux):** Install the same binary locally; `cli`, `mcp` (`stdio`), `ui`, and `daemon` share `vault.db` directly in WAL mode so `mcp` and `cli` work even when the daemon is stopped.
 
 ```mermaid
@@ -19,8 +19,8 @@ flowchart TB
         User["Engineer (Terminal / Browser)"]
     end
 
-    subgraph Binary["Single Rust Binary: web-vault (Docker default or Native)"]
-        Serve["web-vault serve (Docker default: Daemon + UI + MCP HTTP /mcp)"]
+    subgraph Binary["Single Rust Binary: web-vault (Apple container default or Native)"]
+        Serve["web-vault serve (Container default: Daemon + UI + MCP HTTP /mcp)"]
         MCP["web-vault mcp (stdio JSON-RPC)"]
         CLI["web-vault CLI (add / sync / query / skill)"]
         UI["web-vault ui (Axum + rust-embed)"]
@@ -55,7 +55,7 @@ flowchart TB
 
 ### Data & Config Paths
 Resolved via `WEB_VAULT_HOME` env var, `--data-dir` flag, or OS defaults (`directories` crate):
-- **Docker default:** `/data` (mounted persistent volume, `WEB_VAULT_HOME=/data`; optional host Markdown folders mounted read-only under `/sources/...`).
+- **Container default:** `/data` (mounted persistent volume, `WEB_VAULT_HOME=/data`; optional host Markdown folders mounted read-only under `/sources/...`).
 - **macOS (native):** `~/Library/Application Support/web-vault/` (or `~/.local/share/web-vault/` if XDG is set)
 - **Linux (native):** `${XDG_DATA_HOME:-~/.local/share}/web-vault/`
 - **Files inside data dir:**
@@ -273,8 +273,8 @@ To eliminate false-positive diffs (such as volatile `created:` / `updated:` / `c
 ## 5. MCP Server Specification (`web-vault mcp` & `/mcp`)
 
 ### Transports
-- **Streamable HTTP (Docker default):** Mounted at `POST/GET /mcp` on `web-vault serve` (default `http://127.0.0.1:4317/mcp` on the host). Lets any MCP client connect directly to the running container without spawning extra processes.
-- **Stdio (Native & `docker exec`):** `web-vault mcp` speaks newline-delimited JSON-RPC 2.0 on `stdin`/`stdout` (also usable via `docker exec -i web-vault web-vault mcp`).
+- **Streamable HTTP (Container default):** Mounted at `POST/GET /mcp` on `web-vault serve` (default `http://127.0.0.1:4317/mcp` on the host). Lets any MCP client connect directly to the running container without spawning extra processes.
+- **Stdio (Native & `container exec`):** `web-vault mcp` speaks newline-delimited JSON-RPC 2.0 on `stdin`/`stdout` (also usable via `container exec -i web-vault web-vault mcp`).
 - **Logging rule:** In `stdio` mode, all logs MUST go to `stderr` or file—never `stdout`.
 
 ### Tool Surface (2 Minimal Composable Tools)
@@ -378,8 +378,8 @@ web-vault
   sync [<name>] [--all] [--prune] # manual sync for one or all sources
   rm <name> [--yes]               # remove source and cascade stored pages
   query "<sql>" [--limit <n>] [--format table|json|csv]
-  serve [--bind 0.0.0.0:4317]     # all-in-one server: daemon + Web UI + MCP HTTP (/mcp) (Docker default)
-  mcp                             # start stdio MCP server (native / docker exec)
+  serve [--bind 0.0.0.0:4317]     # all-in-one server: daemon + Web UI + MCP HTTP (/mcp) (Container default)
+  mcp                             # start stdio MCP server (native / container exec)
   ui [--port <port>] [--no-open]  # launch embedded local Web UI (native)
   daemon
     start [--foreground]
@@ -431,17 +431,31 @@ The embedded static router `SKILL.md` (`src/skill/SKILL.md`) documents the SQLit
 
 ## 8. Deployment & Background Lifecycle
 
-### 8.1 Default Deployment: Docker (`Dockerfile` + `docker-compose.yml`)
-- **Multi-stage `Dockerfile`:**
-  - Builder stage: `rust:1-slim` compiling `--release` binary.
+### 8.1 Default Deployment: Apple `container` (`Dockerfile`)
+Uses Apple's native macOS OCI runtime (**`container`**, `https://github.com/apple/container`)—no Docker Desktop required.
+- **Multi-stage `Dockerfile` (OCI-standard):**
+  - Builder stage: `rust:1-slim` compiling `--release` binary (`linux/arm64` native on Apple Silicon, `linux/amd64` portable).
   - Runtime stage: `debian:bookworm-slim` (or `gcr.io/distroless/cc-debian12`) running as non-root user `webvault`, final image ~25–35 MB (optional `--build-arg FEATURES=chrome` variant installs headless Chromium).
 - **Container entrypoint:** `web-vault serve --bind 0.0.0.0:4317` (runs the background scheduler, local folder watcher, embedded Web UI on `/`, REST API on `/api/*`, and MCP Streamable HTTP on `/mcp`).
-- **`docker-compose.yml` defaults:**
-  - Port mapping bound strictly to loopback on the host: `127.0.0.1:4317:4317`.
-  - Named volume `web-vault-data:/data` with `WEB_VAULT_HOME=/data`.
-  - Commented example bind mount for local Markdown folders (e.g., `/Users/maxime/Dev/books/markdown:/sources/books:ro`).
-  - `restart: unless-stopped` and lightweight `/api/health` Docker `HEALTHCHECK`.
-- **CLI with Docker:** Run `docker compose exec web-vault web-vault <cmd>` (e.g., `add`, `sync`, `query`), or use the UI at `http://127.0.0.1:4317`.
+- **Standard `container` CLI workflow:**
+  ```bash
+  # One-time setup & build
+  container system start
+  container volume create web-vault-data
+  container build -t web-vault:latest .
+
+  # Run detached with loopback port publish, persistent volume, and optional local Markdown mount
+  container run -d --name web-vault \
+    -p 127.0.0.1:4317:4317 \
+    -e WEB_VAULT_HOME=/data \
+    -v web-vault-data:/data \
+    -v /Users/maxime/Dev/books/markdown:/sources/books:ro \
+    web-vault:latest
+  ```
+- **CLI & operations with `container`:**
+  - Run CLI commands inside the container: `container exec web-vault web-vault <cmd>` (e.g., `add`, `sync`, `query`), or manage via the Web UI at `http://127.0.0.1:4317`.
+  - Inspect status/logs: `container ls`, `container logs web-vault`, `container stop web-vault`.
+  - A small `Makefile` (or `justfile`) wraps `container build`, `run`, `stop`, `logs`, and `exec` for one-command ergonomics.
 
 ### 8.2 Optional Native Install (macOS / Linux)
 - **Install:** `cargo install --path .` (or prebuilt GitHub Release binary) puts `web-vault` on `$PATH`.
@@ -450,7 +464,7 @@ The embedded static router `SKILL.md` (`src/skill/SKILL.md`) documents the SQLit
   - **macOS:** Generates `~/Library/LaunchAgents/com.webvault.daemon.plist` (`KeepAlive`, `RunAtLoad`) and loads via `launchctl`.
   - **Linux:** Generates `~/.config/systemd/user/web-vault.service` and enables via `systemctl --user`.
 
-### 8.3 Shared Scheduler & Watcher Behavior (Docker & Native)
+### 8.3 Shared Scheduler & Watcher Behavior (Container & Native)
 - **Web scheduler loop:** Ticks every 60 seconds; selects `web` sources where `refresh_interval_secs > 0` and `last_synced_at + refresh_interval_secs <= now`; runs up to 2 source syncs concurrently with small random jitter (0–30s).
 - **Local folder watcher:** Registers a `notify` debounced watcher (2-second debounce) on each `local` source directory; triggers incremental re-indexing of changed `.md` files only.
 - **Graceful shutdown:** Handles `SIGINT`/`SIGTERM`, finishes in-flight DB transactions cleanly, removes `daemon.pid`.
