@@ -42,7 +42,7 @@ _Avoid_: lock, lease, in-flight
 One document from a Source, identified by its URI.
 
 **Stale page**:
-A Page that was present before but missing from the latest Sync; kept, not deleted.
+A Page that was present before but missing from a complete Sync; kept, not deleted. A Sync cut short by its page limit leaves unvisited Pages as they were.
 
 **Error page**:
 A Page whose latest fetch or parse failed.

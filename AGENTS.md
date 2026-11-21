@@ -6,6 +6,8 @@ Read the authoritative doc before acting on its branch; never duplicate its deta
 - [Docs/SPEC.md](./Docs/SPEC.md) — Rust crate stack, module layout, SQLite + FTS5 schema, MCP `query`/`manage` contracts, CLI, embedded UI, and Apple `container`/native deployment.
 - [REVIEW.md](./REVIEW.md) — grounded verification & visual feedback loops (headless Chrome UI screenshots, MCP JSON-RPC probes, container smoke tests) and `HumanAudit` evidence format.
 - `Docs/AtomicTasks/` *(created in AtomicTasks)* — ordered atomic task specs and acceptance criteria.
+- [CONTEXT.md](./CONTEXT.md) — domain glossary (Source, Origin, Sync, Sync claim…); use these terms.
+- [Docs/adr/](./Docs/adr/) — architecture decisions; settled unless explicitly reopened.
 
 ## Development Workflow
 Typical development path used on this project *(reference guide, not a hard rule)*:
@@ -44,7 +46,7 @@ Follow `AtomicTasks -> LLMCode -> Checks -> HumanAudit` for every change:
 - **Error handling:** Propagate errors with `Result`, `thiserror` (library modules), and `anyhow` (CLI/top-level); reserve `unwrap()` and `expect()` strictly for `#[cfg(test)]`.
 - **MCP `stdio` purity:** Send all `tracing` logs to `stderr` or `daemon.log`; keep `stdout` strictly reserved for JSON-RPC frames in `web-vault mcp`.
 - **SQLite read-only boundary:** Execute every MCP `query` through `src/db/readonly.rs` (`SQLITE_OPEN_READ_ONLY`, `PRAGMA query_only = ON`, authorizer allowlist, 5s timeout, row/byte caps). Re-run the read-only safety tests after any `src/db/` change.
-- **MCP `manage` validation:** Enforce `http(s)://` URL checks with SSRF blocking (loopback/RFC1918/link-local) and directory canonicalization for local Markdown folders. Re-run validation tests after any `src/mcp/` or `src/ingest/` change.
+- **MCP `manage` validation:** Enforce `http(s)://` URL checks with SSRF blocking (loopback/RFC1918/link-local) and directory canonicalization for local Markdown folders. Re-run validation tests after any `src/mcp/` or `src/ingest/` change. *(Today only MCP `manage add` enforces SSRF; CLI and UI do not. Task V2-02 moves this rule into the Source lifecycle module for every entry point and rewrites this bullet.)*
 - **FTS5 consistency:** Maintain `pages_fts` and `sections_fts` via SQLite triggers inside the same transaction as `pages`/`sections` writes. Keep `src/db/schema.sql` and `Docs/SPEC.md` in sync.
 - **Diff hygiene:** Normalize line endings and strip volatile frontmatter timestamps before SHA-256 hashing; mark missing/failing pages `stale`/`error` rather than silently deleting them.
 - **Zero-runtime footprint:** Keep the binary self-contained (`rusqlite` bundled, `rust-embed` offline UI assets, zero external CDNs, minimal idle RAM in `serve`/`daemon`).
