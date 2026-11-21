@@ -41,7 +41,7 @@ flowchart TD
 - [x] [01-project-scaffold.md](./01-project-scaffold.md) — Cargo crate, `config.rs`, `stderr` tracing, `clap` CLI skeleton
 - [x] [02-sqlite-schema-and-fts5.md](./02-sqlite-schema-and-fts5.md) — `schema.sql`, WAL pragmas, migrations, FTS5 triggers, views
 - [x] [03-readonly-query-engine.md](./03-readonly-query-engine.md) — `db/readonly.rs` authorizer, timeout, row/byte caps, safety tests
-- [ ] [04-normalize-diff-and-sections.md](./04-normalize-diff-and-sections.md) — Frontmatter noise stripping, SHA-256, `similar` diffs, H1–H3 splitter
+- [x] [04-normalize-diff-and-sections.md](./04-normalize-diff-and-sections.md) — Frontmatter noise stripping, SHA-256, `similar` diffs, H1–H3 splitter
 - [ ] [05-local-markdown-ingestion.md](./05-local-markdown-ingestion.md) — Local `.md` folder ingestion, `stale` tracking, CLI `add`/`list`/`show`/`sync`/`rm`/`query`
 - [ ] [06-mcp-stdio-query-and-manage.md](./06-mcp-stdio-query-and-manage.md) — MCP `stdio` JSON-RPC 2.0, `query` + `manage` tools, SSRF/path guards
 - [ ] [07-skill-installer.md](./07-skill-installer.md) — Embedded router `SKILL.md` + `web-vault skill install` (`.`, `--path`, `--global`)
