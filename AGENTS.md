@@ -7,6 +7,21 @@ Read the authoritative doc before acting on its branch; never duplicate its deta
 - [REVIEW.md](./REVIEW.md) — grounded verification & visual feedback loops (headless Chrome UI screenshots, MCP JSON-RPC probes, container smoke tests) and `HumanAudit` evidence format.
 - `Docs/AtomicTasks/` *(created in AtomicTasks)* — ordered atomic task specs and acceptance criteria.
 
+## Development Workflow
+Typical development path used on this project *(reference guide, not a hard rule)*:
+
+```mermaid
+flowchart LR
+    Idea --> PRD --> TechSpec --> AgentRules --> AtomicTasks --> Prototype --> LLMCode
+    LLMCode --> Checks
+    Checks -->|fail| LLMCode
+    Checks -->|pass| HumanAudit
+    HumanAudit -->|fix| LLMCode
+    HumanAudit -->|merge| Prod --> Telemetry
+    Telemetry -->|iterate| Idea
+    Telemetry -->|learn| AgentRules
+```
+
 ## Execution Loop
 Follow `AtomicTasks -> LLMCode -> Checks -> HumanAudit` for every change:
 
