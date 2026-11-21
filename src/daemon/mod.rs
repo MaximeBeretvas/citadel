@@ -318,6 +318,7 @@ pub fn select_due_web_sources_at(
                 status, last_synced_at, last_error, created_at
          FROM sources
          WHERE kind = 'web'
+           AND status != 'syncing'
            AND refresh_interval_secs > 0
            AND (
                last_synced_at IS NULL
@@ -765,6 +766,14 @@ mod tests {
             [],
         )
         .expect("insert local");
+
+        // 6. Currently syncing web source (even if last_synced_at IS NULL) -> SKIP
+        conn.execute(
+            "INSERT INTO sources (name, kind, origin, refresh_interval_secs, status, last_synced_at)
+             VALUES ('syncing-web', 'web', 'https://syncing.example.com', 86400, 'syncing', NULL)",
+            [],
+        )
+        .expect("insert syncing web");
 
         let due = select_due_web_sources_at(&conn, now_epoch).expect("select_due_web_sources_at");
         let mut names: Vec<String> = due.into_iter().map(|s| s.name).collect();

@@ -120,6 +120,17 @@ pub fn canonicalize_local_dir(origin: &Path) -> Result<PathBuf> {
     Ok(canonical)
 }
 
+/// Options controlling how [`persist_sync_outcomes`] reconciles unvisited pages.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum MissingPagePolicy {
+    /// Mark previously active/error pages not seen in this crawl as `'stale'`.
+    MarkStale,
+    /// Leave unvisited pages untouched (used when a web crawl hit `max_pages` without `--prune`).
+    Preserve,
+    /// Delete pages not seen in this crawl (`--prune`).
+    Prune,
+}
+
 /// Normalized page outcome produced by local or web ingestion before SQLite persistence.
 pub(crate) enum PageIngestOutcome {
     Ready {
@@ -182,6 +193,11 @@ pub fn sync_local_source(
     let matcher = PatternMatcher::new(include_patterns, exclude_patterns)?;
     let run_id = start_sync_run(conn, source_id)?;
 
+    let missing_policy = if prune {
+        MissingPagePolicy::Prune
+    } else {
+        MissingPagePolicy::MarkStale
+    };
     match collect_local_outcomes(source_name, &canon_root, &matcher).and_then(|outcomes| {
         persist_sync_outcomes(
             conn,
@@ -189,7 +205,7 @@ pub fn sync_local_source(
             source_name,
             run_id,
             outcomes,
-            prune,
+            missing_policy,
             Vec::new(),
         )
     }) {
@@ -269,7 +285,7 @@ pub(crate) fn persist_sync_outcomes(
     source_name: &str,
     run_id: i64,
     outcomes: Vec<PageIngestOutcome>,
-    prune: bool,
+    missing_policy: MissingPagePolicy,
     warnings: Vec<String>,
 ) -> Result<SyncSummary> {
     let mut summary = SyncSummary {
@@ -468,7 +484,15 @@ pub(crate) fn persist_sync_outcomes(
         }
     }
 
-    reconcile_missing_pages(&tx, source_id, &seen_uris, prune, &mut summary)?;
+    match missing_policy {
+        MissingPagePolicy::Preserve => {}
+        MissingPagePolicy::MarkStale => {
+            reconcile_missing_pages(&tx, source_id, &seen_uris, false, &mut summary)?;
+        }
+        MissingPagePolicy::Prune => {
+            reconcile_missing_pages(&tx, source_id, &seen_uris, true, &mut summary)?;
+        }
+    }
 
     tx.execute(
         "UPDATE sync_runs

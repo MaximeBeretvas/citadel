@@ -15,7 +15,8 @@ use url::Url;
 use crate::db::open_rw_db;
 use crate::error::{Result, VaultError};
 use crate::ingest::local::{
-    fail_sync_run, persist_sync_outcomes, start_sync_run, PageIngestOutcome, PatternMatcher,
+    fail_sync_run, persist_sync_outcomes, start_sync_run, MissingPagePolicy, PageIngestOutcome,
+    PatternMatcher,
 };
 use crate::ingest::normalize::{count_words, normalize_markdown};
 use crate::ingest::sections::split_sections;
@@ -247,15 +248,24 @@ pub async fn sync_web_source(
 
     let mut conn = open_rw_db(db_path)?;
     match crawl_res {
-        Ok((outcomes, warnings)) => persist_sync_outcomes(
-            &mut conn,
-            source.id,
-            &source.name,
-            run_id,
-            outcomes,
-            prune,
-            warnings,
-        ),
+        Ok((outcomes, warnings)) => {
+            let missing_policy = if prune {
+                MissingPagePolicy::Prune
+            } else if outcomes.len() >= source.max_pages as usize {
+                MissingPagePolicy::Preserve
+            } else {
+                MissingPagePolicy::MarkStale
+            };
+            persist_sync_outcomes(
+                &mut conn,
+                source.id,
+                &source.name,
+                run_id,
+                outcomes,
+                missing_policy,
+                warnings,
+            )
+        }
         Err(err) => {
             fail_sync_run(&conn, source.id, run_id, &err.to_string());
             Err(err)
@@ -1701,8 +1711,27 @@ mod tests {
 
         let sync_res = crate::ingest::sync_sources(&cfg2, Some(&source.name), false, false)
             .expect("sync_sources inside active tokio runtime should not panic");
-        server_handle.abort();
         assert_eq!(sync_res.len(), 1);
         assert_eq!(sync_res[0].pages_unchanged, 2);
+
+        // 3. When a capped crawl (max_pages=2) visits a different 2-page subset on recrawl,
+        // previously stored pages that were not revisited due to the cap must NOT be marked stale.
+        let conn2 = open_rw_db(&cfg2.db_path()).expect("open_rw_db cfg2");
+        conn2
+            .execute(
+                "INSERT INTO pages (source_id, uri, title, content_md, content_hash, word_count, status)
+                 VALUES (?1, ?2, 'Page 2', '# Page 2\n\nSecond page.\n', 'hash-p2', 4, 'active')",
+                rusqlite::params![source.id, format!("http://{addr}/docs/p2")],
+            )
+            .expect("insert extra active page outside cap");
+        drop(conn2);
+
+        let recapped = crate::ingest::sync_sources(&cfg2, Some(&source.name), false, false)
+            .expect("recrawl capped source");
+        server_handle.abort();
+        assert_eq!(
+            recapped[0].pages_stale, 0,
+            "capped crawl must not mark unvisited pages beyond max_pages as stale"
+        );
     }
 }

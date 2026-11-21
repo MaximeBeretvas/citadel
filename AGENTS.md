@@ -51,4 +51,4 @@ Follow `AtomicTasks -> LLMCode -> Checks -> HumanAudit` for every change:
 
 ## Lessons
 *(Updated via `Telemetry -> learn -> AgentRules`: add one crisp, positive rule per real check failure, audit finding, or runtime bug; prune entries once obsolete.)*
-- *(none yet)*
+- Exclude `status = 'syncing'` sources from scheduler due-queries and preserve unvisited pages (`MissingPagePolicy::Preserve`) when a web crawl reaches `max_pages` without `--prune`.
