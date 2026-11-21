@@ -2,12 +2,13 @@ pub mod api;
 
 use std::net::SocketAddr;
 
-use axum::extract::Request;
-use axum::http::{header, HeaderMap, Method, StatusCode};
+use axum::extract::{Path, Request};
+use axum::http::{header, HeaderMap, HeaderValue, Method, StatusCode};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, post};
 use axum::{Json, Router};
+use rust_embed::RustEmbed;
 use serde_json::json;
 use tokio::net::TcpListener;
 use url::{Host, Url};
@@ -19,15 +20,20 @@ use crate::error::{Result, VaultError};
 /// Default localhost port for `web-vault ui`.
 pub const DEFAULT_UI_PORT: u16 = 4317;
 
+/// Compile-time embedded offline Web UI assets (`index.html`, `style.css`, `app.js`).
+#[derive(RustEmbed)]
+#[folder = "src/ui/assets"]
+struct UiAssets;
+
 /// Shared state passed to Axum UI handlers.
 #[derive(Debug, Clone)]
 pub struct UiState {
     pub config: VaultConfig,
 }
 
-/// Build the Axum router for the local Web UI REST API.
+/// Build the Axum router for the local Web UI REST API and embedded static assets.
 ///
-/// Exported cleanly so Task 10 (embedded static assets) and Task 12 (`/mcp`) can compose it directly.
+/// Exported cleanly so Task 12 (`/mcp`) can compose it directly.
 pub fn build_router(config: VaultConfig) -> Router {
     let state = UiState { config };
 
@@ -43,8 +49,55 @@ pub fn build_router(config: VaultConfig) -> Router {
         .route("/api/pages/{id}", get(api::get_page))
         .route("/api/pages/{id}/diff", get(api::get_page_diff))
         .route("/api/query", post(api::query))
+        .route("/", get(serve_index))
+        .route("/{*path}", get(serve_static_asset))
         .layer(middleware::from_fn(origin_host_guard))
         .with_state(state)
+}
+
+async fn serve_index() -> Response {
+    serve_embedded_path("index.html")
+}
+
+async fn serve_static_asset(Path(path): Path<String>) -> Response {
+    let trimmed = path.trim_start_matches('/');
+    if trimmed.is_empty() {
+        return serve_embedded_path("index.html");
+    }
+    if trimmed == "api" || trimmed.starts_with("api/") {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+    serve_embedded_path(trimmed)
+}
+
+fn serve_embedded_path(asset_path: &str) -> Response {
+    match UiAssets::get(asset_path) {
+        Some(file) => {
+            let content_type = content_type_for_path(asset_path);
+            let mut resp = Response::new(axum::body::Body::from(file.data.into_owned()));
+            *resp.status_mut() = StatusCode::OK;
+            let header_val = HeaderValue::from_str(&content_type)
+                .unwrap_or_else(|_| HeaderValue::from_static("application/octet-stream"));
+            resp.headers_mut().insert(header::CONTENT_TYPE, header_val);
+            resp
+        }
+        None => StatusCode::NOT_FOUND.into_response(),
+    }
+}
+
+fn content_type_for_path(path: &str) -> String {
+    if path.ends_with(".html") {
+        "text/html; charset=utf-8".to_string()
+    } else if path.ends_with(".css") {
+        "text/css; charset=utf-8".to_string()
+    } else if path.ends_with(".js") {
+        "application/javascript; charset=utf-8".to_string()
+    } else {
+        mime_guess::from_path(path)
+            .first_or_octet_stream()
+            .as_ref()
+            .to_string()
+    }
 }
 
 /// Bind and serve the local Web UI HTTP server strictly on `127.0.0.1`.
@@ -586,5 +639,131 @@ mod tests {
             completed,
             "background sync did not record a completed sync_run and ingest b.md within timeout"
         );
+    }
+
+    async fn read_text_body(resp: axum::response::Response) -> String {
+        let bytes = resp
+            .into_body()
+            .collect()
+            .await
+            .expect("collect response body")
+            .to_bytes();
+        String::from_utf8(bytes.to_vec()).expect("valid utf-8 body")
+    }
+
+    #[tokio::test]
+    async fn serves_embedded_index_css_and_js_with_correct_mime() {
+        let vault_dir = tempdir().expect("vault tempdir");
+        let app = build_router(VaultConfig::new(vault_dir.path()));
+
+        let cases = [
+            ("/", "text/html"),
+            ("/index.html", "text/html"),
+            ("/style.css", "text/css"),
+            ("/app.js", "application/javascript"),
+        ];
+
+        for (uri, expected_mime) in cases {
+            let resp = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method(Method::GET)
+                        .uri(uri)
+                        .body(Body::empty())
+                        .expect("build asset request"),
+                )
+                .await
+                .expect("asset response");
+            assert_eq!(resp.status(), StatusCode::OK, "expected 200 OK for `{uri}`");
+            let content_type = resp
+                .headers()
+                .get(header::CONTENT_TYPE)
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or("");
+            assert!(
+                content_type.starts_with(expected_mime),
+                "expected Content-Type starting with `{expected_mime}` for `{uri}`, got `{content_type}`"
+            );
+            let body = read_text_body(resp).await;
+            assert!(
+                !body.trim().is_empty(),
+                "expected non-empty body for `{uri}`"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn assets_contain_zero_external_cdn_links() {
+        let vault_dir = tempdir().expect("vault tempdir");
+        let app = build_router(VaultConfig::new(vault_dir.path()));
+
+        for uri in ["/", "/style.css", "/app.js"] {
+            let resp = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method(Method::GET)
+                        .uri(uri)
+                        .body(Body::empty())
+                        .expect("build asset request"),
+                )
+                .await
+                .expect("asset response");
+            assert_eq!(resp.status(), StatusCode::OK, "expected 200 OK for `{uri}`");
+            let body = read_text_body(resp).await;
+            let lower = body.to_ascii_lowercase();
+
+            // Check that no external script/link/CSS url() references exist
+            for forbidden in [
+                "<script src=\"http://",
+                "<script src=\"https://",
+                "<script src='http://",
+                "<script src='https://",
+                "href=\"http://",
+                "href=\"https://",
+                "href='http://",
+                "href='https://",
+                "url(http://",
+                "url(https://",
+                "url(\"http://",
+                "url(\"https://",
+                "url('http://",
+                "url('https://",
+                "@import url(http",
+                "@import \"http",
+                "@import 'http",
+            ] {
+                assert!(
+                    !lower.contains(forbidden),
+                    "asset `{uri}` must not contain external CDN link `{forbidden}`"
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn unknown_asset_returns_404() {
+        let vault_dir = tempdir().expect("vault tempdir");
+        let app = build_router(VaultConfig::new(vault_dir.path()));
+
+        for uri in ["/nonexistent.js", "/assets/missing.css", "/api/nonexistent"] {
+            let resp = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method(Method::GET)
+                        .uri(uri)
+                        .body(Body::empty())
+                        .expect("build unknown asset request"),
+                )
+                .await
+                .expect("unknown asset response");
+            assert_eq!(
+                resp.status(),
+                StatusCode::NOT_FOUND,
+                "expected 404 Not Found for `{uri}`"
+            );
+        }
     }
 }
