@@ -38,7 +38,7 @@ flowchart TD
 ## Task Checklist
 
 ### Phase 1 — Prototype Vertical Slice
-- [ ] [01-project-scaffold.md](./01-project-scaffold.md) — Cargo crate, `config.rs`, `stderr` tracing, `clap` CLI skeleton
+- [x] [01-project-scaffold.md](./01-project-scaffold.md) — Cargo crate, `config.rs`, `stderr` tracing, `clap` CLI skeleton
 - [ ] [02-sqlite-schema-and-fts5.md](./02-sqlite-schema-and-fts5.md) — `schema.sql`, WAL pragmas, migrations, FTS5 triggers, views
 - [ ] [03-readonly-query-engine.md](./03-readonly-query-engine.md) — `db/readonly.rs` authorizer, timeout, row/byte caps, safety tests
 - [ ] [04-normalize-diff-and-sections.md](./04-normalize-diff-and-sections.md) — Frontmatter noise stripping, SHA-256, `similar` diffs, H1–H3 splitter
