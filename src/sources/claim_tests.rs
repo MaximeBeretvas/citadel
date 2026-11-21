@@ -101,3 +101,15 @@ fn same_pid_other_token_is_taken_over() {
     assert!(try_acquire(&conn, id, &this_run).expect("takeover from earlier run"));
     assert!(!try_acquire(&conn, id, &this_run).expect("now held by this run"));
 }
+
+#[test]
+fn real_liveness_check_sees_dead_and_live_pids() {
+    let env = ClaimEnv::current();
+    assert!((env.pid_alive)(env.pid), "this process is running");
+    let mut child = std::process::Command::new("true")
+        .spawn()
+        .expect("spawn true");
+    let pid = i64::from(child.id());
+    child.wait().expect("wait true");
+    assert!(!(env.pid_alive)(pid), "exited child is not running");
+}

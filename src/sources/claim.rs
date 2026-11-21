@@ -78,7 +78,14 @@ fn unix_now() -> i64 {
 }
 
 /// Whether `pid` names a running process on this host (any owner).
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
+fn pid_is_running(pid: i64) -> bool {
+    // The slim container image has no `ps`; `/proc` is always there on Linux.
+    pid > 0 && std::path::Path::new(&format!("/proc/{pid}")).exists()
+}
+
+/// Whether `pid` names a running process on this host (any owner).
+#[cfg(all(unix, not(target_os = "linux")))]
 fn pid_is_running(pid: i64) -> bool {
     if pid <= 0 {
         return false;

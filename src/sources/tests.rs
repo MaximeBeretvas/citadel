@@ -332,6 +332,15 @@ fn assert_failure_recorded(config: &VaultConfig, name: &str) {
     let detail = crate::ingest::show_source(config, name).expect("show_source");
     assert_eq!(detail.source.status, "error", "{name}: {:?}", detail.source);
     assert!(detail.source.last_error.is_some(), "{name}: no last_error");
+    let claims: i64 = crate::db::open_rw_db(&config.db_path())
+        .expect("open db")
+        .query_row(
+            "SELECT COUNT(*) FROM sync_claims WHERE source_id = ?1",
+            [detail.source.id],
+            |r| r.get(0),
+        )
+        .expect("count claims");
+    assert_eq!(claims, 0, "{name}: claim released after the failed Sync");
     let latest = detail.sync_runs.first().expect("a sync run was recorded");
     assert_eq!(latest.status, "error", "{name}: {latest:?}");
     assert!(latest.error_message.is_some(), "{name}: {latest:?}");
@@ -379,7 +388,7 @@ async fn missing_local_folder_records_error_run() {
         .expect_err("missing folder must fail");
     assert_failure_recorded(&config, "via-sync");
 
-    // The path the UI, scheduler and watcher take: claim, then run.
+    // The path the UI and scheduler take: claim, then run. (The watcher calls `sync`.)
     let claimed = lifecycle
         .claim("via-claim")
         .await
