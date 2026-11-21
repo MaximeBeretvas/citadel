@@ -322,6 +322,10 @@ pub fn run_cli_with_writer<W: Write>(cli: Cli, out: &mut W) -> anyhow::Result<()
             write_query_result(out, &result, format)?;
             Ok(())
         }
+        Commands::Mcp => {
+            crate::mcp::run_stdio_with_io(&config, std::io::stdin().lock(), &mut *out)?;
+            Ok(())
+        }
         other => {
             let name = unimplemented_command_name(&other);
             anyhow::bail!("subcommand `{name}` is not implemented yet");

@@ -3,6 +3,7 @@ pub mod config;
 pub mod db;
 pub mod error;
 pub mod ingest;
+pub mod mcp;
 
 use std::io::IsTerminal;
 
