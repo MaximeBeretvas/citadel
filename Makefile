@@ -9,11 +9,16 @@ CMD ?= list
 .PHONY: build run stop logs exec clean
 
 build:
+	@mkdir -p .cargo
+	@trap 'rm -rf vendor .cargo' EXIT; \
+	cargo vendor --locked --versioned-dirs vendor > .cargo/config.toml; \
 	container build $(if $(FEATURES),--build-arg FEATURES=$(FEATURES),) -t $(IMAGE) .
 
 run:
 	container system start
 	container volume create $(VOLUME) || true
+	-container stop $(CONTAINER_NAME) 2>/dev/null || true
+	-container rm $(CONTAINER_NAME) 2>/dev/null || true
 	container run -d --name $(CONTAINER_NAME) \
 		-p 127.0.0.1:$(PORT):4317 \
 		-e WEB_VAULT_HOME=/data \

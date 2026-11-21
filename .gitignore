@@ -1,5 +1,7 @@
 /target/
 target/
+.cargo/
+vendor/
 *.db
 *.db-wal
 *.db-shm
