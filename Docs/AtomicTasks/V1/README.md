@@ -44,7 +44,7 @@ flowchart TD
 - [x] [04-normalize-diff-and-sections.md](./04-normalize-diff-and-sections.md) — Frontmatter noise stripping, SHA-256, `similar` diffs, H1–H3 splitter
 - [x] [05-local-markdown-ingestion.md](./05-local-markdown-ingestion.md) — Local `.md` folder ingestion, `stale` tracking, CLI `add`/`list`/`show`/`sync`/`rm`/`query`
 - [x] [06-mcp-stdio-query-and-manage.md](./06-mcp-stdio-query-and-manage.md) — MCP `stdio` JSON-RPC 2.0, `query` + `manage` tools, SSRF/path guards
-- [ ] [07-skill-installer.md](./07-skill-installer.md) — Embedded router `SKILL.md` + `web-vault skill install` (`.`, `--path`, `--global`)
+- [x] [07-skill-installer.md](./07-skill-installer.md) — Embedded router `SKILL.md` + `web-vault skill install` (`.`, `--path`, `--global`)
 
 ### Phase 2 — Web Crawling, UI, Daemon, Serve & Apple `container`
 - [ ] [08-web-crawler-spider.md](./08-web-crawler-spider.md) — `spider` + `spider_transformations` crawler, `sitemap.xml`/`llms.txt`, optional `chrome` feature

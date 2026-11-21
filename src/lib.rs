@@ -4,6 +4,7 @@ pub mod db;
 pub mod error;
 pub mod ingest;
 pub mod mcp;
+pub mod skill;
 
 use std::io::IsTerminal;
 

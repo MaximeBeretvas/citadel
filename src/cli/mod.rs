@@ -4,6 +4,8 @@ use std::path::PathBuf;
 use clap::{Parser, Subcommand, ValueEnum};
 use serde_json::Value;
 
+pub use crate::skill::SkillTarget;
+
 use crate::config::VaultConfig;
 use crate::db::{execute_readonly_query, QueryResult};
 use crate::ingest::{
@@ -199,15 +201,6 @@ pub enum SkillCommands {
     },
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
-pub enum SkillTarget {
-    Agents,
-    Claude,
-    Copilot,
-    Opencode,
-    All,
-}
-
 /// Parse CLI arguments from the process environment and execute.
 pub fn run_from_args() -> anyhow::Result<()> {
     let cli = Cli::parse();
@@ -326,6 +319,25 @@ pub fn run_cli_with_writer<W: Write>(cli: Cli, out: &mut W) -> anyhow::Result<()
             crate::mcp::run_stdio_with_io(&config, std::io::stdin().lock(), &mut *out)?;
             Ok(())
         }
+        Commands::Skill { command } => match command {
+            SkillCommands::Install {
+                path,
+                global,
+                target,
+                force,
+            } => {
+                let report = crate::skill::install_skill(path.as_deref(), global, target, force)?;
+                writeln!(
+                    out,
+                    "Installed skill to {}",
+                    report.canonical_path.display()
+                )?;
+                for link in &report.symlinks {
+                    writeln!(out, "Linked {}", link.display())?;
+                }
+                Ok(())
+            }
+        },
         other => {
             let name = unimplemented_command_name(&other);
             anyhow::bail!("subcommand `{name}` is not implemented yet");
@@ -820,5 +832,37 @@ mod tests {
         let err = run_args(vault_dir.path(), &["query", "DELETE FROM pages"])
             .expect_err("write query must fail");
         assert!(err.to_string().contains("invalid query"));
+    }
+
+    #[test]
+    fn skill_install_path_and_force_through_cli() {
+        let vault_dir = tempdir().expect("vault tempdir");
+        let skills_dir = tempdir().expect("skills tempdir");
+        let skills_str = skills_dir.path().to_string_lossy().into_owned();
+
+        let out = run_args(
+            vault_dir.path(),
+            &["skill", "install", "--path", &skills_str],
+        )
+        .expect("skill install --path should succeed");
+        let installed = skills_dir.path().join("web-vault/SKILL.md");
+        assert!(out.contains(&installed.display().to_string()));
+        assert_eq!(
+            std::fs::read_to_string(&installed).expect("read installed skill"),
+            crate::skill::ROUTER_SKILL_MD
+        );
+
+        let overwrite_err = run_args(
+            vault_dir.path(),
+            &["skill", "install", "--path", &skills_str],
+        )
+        .expect_err("repeat install without --force must fail");
+        assert!(overwrite_err.to_string().contains("--force"));
+
+        run_args(
+            vault_dir.path(),
+            &["skill", "install", "--path", &skills_str, "--force"],
+        )
+        .expect("repeat install with --force should succeed");
     }
 }
