@@ -9,6 +9,7 @@ use serde_json::{json, Value};
 use crate::config::VaultConfig;
 use crate::db::{execute_readonly_query, open_rw_db};
 use crate::error::{Result, VaultError};
+use crate::ingest::SyncSummary;
 use crate::sources::{AddSourceParams, Removal, SourceLifecycle, SyncOutcome, UpdateSourceParams};
 
 const DEFAULT_PROTOCOL_VERSION: &str = "2024-11-05";
@@ -360,13 +361,33 @@ async fn call_manage_sync(
 
     let lifecycle = SourceLifecycle::new(config.clone());
     let Some(name) = target_name else {
-        let summaries = lifecycle
+        let results = lifecycle
             .sync_all(false)
             .await
             .map_err(|err| err.to_string())?;
+        let summaries: Vec<&SyncSummary> = results
+            .iter()
+            .filter_map(|r| match &r.result {
+                Ok(SyncOutcome::Synced(summary)) => Some(summary),
+                _ => None,
+            })
+            .collect();
+        let per_source: Vec<Value> = results
+            .iter()
+            .map(|r| match &r.result {
+                Ok(SyncOutcome::Synced(summary)) => {
+                    json!({"name": r.name, "outcome": "synced", "summary": summary})
+                }
+                Ok(SyncOutcome::AlreadySyncing) => {
+                    json!({"name": r.name, "outcome": "already_syncing"})
+                }
+                Err(err) => json!({"name": r.name, "outcome": "error", "error": err.to_string()}),
+            })
+            .collect();
         return Ok(json!({
             "action": "sync",
             "summaries": summaries,
+            "results": per_source,
         }));
     };
 

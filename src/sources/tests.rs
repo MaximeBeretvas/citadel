@@ -93,7 +93,10 @@ async fn add_local_then_sync_reports_summary() {
 
     let all = lifecycle.sync_all(false).await.expect("sync_all");
     assert_eq!(all.len(), 1);
-    assert_eq!(all[0].pages_unchanged, 3);
+    let only = all.into_iter().next().expect("one result");
+    assert_eq!(only.name, "notes");
+    let summary = synced(only.result.expect("synced"));
+    assert_eq!(summary.pages_unchanged, 3);
 }
 
 #[tokio::test]
@@ -322,4 +325,132 @@ async fn remove_while_syncing_returns_already_syncing() {
         lifecycle.remove("busy").await.expect("remove"),
         Removal::Removed(_)
     ));
+}
+
+/// The Source shows the failure: status 'error', `last_error`, and an error Sync run on top.
+fn assert_failure_recorded(config: &VaultConfig, name: &str) {
+    let detail = crate::ingest::show_source(config, name).expect("show_source");
+    assert_eq!(detail.source.status, "error", "{name}: {:?}", detail.source);
+    assert!(detail.source.last_error.is_some(), "{name}: no last_error");
+    let latest = detail.sync_runs.first().expect("a sync run was recorded");
+    assert_eq!(latest.status, "error", "{name}: {latest:?}");
+    assert!(latest.error_message.is_some(), "{name}: {latest:?}");
+    assert!(latest.finished_at.is_some(), "{name}: {latest:?}");
+    assert_eq!(
+        detail
+            .sync_runs
+            .iter()
+            .filter(|r| r.status == "running")
+            .count(),
+        0,
+        "{name}: no run left running"
+    );
+}
+
+async fn add_local(lifecycle: &SourceLifecycle, dir: &std::path::Path, name: &str) {
+    lifecycle
+        .add(
+            AddSourceParams {
+                origin: dir.to_string_lossy().into_owned(),
+                name: Some(name.into()),
+                ..Default::default()
+            },
+            false,
+        )
+        .await
+        .expect("register local source");
+}
+
+#[tokio::test]
+async fn missing_local_folder_records_error_run() {
+    let vault_dir = tempdir().expect("vault tempdir");
+    let config = VaultConfig::new(vault_dir.path());
+    let lifecycle = SourceLifecycle::new(config.clone());
+
+    for name in ["via-sync", "via-claim"] {
+        let docs_dir = tempdir().expect("docs tempdir");
+        add_local(&lifecycle, docs_dir.path(), name).await;
+        drop(docs_dir); // the folder disappears
+    }
+
+    lifecycle
+        .sync("via-sync", false)
+        .await
+        .expect_err("missing folder must fail");
+    assert_failure_recorded(&config, "via-sync");
+
+    // The path the UI, scheduler and watcher take: claim, then run.
+    let claimed = lifecycle
+        .claim("via-claim")
+        .await
+        .expect("claim")
+        .expect("free");
+    claimed
+        .run(false)
+        .await
+        .expect_err("missing folder must fail");
+    assert_failure_recorded(&config, "via-claim");
+}
+
+#[tokio::test]
+async fn rejected_private_origin_records_error_run() {
+    let vault_dir = tempdir().expect("vault tempdir");
+    let config = VaultConfig::new(vault_dir.path());
+    let conn = crate::db::open_rw_db(&config.db_path()).expect("open db");
+    conn.execute(
+        "INSERT INTO sources (name, kind, origin) VALUES ('legacy', 'web', 'http://10.1.2.3/docs')",
+        [],
+    )
+    .expect("insert legacy private source");
+    drop(conn);
+
+    SourceLifecycle::new(config.clone())
+        .sync("legacy", false)
+        .await
+        .expect_err("private origin refused");
+    assert_failure_recorded(&config, "legacy");
+}
+
+#[tokio::test]
+async fn add_with_sync_failure_records_error_run() {
+    let vault_dir = tempdir().expect("vault tempdir");
+    let config = VaultConfig::new(vault_dir.path()).allowing_private_origins();
+    // Nothing listens on port 9 (discard), so the crawl fails.
+    SourceLifecycle::new(config.clone())
+        .add(
+            AddSourceParams {
+                origin: "http://127.0.0.1:9/docs/".into(),
+                name: Some("unreachable".into()),
+                ..Default::default()
+            },
+            true,
+        )
+        .await
+        .expect_err("first sync fails");
+    assert_failure_recorded(&config, "unreachable");
+}
+
+#[tokio::test]
+async fn sync_all_continues_after_failure() {
+    let vault_dir = tempdir().expect("vault tempdir");
+    let config = VaultConfig::new(vault_dir.path());
+    let lifecycle = SourceLifecycle::new(config.clone());
+
+    let dirs: Vec<_> = (0..3).map(|_| tempdir().expect("docs tempdir")).collect();
+    for (dir, name) in dirs.iter().zip(["a-first", "b-broken", "c-last"]) {
+        std::fs::write(dir.path().join("p.md"), "# P\n\nPage.\n").expect("write");
+        add_local(&lifecycle, dir.path(), name).await;
+    }
+    let mut dirs = dirs.into_iter();
+    let (first, broken, last) = (dirs.next(), dirs.next(), dirs.next());
+    drop(broken);
+
+    let results = lifecycle.sync_all(false).await.expect("sync_all");
+    let names: Vec<&str> = results.iter().map(|r| r.name.as_str()).collect();
+    assert_eq!(names, ["a-first", "b-broken", "c-last"]);
+    assert!(matches!(results[0].result, Ok(SyncOutcome::Synced(_))));
+    assert!(results[1].result.is_err());
+    assert!(matches!(results[2].result, Ok(SyncOutcome::Synced(_))));
+    assert_failure_recorded(&config, "b-broken");
+    drop((first, last));
 }

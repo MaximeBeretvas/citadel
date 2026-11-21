@@ -375,6 +375,9 @@ To eliminate false-positive diffs (such as volatile `created:` / `updated:` / `c
   - `origin` URLs must use `http://` or `https://` and reject Private origins (loopback, RFC1918, link-local such as `169.254.169.254`, CGNAT, multicast, `localhost`/`*.local`) unless `WEB_VAULT_ALLOW_PRIVATE_ORIGINS=1`. The same rule (`src/sources/origin.rs`) applies to every entry point: CLI `add`, UI `POST /api/sources`, MCP `manage add`, and every Sync, including the scheduler.
   - Local `origin` paths must resolve to an existing directory (`canonicalize`) and only ingest `*.md` / `*.markdown` files.
   - `remove` returns the deleted source name and page count; `add`/`sync` returns structured sync summary (`pages_added`, `pages_updated`, `pages_unchanged`, `pages_stale`, `pages_failed`).
+  - `sync` without `name` syncs every Source independently and also returns `results`: one entry per Source with `outcome` `synced` (plus `summary`), `already_syncing`, or `error` (plus `error`). A failed Source never stops the others.
+  - A Source whose Sync claim is held elsewhere is not synced or removed: `sync`/`remove` return `outcome: "already_syncing"` with `isError: false`.
+  - Every failed Sync, from any entry point, records an error Sync run and sets the Source's `status = 'error'` and `last_error`.
 - **Error response (both tools):** `isError: true` with an actionable error message (e.g., `"Write operations are disabled on MCP query tool"`, `"no such column: ..."`, or `"origin must be an http(s) URL or existing directory"`), enabling immediate LLM self-correction.
 
 ---
@@ -388,7 +391,7 @@ web-vault
                     [--exclude <pat>...] [--render-js] [--no-sync]
   list [--json]
   show <name>                     # source details, sync history, stale/error pages
-  sync [<name>] [--all] [--prune] # manual sync for one or all sources
+  sync [<name>] [--all] [--prune] # manual sync; --all reports every source, exits 1 if any failed
   rm <name> [--yes]               # remove source and cascade stored pages
                                   # add/sync refuse Private origins (loopback, RFC1918,
                                   # link-local, localhost) unless WEB_VAULT_ALLOW_PRIVATE_ORIGINS=1

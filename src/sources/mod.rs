@@ -51,6 +51,13 @@ pub enum SyncOutcome {
     AlreadySyncing,
 }
 
+/// One Source's result within [`SourceLifecycle::sync_all`].
+#[derive(Debug)]
+pub struct SourceSyncResult {
+    pub name: String,
+    pub result: Result<SyncOutcome>,
+}
+
 /// Result of asking to remove a Source.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Removal {
@@ -128,9 +135,9 @@ impl SourceLifecycle {
         }
     }
 
-    /// Sync every registered Source in name order, stopping at the first failure.
-    /// Sources that are already syncing are skipped.
-    pub async fn sync_all(&self, prune: bool) -> Result<Vec<SyncSummary>> {
+    /// Sync every registered Source in name order. Each Source gets its own result, so
+    /// one failure does not stop the others.
+    pub async fn sync_all(&self, prune: bool) -> Result<Vec<SourceSyncResult>> {
         let config = self.config.clone();
         let sources = blocking(move || {
             if !config.db_path().exists() {
@@ -141,15 +148,17 @@ impl SourceLifecycle {
         })
         .await?;
 
-        let mut summaries = Vec::with_capacity(sources.len());
+        let mut results = Vec::with_capacity(sources.len());
         for source in sources {
             let name = source.name.clone();
-            match self.claim_record(source).await? {
-                Some(claimed) => summaries.push(claimed.run(prune).await?),
-                None => tracing::info!(source = %name, "skipped: already syncing"),
-            }
+            let result = match self.claim_record(source).await {
+                Ok(Some(claimed)) => claimed.run(prune).await.map(SyncOutcome::Synced),
+                Ok(None) => Ok(SyncOutcome::AlreadySyncing),
+                Err(err) => Err(err),
+            };
+            results.push(SourceSyncResult { name, result });
         }
-        Ok(summaries)
+        Ok(results)
     }
 
     /// Take the Sync claim on a Source so its Sync can run later via [`ClaimedSync::run`].
@@ -184,7 +193,38 @@ impl SourceLifecycle {
         }))
     }
 
+    /// Run one Sync of a claimed Source. Any failure, whether before or during the walk
+    /// or crawl, leaves the same trace: an error Sync run and `status = 'error'`.
     async fn sync_record(&self, source: &SourceRecord, prune: bool) -> Result<SyncSummary> {
+        let config = self.config.clone();
+        let id = source.id;
+        let last_run_before = blocking(move || {
+            let conn = open_rw_db(&config.db_path())?;
+            Ok(conn.query_row(
+                "SELECT COALESCE(MAX(id), 0) FROM sync_runs WHERE source_id = ?1",
+                [id],
+                |r| r.get::<_, i64>(0),
+            )?)
+        })
+        .await?;
+
+        let result = self.run_sync(source, prune).await;
+        if let Err(err) = &result {
+            let config = self.config.clone();
+            let message = err.to_string();
+            let recorded = blocking(move || {
+                let conn = open_rw_db(&config.db_path())?;
+                record_sync_failure(&conn, id, last_run_before, &message)
+            })
+            .await;
+            if let Err(record_err) = recorded {
+                tracing::warn!(source = %source.name, error = %record_err, "failed to record sync failure");
+            }
+        }
+        result
+    }
+
+    async fn run_sync(&self, source: &SourceRecord, prune: bool) -> Result<SyncSummary> {
         match source.kind {
             SourceKind::Local => {
                 let config = self.config.clone();
@@ -200,7 +240,6 @@ impl SourceLifecycle {
                         &src.exclude_patterns,
                         prune,
                     )
-                    .inspect_err(|err| record_pre_walk_error(&conn, src.id, &err.to_string()))
                 })
                 .await
             }
@@ -380,27 +419,33 @@ fn register_source_row(config: &VaultConfig, params: AddSourceParams) -> Result<
     load_source_by_id(&conn, source_id)
 }
 
-fn record_pre_walk_error(conn: &Connection, source_id: i64, message: &str) {
-    let has_running: bool = conn
-        .query_row(
-            "SELECT COUNT(*) FROM sync_runs WHERE source_id = ?1 AND status = 'running'",
-            [source_id],
-            |r| r.get::<_, i64>(0),
-        )
-        .map(|count| count > 0)
-        .unwrap_or(false);
-
-    if !has_running {
-        let _ = conn.execute(
-            "INSERT INTO sync_runs (source_id, started_at, finished_at, status, error_message)
-             VALUES (?1, strftime('%Y-%m-%dT%H:%M:%SZ', 'now'), strftime('%Y-%m-%dT%H:%M:%SZ', 'now'), 'error', ?2)",
-            params![source_id, message],
-        );
-    }
-    let _ = conn.execute(
+/// Record a failed Sync: close the Sync run it started (or add one if it failed before
+/// starting one) and mark the Source as errored.
+fn record_sync_failure(
+    conn: &Connection,
+    source_id: i64,
+    last_run_before: i64,
+    message: &str,
+) -> Result<()> {
+    conn.execute(
+        "UPDATE sync_runs
+         SET status = 'error', error_message = ?2,
+             finished_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now')
+         WHERE source_id = ?1 AND status = 'running'",
+        params![source_id, message],
+    )?;
+    conn.execute(
+        "INSERT INTO sync_runs (source_id, started_at, finished_at, status, error_message)
+         SELECT ?1, strftime('%Y-%m-%dT%H:%M:%SZ', 'now'), strftime('%Y-%m-%dT%H:%M:%SZ', 'now'),
+                'error', ?3
+         WHERE NOT EXISTS (SELECT 1 FROM sync_runs WHERE source_id = ?1 AND id > ?2)",
+        params![source_id, last_run_before, message],
+    )?;
+    conn.execute(
         "UPDATE sources SET status = 'error', last_error = ?2 WHERE id = ?1",
         params![source_id, message],
-    );
+    )?;
+    Ok(())
 }
 
 fn validate_source_limits(

@@ -9,7 +9,7 @@ pub use crate::skill::SkillTarget;
 use crate::config::VaultConfig;
 use crate::db::{execute_readonly_query, QueryResult};
 use crate::ingest::{self, parse_duration_secs, SourceDetail, SourceSummary, SyncSummary};
-use crate::sources::{AddSourceParams, Removal, SourceLifecycle, SyncOutcome};
+use crate::sources::{AddSourceParams, Removal, SourceLifecycle, SourceSyncResult, SyncOutcome};
 
 /// Local knowledge vault & MCP server for documentation sites and Markdown folders.
 #[derive(Debug, Parser)]
@@ -282,25 +282,38 @@ pub fn run_cli_with_writer<W: Write>(cli: Cli, out: &mut W) -> anyhow::Result<()
         }
         Commands::Sync { name, all, prune } => {
             let lifecycle = SourceLifecycle::new(config);
-            let summaries = match (name, all) {
+            match (name, all) {
                 (Some(_), true) => {
                     anyhow::bail!("cannot specify both a source <name> and --all")
                 }
                 (None, false) => anyhow::bail!("specify a source <name> or pass --all"),
                 (Some(name), false) => match block_on(lifecycle.sync(&name, prune))?? {
-                    SyncOutcome::Synced(summary) => vec![summary],
+                    SyncOutcome::Synced(summary) => write_sync_summary(out, &summary)?,
                     SyncOutcome::AlreadySyncing => {
                         writeln!(out, "Source '{name}' is already syncing; nothing started.")?;
-                        return Ok(());
                     }
                 },
-                (None, true) => block_on(lifecycle.sync_all(prune))??,
-            };
-            if summaries.is_empty() {
-                writeln!(out, "No sources configured.")?;
-            } else {
-                for sum in &summaries {
-                    write_sync_summary(out, sum)?;
+                (None, true) => {
+                    let results = block_on(lifecycle.sync_all(prune))??;
+                    if results.is_empty() {
+                        writeln!(out, "No sources configured.")?;
+                    }
+                    let mut failed = 0usize;
+                    for SourceSyncResult { name, result } in &results {
+                        match result {
+                            Ok(SyncOutcome::Synced(summary)) => write_sync_summary(out, summary)?,
+                            Ok(SyncOutcome::AlreadySyncing) => {
+                                writeln!(out, "Source '{name}' is already syncing; skipped.")?;
+                            }
+                            Err(err) => {
+                                failed += 1;
+                                writeln!(out, "Failed '{name}': {err}")?;
+                            }
+                        }
+                    }
+                    if failed > 0 {
+                        anyhow::bail!("{failed} of {} sources failed to sync", results.len());
+                    }
                 }
             }
             Ok(())
@@ -739,6 +752,34 @@ mod tests {
         let mut buf = Vec::new();
         run_cli_with_writer(cli, &mut buf)?;
         Ok(String::from_utf8(buf)?)
+    }
+
+    #[test]
+    fn sync_all_exits_nonzero_when_any_source_fails() {
+        let vault_dir = tempdir().expect("vault tempdir");
+        let good = tempdir().expect("good docs");
+        let gone = tempdir().expect("gone docs");
+        std::fs::write(good.path().join("a.md"), "# A\n\nAlpha.\n").expect("write");
+        let good_path = good.path().to_string_lossy().into_owned();
+        let gone_path = gone.path().to_string_lossy().into_owned();
+        run_args(
+            vault_dir.path(),
+            &["add", &good_path, "--name", "good", "--no-sync"],
+        )
+        .expect("add good");
+        run_args(
+            vault_dir.path(),
+            &["add", &gone_path, "--name", "gone", "--no-sync"],
+        )
+        .expect("add gone");
+        drop(gone);
+
+        let err = run_args(vault_dir.path(), &["sync", "--all"])
+            .expect_err("a failed source makes sync --all fail");
+        assert!(err.to_string().contains("1 of 2"), "{err}");
+
+        let show = run_args(vault_dir.path(), &["show", "good"]).expect("show good");
+        assert!(show.contains("ok"), "good source still synced: {show}");
     }
 
     #[test]
