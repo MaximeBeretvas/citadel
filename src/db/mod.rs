@@ -1,8 +1,15 @@
+pub mod readonly;
+
 use std::path::Path;
 
 use rusqlite::Connection;
 
 use crate::error::Result;
+
+pub use readonly::{
+    execute_readonly_query, execute_readonly_query_with_options, QueryOptions, QueryResult,
+    DEFAULT_MAX_PAYLOAD_BYTES, DEFAULT_QUERY_LIMIT, DEFAULT_QUERY_TIMEOUT_MS, MAX_QUERY_LIMIT,
+};
 
 /// Embedded SQLite DDL, FTS5 triggers, and views.
 pub const SCHEMA_SQL: &str = include_str!("schema.sql");
