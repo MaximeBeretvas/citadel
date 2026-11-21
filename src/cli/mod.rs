@@ -383,7 +383,11 @@ fn write_sync_summary<W: Write>(out: &mut W, sum: &SyncSummary) -> std::io::Resu
     if sum.pruned > 0 {
         write!(out, ", {} pruned", sum.pruned)?;
     }
-    writeln!(out)
+    writeln!(out)?;
+    for warning in &sum.warnings {
+        writeln!(out, "Warning: {warning}")?;
+    }
+    Ok(())
 }
 
 fn write_sources_table<W: Write>(out: &mut W, sources: &[SourceSummary]) -> std::io::Result<()> {

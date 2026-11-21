@@ -6,7 +6,7 @@ description = "Local knowledge vault and MCP server for web documentation and Ma
 
 [features]
 default = []
-chrome = []
+chrome = ["spider/chrome"]
 
 [dependencies]
 anyhow = "1"
@@ -26,6 +26,8 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"
 similar = "2"
+spider = { version = "2.54", default-features = false, features = ["sync", "sitemap", "regex", "headers", "encoding", "time", "reqwest_rustls_tls", "string_interner_buffer_backend"] }
+spider_transformations = "2.39"
 thiserror = "2"
 tokio = { version = "1", features = ["full"] }
 tokio-util = "0.7"

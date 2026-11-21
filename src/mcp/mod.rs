@@ -772,7 +772,7 @@ mod tests {
         .expect("ssrf response");
         assert_eq!(ssrf_resp["result"]["isError"], true);
 
-        // 6. Web URL with sync_now=true before Task 08 returns clear actionable error
+        // 6. Public web URL with sync_now=false passes SSRF check and registers cleanly
         let web_resp = handle_jsonrpc_value(
             &cfg,
             json!({
@@ -783,16 +783,20 @@ mod tests {
                     "name": "manage",
                     "arguments": {
                         "action": "add",
-                        "origin": "https://docs.example.com"
+                        "origin": "https://docs.example.com",
+                        "sync_now": false
                     }
                 }
             }),
         )
         .expect("web add response");
-        assert_eq!(web_resp["result"]["isError"], true);
-        let web_err = web_resp["result"]["content"][0]["text"].as_str().unwrap();
-        assert!(web_err.contains("Task 08"));
-        assert!(web_err.contains("sync_now: false"));
+        assert_eq!(web_resp["result"]["isError"], false);
+        let web_payload: Value =
+            serde_json::from_str(web_resp["result"]["content"][0]["text"].as_str().unwrap())
+                .expect("web add payload JSON");
+        assert_eq!(web_payload["source"]["kind"], "web");
+        assert_eq!(web_payload["source"]["name"], "docs-example-com");
+        assert!(web_payload["sync_summary"].is_null());
 
         // 7. Remove source
         let rm_resp = handle_jsonrpc_value(

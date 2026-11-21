@@ -47,7 +47,7 @@ flowchart TD
 - [x] [07-skill-installer.md](./07-skill-installer.md) — Embedded router `SKILL.md` + `web-vault skill install` (`.`, `--path`, `--global`)
 
 ### Phase 2 — Web Crawling, UI, Daemon, Serve & Apple `container`
-- [ ] [08-web-crawler-spider.md](./08-web-crawler-spider.md) — `spider` + `spider_transformations` crawler, `sitemap.xml`/`llms.txt`, optional `chrome` feature
+- [x] [08-web-crawler-spider.md](./08-web-crawler-spider.md) — `spider` + `spider_transformations` crawler, `sitemap.xml`/`llms.txt`, optional `chrome` feature
 - [ ] [09-ui-rest-api-and-server.md](./09-ui-rest-api-and-server.md) — Axum localhost server, Origin guard, `/api/*` endpoints, `web-vault ui`
 - [ ] [10-embedded-web-ui-assets.md](./10-embedded-web-ui-assets.md) — Offline `rust-embed` HTML/CSS/JS (Sources, Browser, Diffs/Health, SQL Explorer)
 - [ ] [11-daemon-scheduler-and-watcher.md](./11-daemon-scheduler-and-watcher.md) — PID lock, 60s scheduler, `notify` watcher, `launchd`/`systemd` service install

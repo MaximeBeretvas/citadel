@@ -1,6 +1,7 @@
 pub mod local;
 pub mod normalize;
 pub mod sections;
+pub mod web;
 
 use std::path::Path;
 
@@ -18,6 +19,7 @@ pub use normalize::{
     strip_volatile_frontmatter, unified_diff, NormalizedDocument, MAX_DIFF_BYTES,
 };
 pub use sections::{split_sections, SectionChunk};
+pub use web::sync_web_source;
 
 const DEFAULT_REFRESH_INTERVAL_SECS: i64 = 86_400;
 const DEFAULT_MAX_PAGES: u32 = 500;
@@ -215,6 +217,64 @@ pub fn add_source(
     params: AddSourceParams,
     sync_now: bool,
 ) -> Result<(SourceRecord, Option<SyncSummary>)> {
+    let record = register_source_row(config, params)?;
+    if !sync_now {
+        return Ok((record, None));
+    }
+
+    let summary = match record.kind {
+        SourceKind::Local => {
+            let mut conn = open_rw_db(&config.db_path())?;
+            sync_local_source(
+                &mut conn,
+                record.id,
+                &record.name,
+                Path::new(&record.origin),
+                &record.include_patterns,
+                &record.exclude_patterns,
+                false,
+            )?
+        }
+        SourceKind::Web => run_async_blocking(sync_web_source(&config.db_path(), &record, false))?,
+    };
+    let conn = open_rw_db(&config.db_path())?;
+    let updated = load_source_by_id(&conn, record.id)?;
+    Ok((updated, Some(summary)))
+}
+
+/// Async variant of [`add_source`] supporting immediate web crawling without blocking an async executor.
+pub async fn add_source_async(
+    config: &VaultConfig,
+    params: AddSourceParams,
+    sync_now: bool,
+) -> Result<(SourceRecord, Option<SyncSummary>)> {
+    let record = register_source_row(config, params)?;
+    if !sync_now {
+        return Ok((record, None));
+    }
+
+    let summary = match record.kind {
+        SourceKind::Local => {
+            let mut conn = open_rw_db(&config.db_path())?;
+            sync_local_source(
+                &mut conn,
+                record.id,
+                &record.name,
+                Path::new(&record.origin),
+                &record.include_patterns,
+                &record.exclude_patterns,
+                false,
+            )?
+        }
+        SourceKind::Web => sync_web_source(&config.db_path(), &record, false).await?,
+    };
+
+    let conn = open_rw_db(&config.db_path())?;
+    let updated = load_source_by_id(&conn, record.id)?;
+    Ok((updated, Some(summary)))
+}
+
+fn register_source_row(config: &VaultConfig, params: AddSourceParams) -> Result<SourceRecord> {
     let (kind, normalized_origin) = classify_origin(&params.origin)?;
     let refresh_interval_secs = params
         .refresh_interval_secs
@@ -230,14 +290,7 @@ pub fn add_source(
     let includes = normalize_string_list(params.include_patterns);
     let excludes = normalize_string_list(params.exclude_patterns);
 
-    if kind == SourceKind::Web && sync_now {
-        return Err(VaultError::Other(
-            "web crawling sync is not yet implemented until Task 08; pass --no-sync to register now"
-                .into(),
-        ));
-    }
-
-    let mut conn = open_rw_db(&config.db_path())?;
+    let conn = open_rw_db(&config.db_path())?;
 
     if let Some(existing_name) = conn
         .query_row(
@@ -277,24 +330,7 @@ pub fn add_source(
     )?;
 
     let source_id = conn.last_insert_rowid();
-
-    let summary = if sync_now {
-        let sum = sync_local_source(
-            &mut conn,
-            source_id,
-            &slug,
-            Path::new(&normalized_origin),
-            &includes,
-            &excludes,
-            false,
-        )?;
-        Some(sum)
-    } else {
-        None
-    };
-
-    let record = load_source_by_id(&conn, source_id)?;
-    Ok((record, summary))
+    load_source_by_id(&conn, source_id)
 }
 
 /// List all sources with live page and word counts from `v_sources`.
@@ -399,6 +435,84 @@ pub fn sync_sources(
     all: bool,
     prune: bool,
 ) -> Result<Vec<SyncSummary>> {
+    let targets = load_sync_targets(config, name, all)?;
+    let mut summaries = Vec::with_capacity(targets.len());
+
+    for src in targets {
+        match src.kind {
+            SourceKind::Local => {
+                let mut conn = open_rw_db(&config.db_path())?;
+                match sync_local_source(
+                    &mut conn,
+                    src.id,
+                    &src.name,
+                    Path::new(&src.origin),
+                    &src.include_patterns,
+                    &src.exclude_patterns,
+                    prune,
+                ) {
+                    Ok(summary) => summaries.push(summary),
+                    Err(err) => {
+                        record_pre_walk_error(&conn, src.id, &err.to_string());
+                        return Err(err);
+                    }
+                }
+            }
+            SourceKind::Web => {
+                let summary = run_async_blocking(sync_web_source(&config.db_path(), &src, prune))?;
+                summaries.push(summary);
+            }
+        }
+    }
+
+    Ok(summaries)
+}
+
+/// Async variant of [`sync_sources`] supporting web crawling inside an existing Tokio runtime.
+pub async fn sync_sources_async(
+    config: &VaultConfig,
+    name: Option<&str>,
+    all: bool,
+    prune: bool,
+) -> Result<Vec<SyncSummary>> {
+    let targets = load_sync_targets(config, name, all)?;
+    let mut summaries = Vec::with_capacity(targets.len());
+
+    for src in targets {
+        match src.kind {
+            SourceKind::Local => {
+                let mut conn = open_rw_db(&config.db_path())?;
+                match sync_local_source(
+                    &mut conn,
+                    src.id,
+                    &src.name,
+                    Path::new(&src.origin),
+                    &src.include_patterns,
+                    &src.exclude_patterns,
+                    prune,
+                ) {
+                    Ok(summary) => summaries.push(summary),
+                    Err(err) => {
+                        record_pre_walk_error(&conn, src.id, &err.to_string());
+                        return Err(err);
+                    }
+                }
+            }
+            SourceKind::Web => {
+                let summary = sync_web_source(&config.db_path(), &src, prune).await?;
+                summaries.push(summary);
+            }
+        }
+    }
+
+    Ok(summaries)
+}
+
+fn load_sync_targets(
+    config: &VaultConfig,
+    name: Option<&str>,
+    all: bool,
+) -> Result<Vec<SourceRecord>> {
     if name.is_some() && all {
         return Err(VaultError::Validation(
             "cannot specify both a source <name> and --all".into(),
@@ -419,43 +533,41 @@ pub fn sync_sources(
         return Ok(Vec::new());
     }
 
-    let mut conn = open_rw_db(&config.db_path())?;
-    let targets = if let Some(target_name) = name {
-        vec![load_source_by_name(&conn, target_name)?]
+    let conn = open_rw_db(&config.db_path())?;
+    if let Some(target_name) = name {
+        Ok(vec![load_source_by_name(&conn, target_name)?])
     } else {
-        load_all_sources(&conn)?
-    };
-
-    let mut summaries = Vec::with_capacity(targets.len());
-    for src in targets {
-        match src.kind {
-            SourceKind::Local => {
-                match sync_local_source(
-                    &mut conn,
-                    src.id,
-                    &src.name,
-                    Path::new(&src.origin),
-                    &src.include_patterns,
-                    &src.exclude_patterns,
-                    prune,
-                ) {
-                    Ok(summary) => summaries.push(summary),
-                    Err(err) => {
-                        record_pre_walk_error(&conn, src.id, &err.to_string());
-                        return Err(err);
-                    }
-                }
-            }
-            SourceKind::Web => {
-                return Err(VaultError::Other(format!(
-                    "web crawling sync for '{}' is not yet implemented until Task 08",
-                    src.name
-                )));
-            }
-        }
+        load_all_sources(&conn)
     }
+}
 
-    Ok(summaries)
+fn run_async_blocking<F, T>(fut: F) -> Result<T>
+where
+    F: std::future::Future<Output = Result<T>> + Send,
+    T: Send,
+{
+    if tokio::runtime::Handle::try_current().is_ok() {
+        std::thread::scope(|scope| {
+            scope
+                .spawn(move || {
+                    let rt = tokio::runtime::Builder::new_multi_thread()
+                        .enable_all()
+                        .build()
+                        .map_err(|err| {
+                            VaultError::Other(format!("failed to build tokio runtime: {err}"))
+                        })?;
+                    rt.block_on(fut)
+                })
+                .join()
+                .map_err(|_| VaultError::Other("async ingestion thread panicked".into()))?
+        })
+    } else {
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .map_err(|err| VaultError::Other(format!("failed to build tokio runtime: {err}")))?;
+        rt.block_on(fut)
+    }
 }
 
 /// Update mutable configuration fields for an existing source.
@@ -922,17 +1034,6 @@ mod tests {
         std::fs::write(docs_dir.path().join("intro.md"), "# Intro\n\nHello.\n").expect("write");
 
         let cfg = VaultConfig::new(vault_dir.path());
-
-        let web_sync_err = add_source(
-            &cfg,
-            AddSourceParams {
-                origin: "https://example.com/docs".to_string(),
-                ..Default::default()
-            },
-            true,
-        )
-        .expect_err("syncing web should explain Task 08");
-        assert!(web_sync_err.to_string().contains("Task 08"));
 
         let (web_rec, web_sum) = add_source(
             &cfg,

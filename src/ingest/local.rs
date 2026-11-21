@@ -7,8 +7,8 @@ use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 
 use crate::error::{Result, VaultError};
-use crate::ingest::normalize::{normalize_markdown, unified_diff};
-use crate::ingest::sections::split_sections;
+use crate::ingest::normalize::{normalize_markdown, unified_diff, NormalizedDocument};
+use crate::ingest::sections::{split_sections, SectionChunk};
 
 /// Summary metrics produced by syncing a single source.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -20,6 +20,8 @@ pub struct SyncSummary {
     pub pages_stale: usize,
     pub pages_failed: usize,
     pub pruned: usize,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -118,6 +120,54 @@ pub fn canonicalize_local_dir(origin: &Path) -> Result<PathBuf> {
     Ok(canonical)
 }
 
+/// Normalized page outcome produced by local or web ingestion before SQLite persistence.
+pub(crate) enum PageIngestOutcome {
+    Ready {
+        uri: String,
+        doc: NormalizedDocument,
+        chunks: Vec<SectionChunk>,
+        etag: Option<String>,
+        last_modified: Option<String>,
+        http_status: Option<i64>,
+    },
+    Failed {
+        uri: String,
+        http_status: Option<i64>,
+        error_message: String,
+        insert_if_missing: bool,
+    },
+}
+
+/// Mark a source as `'syncing'` and insert a new `'running'` row into `sync_runs`.
+pub(crate) fn start_sync_run(conn: &Connection, source_id: i64) -> Result<i64> {
+    conn.execute(
+        "UPDATE sources SET status = 'syncing', last_error = NULL WHERE id = ?1",
+        [source_id],
+    )?;
+    conn.execute(
+        "INSERT INTO sync_runs (source_id, started_at, status)
+         VALUES (?1, strftime('%Y-%m-%dT%H:%M:%SZ', 'now'), 'running')",
+        [source_id],
+    )?;
+    Ok(conn.last_insert_rowid())
+}
+
+/// Record a failed sync run on both `sync_runs` and `sources`.
+pub(crate) fn fail_sync_run(conn: &Connection, source_id: i64, run_id: i64, message: &str) {
+    let _ = conn.execute(
+        "UPDATE sync_runs
+         SET finished_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now'),
+             status = 'error',
+             error_message = ?2
+         WHERE id = ?1",
+        params![run_id, message],
+    );
+    let _ = conn.execute(
+        "UPDATE sources SET status = 'error', last_error = ?2 WHERE id = ?1",
+        params![source_id, message],
+    );
+}
+
 /// Synchronize a local Markdown directory into `pages`, `sections`, `page_revisions`, and `sync_runs`.
 pub fn sync_local_source(
     conn: &mut Connection,
@@ -130,69 +180,36 @@ pub fn sync_local_source(
 ) -> Result<SyncSummary> {
     let canon_root = canonicalize_local_dir(origin_dir)?;
     let matcher = PatternMatcher::new(include_patterns, exclude_patterns)?;
+    let run_id = start_sync_run(conn, source_id)?;
 
-    conn.execute(
-        "UPDATE sources SET status = 'syncing', last_error = NULL WHERE id = ?1",
-        [source_id],
-    )?;
-    conn.execute(
-        "INSERT INTO sync_runs (source_id, started_at, status)
-         VALUES (?1, strftime('%Y-%m-%dT%H:%M:%SZ', 'now'), 'running')",
-        [source_id],
-    )?;
-    let run_id = conn.last_insert_rowid();
-
-    match execute_local_sync(
-        conn,
-        source_id,
-        source_name,
-        run_id,
-        &canon_root,
-        &matcher,
-        prune,
-    ) {
+    match collect_local_outcomes(source_name, &canon_root, &matcher).and_then(|outcomes| {
+        persist_sync_outcomes(
+            conn,
+            source_id,
+            source_name,
+            run_id,
+            outcomes,
+            prune,
+            Vec::new(),
+        )
+    }) {
         Ok(summary) => Ok(summary),
         Err(err) => {
-            let msg = err.to_string();
-            let _ = conn.execute(
-                "UPDATE sync_runs
-                 SET finished_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now'),
-                     status = 'error',
-                     error_message = ?2
-                 WHERE id = ?1",
-                params![run_id, msg],
-            );
-            let _ = conn.execute(
-                "UPDATE sources SET status = 'error', last_error = ?2 WHERE id = ?1",
-                params![source_id, msg],
-            );
+            fail_sync_run(conn, source_id, run_id, &err.to_string());
             Err(err)
         }
     }
 }
 
-fn execute_local_sync(
-    conn: &mut Connection,
-    source_id: i64,
+fn collect_local_outcomes(
     source_name: &str,
-    run_id: i64,
     canon_root: &Path,
     matcher: &PatternMatcher,
-    prune: bool,
-) -> Result<SyncSummary> {
+) -> Result<Vec<PageIngestOutcome>> {
     let files = collect_markdown_files(canon_root, matcher)?;
-
-    let mut summary = SyncSummary {
-        source_name: source_name.to_string(),
-        ..Default::default()
-    };
-    let mut seen_uris: HashSet<String> = HashSet::with_capacity(files.len());
-
-    let tx = conn.transaction()?;
+    let mut outcomes = Vec::with_capacity(files.len());
 
     for (uri, abs_path) in files {
-        seen_uris.insert(uri.clone());
-
         let raw_bytes = match fs::read(&abs_path) {
             Ok(bytes) => bytes,
             Err(io_err) => {
@@ -202,15 +219,12 @@ fn execute_local_sync(
                     error = %io_err,
                     "failed to read markdown file"
                 );
-                summary.pages_failed += 1;
-                tx.execute(
-                    "UPDATE pages
-                     SET status = 'error',
-                         error_message = ?1,
-                         last_checked_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now')
-                     WHERE source_id = ?2 AND uri = ?3",
-                    params![io_err.to_string(), source_id, uri],
-                )?;
+                outcomes.push(PageIngestOutcome::Failed {
+                    uri,
+                    http_status: None,
+                    error_message: io_err.to_string(),
+                    insert_if_missing: false,
+                });
                 continue;
             }
         };
@@ -235,89 +249,220 @@ fn execute_local_sync(
 
         let doc = normalize_markdown(&raw_md, &fallback_title);
         let chunks = split_sections(&doc.content_md);
+        outcomes.push(PageIngestOutcome::Ready {
+            uri,
+            doc,
+            chunks,
+            etag: None,
+            last_modified: None,
+            http_status: None,
+        });
+    }
 
-        let existing: Option<(i64, String, String, String)> = tx
-            .query_row(
-                "SELECT id, content_hash, content_md, status
-                 FROM pages
-                 WHERE source_id = ?1 AND uri = ?2",
-                params![source_id, uri],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
-            )
-            .optional()?;
+    Ok(outcomes)
+}
 
-        match existing {
-            None => {
-                tx.execute(
-                    "INSERT INTO pages (source_id, uri, title, content_md, content_hash, word_count, status)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'active')",
-                    params![
-                        source_id,
-                        uri,
-                        doc.title,
-                        doc.content_md,
-                        doc.content_hash,
-                        i64::try_from(doc.word_count).unwrap_or(i64::MAX),
-                    ],
-                )?;
-                let page_id = tx.last_insert_rowid();
-                insert_sections(&tx, page_id, source_id, &chunks)?;
-                summary.pages_added += 1;
-            }
-            Some((page_id, old_hash, old_content_md, old_status)) => {
-                if old_hash == doc.content_hash {
-                    if old_status != "active" {
+/// Persist all fetched/failed page outcomes, record diffs, reconcile stale pages, and finalize `sync_runs` + `sources`.
+pub(crate) fn persist_sync_outcomes(
+    conn: &mut Connection,
+    source_id: i64,
+    source_name: &str,
+    run_id: i64,
+    outcomes: Vec<PageIngestOutcome>,
+    prune: bool,
+    warnings: Vec<String>,
+) -> Result<SyncSummary> {
+    let mut summary = SyncSummary {
+        source_name: source_name.to_string(),
+        warnings,
+        ..Default::default()
+    };
+    let mut seen_uris: HashSet<String> = HashSet::with_capacity(outcomes.len());
+
+    let tx = conn.transaction()?;
+
+    for outcome in outcomes {
+        match outcome {
+            PageIngestOutcome::Failed {
+                uri,
+                http_status,
+                error_message,
+                insert_if_missing,
+            } => {
+                seen_uris.insert(uri.clone());
+                summary.pages_failed += 1;
+                let existing_id: Option<i64> = tx
+                    .query_row(
+                        "SELECT id FROM pages WHERE source_id = ?1 AND uri = ?2",
+                        params![source_id, uri],
+                        |row| row.get(0),
+                    )
+                    .optional()?;
+
+                match existing_id {
+                    Some(page_id) => {
                         tx.execute(
                             "UPDATE pages
-                             SET status = 'active',
-                                 error_message = NULL,
+                             SET status = 'error',
+                                 http_status = ?2,
+                                 error_message = ?3,
                                  last_checked_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now')
                              WHERE id = ?1",
-                            [page_id],
-                        )?;
-                    } else {
-                        tx.execute(
-                            "UPDATE pages
-                             SET last_checked_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now')
-                             WHERE id = ?1",
-                            [page_id],
+                            params![page_id, http_status, error_message],
                         )?;
                     }
-                    summary.pages_unchanged += 1;
-                } else {
-                    let diff = unified_diff(&old_content_md, &doc.content_md);
-                    tx.execute(
-                        "INSERT INTO page_revisions (page_id, previous_hash, new_hash, unified_diff, changed_at)
-                         VALUES (?1, ?2, ?3, ?4, strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
-                         ON CONFLICT(page_id) DO UPDATE SET
-                             previous_hash = excluded.previous_hash,
-                             new_hash = excluded.new_hash,
-                             unified_diff = excluded.unified_diff,
-                             changed_at = excluded.changed_at",
-                        params![page_id, old_hash, doc.content_hash, diff],
-                    )?;
-                    tx.execute(
-                        "UPDATE pages
-                         SET title = ?2,
-                             content_md = ?3,
-                             content_hash = ?4,
-                             word_count = ?5,
-                             status = 'active',
-                             error_message = NULL,
-                             last_checked_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now'),
-                             last_changed_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now')
-                         WHERE id = ?1",
-                        params![
-                            page_id,
-                            doc.title,
-                            doc.content_md,
-                            doc.content_hash,
-                            i64::try_from(doc.word_count).unwrap_or(i64::MAX),
-                        ],
-                    )?;
-                    tx.execute("DELETE FROM sections WHERE page_id = ?1", [page_id])?;
-                    insert_sections(&tx, page_id, source_id, &chunks)?;
-                    summary.pages_updated += 1;
+                    None if insert_if_missing => {
+                        tx.execute(
+                            "INSERT INTO pages (
+                                 source_id, uri, title, content_md, content_hash, word_count,
+                                 status, http_status, error_message
+                             ) VALUES (?1, ?2, '', '', '', 0, 'error', ?3, ?4)",
+                            params![source_id, uri, http_status, error_message],
+                        )?;
+                    }
+                    None => {}
+                }
+            }
+            PageIngestOutcome::Ready {
+                uri,
+                doc,
+                chunks,
+                etag,
+                last_modified,
+                http_status,
+            } => {
+                seen_uris.insert(uri.clone());
+                let existing: Option<(i64, String, String, String)> = tx
+                    .query_row(
+                        "SELECT id, content_hash, content_md, status
+                         FROM pages
+                         WHERE source_id = ?1 AND uri = ?2",
+                        params![source_id, uri],
+                        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+                    )
+                    .optional()?;
+
+                match existing {
+                    None => {
+                        tx.execute(
+                            "INSERT INTO pages (
+                                 source_id, uri, title, content_md, content_hash, word_count,
+                                 etag, last_modified, status, http_status
+                             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 'active', ?9)",
+                            params![
+                                source_id,
+                                uri,
+                                doc.title,
+                                doc.content_md,
+                                doc.content_hash,
+                                i64::try_from(doc.word_count).unwrap_or(i64::MAX),
+                                etag,
+                                last_modified,
+                                http_status,
+                            ],
+                        )?;
+                        let page_id = tx.last_insert_rowid();
+                        insert_sections(&tx, page_id, source_id, &chunks)?;
+                        summary.pages_added += 1;
+                    }
+                    Some((page_id, old_hash, old_content_md, old_status)) => {
+                        if old_hash.is_empty() {
+                            tx.execute(
+                                "UPDATE pages
+                                 SET title = ?2,
+                                     content_md = ?3,
+                                     content_hash = ?4,
+                                     word_count = ?5,
+                                     etag = ?6,
+                                     last_modified = ?7,
+                                     status = 'active',
+                                     http_status = ?8,
+                                     error_message = NULL,
+                                     last_checked_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now'),
+                                     last_changed_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now')
+                                 WHERE id = ?1",
+                                params![
+                                    page_id,
+                                    doc.title,
+                                    doc.content_md,
+                                    doc.content_hash,
+                                    i64::try_from(doc.word_count).unwrap_or(i64::MAX),
+                                    etag,
+                                    last_modified,
+                                    http_status,
+                                ],
+                            )?;
+                            tx.execute("DELETE FROM sections WHERE page_id = ?1", [page_id])?;
+                            insert_sections(&tx, page_id, source_id, &chunks)?;
+                            summary.pages_added += 1;
+                        } else if old_hash == doc.content_hash {
+                            if old_status != "active"
+                                || http_status.is_some()
+                                || etag.is_some()
+                                || last_modified.is_some()
+                            {
+                                tx.execute(
+                                    "UPDATE pages
+                                     SET status = 'active',
+                                         error_message = NULL,
+                                         etag = COALESCE(?2, etag),
+                                         last_modified = COALESCE(?3, last_modified),
+                                         http_status = COALESCE(?4, http_status),
+                                         last_checked_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now')
+                                     WHERE id = ?1",
+                                    params![page_id, etag, last_modified, http_status],
+                                )?;
+                            } else {
+                                tx.execute(
+                                    "UPDATE pages
+                                     SET last_checked_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now')
+                                     WHERE id = ?1",
+                                    [page_id],
+                                )?;
+                            }
+                            summary.pages_unchanged += 1;
+                        } else {
+                            let diff = unified_diff(&old_content_md, &doc.content_md);
+                            tx.execute(
+                                "INSERT INTO page_revisions (page_id, previous_hash, new_hash, unified_diff, changed_at)
+                                 VALUES (?1, ?2, ?3, ?4, strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+                                 ON CONFLICT(page_id) DO UPDATE SET
+                                     previous_hash = excluded.previous_hash,
+                                     new_hash = excluded.new_hash,
+                                     unified_diff = excluded.unified_diff,
+                                     changed_at = excluded.changed_at",
+                                params![page_id, old_hash, doc.content_hash, diff],
+                            )?;
+                            tx.execute(
+                                "UPDATE pages
+                                 SET title = ?2,
+                                     content_md = ?3,
+                                     content_hash = ?4,
+                                     word_count = ?5,
+                                     etag = ?6,
+                                     last_modified = ?7,
+                                     status = 'active',
+                                     http_status = ?8,
+                                     error_message = NULL,
+                                     last_checked_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now'),
+                                     last_changed_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now')
+                                 WHERE id = ?1",
+                                params![
+                                    page_id,
+                                    doc.title,
+                                    doc.content_md,
+                                    doc.content_hash,
+                                    i64::try_from(doc.word_count).unwrap_or(i64::MAX),
+                                    etag,
+                                    last_modified,
+                                    http_status,
+                                ],
+                            )?;
+                            tx.execute("DELETE FROM sections WHERE page_id = ?1", [page_id])?;
+                            insert_sections(&tx, page_id, source_id, &chunks)?;
+                            summary.pages_updated += 1;
+                        }
+                    }
                 }
             }
         }
