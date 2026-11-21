@@ -17,6 +17,7 @@ build:
 run:
 	container system status >/dev/null 2>&1 || container system start
 	container volume create $(VOLUME) || true
+	container run --rm -u 0 --entrypoint chown -v $(VOLUME):/data $(IMAGE) -R webvault:webvault /data
 	-container stop $(CONTAINER_NAME) 2>/dev/null || true
 	-container rm $(CONTAINER_NAME) 2>/dev/null || true
 	container run -d --name $(CONTAINER_NAME) \
