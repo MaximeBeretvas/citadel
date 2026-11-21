@@ -1,0 +1,820 @@
+use std::io::{BufRead, IsTerminal, Write};
+use std::path::PathBuf;
+
+use clap::{Parser, Subcommand, ValueEnum};
+use serde_json::Value;
+
+use crate::config::VaultConfig;
+use crate::db::{execute_readonly_query, QueryResult};
+use crate::ingest::{
+    self, parse_duration_secs, AddSourceParams, SourceDetail, SourceSummary, SyncSummary,
+};
+
+/// Local knowledge vault & MCP server for documentation sites and Markdown folders.
+#[derive(Debug, Parser)]
+#[command(name = "web-vault", version, about)]
+pub struct Cli {
+    /// Override the vault data directory (also respects WEB_VAULT_HOME).
+    #[arg(long, global = true, value_name = "DIR", env = "WEB_VAULT_HOME")]
+    pub data_dir: Option<PathBuf>,
+
+    #[command(subcommand)]
+    pub command: Commands,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum Commands {
+    /// Register a documentation URL or local Markdown directory.
+    Add {
+        /// http(s):// root URL or local directory path.
+        #[arg(value_name = "URL_OR_PATH")]
+        origin: String,
+
+        /// Source slug name (auto-derived if omitted).
+        #[arg(long)]
+        name: Option<String>,
+
+        /// Comma-separated tags for filtering.
+        #[arg(long, value_delimiter = ',')]
+        tags: Vec<String>,
+
+        /// Refresh interval duration (e.g. 24h, 30m, 0).
+        #[arg(long)]
+        interval: Option<String>,
+
+        /// Maximum number of pages to ingest.
+        #[arg(long)]
+        max_pages: Option<u32>,
+
+        /// Maximum crawl depth.
+        #[arg(long)]
+        max_depth: Option<u32>,
+
+        /// Glob or prefix patterns to include.
+        #[arg(long = "include", value_name = "PAT")]
+        include: Vec<String>,
+
+        /// Glob or prefix patterns to exclude.
+        #[arg(long = "exclude", value_name = "PAT")]
+        exclude: Vec<String>,
+
+        /// Render JavaScript pages using headless Chrome (requires `chrome` feature).
+        #[arg(long)]
+        render_js: bool,
+
+        /// Register the source without running an immediate initial sync.
+        #[arg(long)]
+        no_sync: bool,
+    },
+
+    /// List configured sources and health metrics.
+    List {
+        /// Output as JSON.
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Show source details, sync history, and stale/error pages.
+    Show {
+        /// Source slug name.
+        name: String,
+    },
+
+    /// Sync one or all sources manually.
+    Sync {
+        /// Source slug name (optional when --all is used).
+        name: Option<String>,
+
+        /// Sync all registered sources.
+        #[arg(long)]
+        all: bool,
+
+        /// Remove stale pages instead of retaining them with status='stale'.
+        #[arg(long)]
+        prune: bool,
+    },
+
+    /// Remove a source and cascade delete its stored pages.
+    Rm {
+        /// Source slug name.
+        name: String,
+
+        /// Skip confirmation prompt.
+        #[arg(long, short = 'y')]
+        yes: bool,
+    },
+
+    /// Run a read-only SQLite/FTS5 query against the vault.
+    Query {
+        /// Single read-only SQL SELECT statement.
+        sql: String,
+
+        /// Maximum rows to return (default 50, max 200).
+        #[arg(long, default_value_t = 50)]
+        limit: usize,
+
+        /// Output format.
+        #[arg(long, value_enum, default_value_t = QueryFormat::Table)]
+        format: QueryFormat,
+    },
+
+    /// Run the all-in-one server (daemon + Web UI + MCP Streamable HTTP on /mcp).
+    Serve {
+        /// Socket address to bind.
+        #[arg(long, default_value = "0.0.0.0:4317")]
+        bind: String,
+    },
+
+    /// Start the stdio MCP server (newline-delimited JSON-RPC 2.0).
+    Mcp,
+
+    /// Launch the embedded local Web UI server.
+    Ui {
+        /// Port to bind on 127.0.0.1.
+        #[arg(long)]
+        port: Option<u16>,
+
+        /// Do not automatically open the browser.
+        #[arg(long)]
+        no_open: bool,
+    },
+
+    /// Manage the background sync daemon and OS service registration.
+    Daemon {
+        #[command(subcommand)]
+        command: DaemonCommands,
+    },
+
+    /// Install the embedded agent router skill.
+    Skill {
+        #[command(subcommand)]
+        command: SkillCommands,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum QueryFormat {
+    Table,
+    Json,
+    Csv,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum DaemonCommands {
+    /// Start the background daemon.
+    Start {
+        /// Run in the foreground rather than detaching.
+        #[arg(long)]
+        foreground: bool,
+    },
+    /// Stop the running daemon.
+    Stop,
+    /// Check daemon status.
+    Status,
+    /// Install launchd (macOS) or systemd --user (Linux) service.
+    Install,
+    /// Uninstall the OS background service.
+    Uninstall,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum SkillCommands {
+    /// Install the embedded SKILL.md router file.
+    Install {
+        /// Target parent directory (installs into <dir>/web-vault/SKILL.md).
+        #[arg(long)]
+        path: Option<PathBuf>,
+
+        /// Install globally to user agent skill directories.
+        #[arg(long)]
+        global: bool,
+
+        /// Target agent skill directory when installing globally.
+        #[arg(long, value_enum, default_value_t = SkillTarget::All)]
+        target: SkillTarget,
+
+        /// Overwrite existing SKILL.md or symlinks.
+        #[arg(long)]
+        force: bool,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum SkillTarget {
+    Agents,
+    Claude,
+    Copilot,
+    Opencode,
+    All,
+}
+
+/// Parse CLI arguments from the process environment and execute.
+pub fn run_from_args() -> anyhow::Result<()> {
+    let cli = Cli::parse();
+    run_cli(cli)
+}
+
+/// Execute a parsed [`Cli`] invocation, writing output to standard output.
+pub fn run_cli(cli: Cli) -> anyhow::Result<()> {
+    let mut out = std::io::stdout().lock();
+    run_cli_with_writer(cli, &mut out)
+}
+
+/// Execute a parsed [`Cli`] invocation, writing formatted output to `out`.
+pub fn run_cli_with_writer<W: Write>(cli: Cli, out: &mut W) -> anyhow::Result<()> {
+    let config = VaultConfig::resolve(cli.data_dir)?;
+    tracing::debug!(data_dir = %config.data_dir.display(), "resolved vault config");
+
+    match cli.command {
+        Commands::Add {
+            origin,
+            name,
+            tags,
+            interval,
+            max_pages,
+            max_depth,
+            include,
+            exclude,
+            render_js,
+            no_sync,
+        } => {
+            let refresh_interval_secs = interval.as_deref().map(parse_duration_secs).transpose()?;
+            let params = AddSourceParams {
+                origin,
+                name,
+                tags,
+                refresh_interval_secs,
+                max_pages,
+                max_depth,
+                include_patterns: include,
+                exclude_patterns: exclude,
+                render_js,
+            };
+            let (source, summary) = ingest::add_source(&config, params, !no_sync)?;
+            writeln!(
+                out,
+                "Added {} source '{}' ({})",
+                source.kind.as_str(),
+                source.name,
+                source.origin
+            )?;
+            if let Some(sum) = summary {
+                write_sync_summary(out, &sum)?;
+            }
+            Ok(())
+        }
+        Commands::List { json } => {
+            let sources = ingest::list_sources(&config)?;
+            if json {
+                serde_json::to_writer_pretty(&mut *out, &sources)?;
+                writeln!(out)?;
+            } else {
+                write_sources_table(out, &sources)?;
+            }
+            Ok(())
+        }
+        Commands::Show { name } => {
+            let detail = ingest::show_source(&config, &name)?;
+            write_source_detail(out, &detail)?;
+            Ok(())
+        }
+        Commands::Sync { name, all, prune } => {
+            let summaries = ingest::sync_sources(&config, name.as_deref(), all, prune)?;
+            if summaries.is_empty() {
+                writeln!(out, "No sources configured.")?;
+            } else {
+                for sum in &summaries {
+                    write_sync_summary(out, sum)?;
+                }
+            }
+            Ok(())
+        }
+        Commands::Rm { name, yes } => {
+            if !yes {
+                // Verify the source exists before prompting so missing names fail fast.
+                let _ = ingest::show_source(&config, &name)?;
+                if !std::io::stdin().is_terminal() {
+                    anyhow::bail!(
+                        "refusing to remove source '{name}' without confirmation; pass --yes to skip prompt"
+                    );
+                }
+                write!(out, "Remove source '{name}' and all indexed pages? [y/N]: ")?;
+                out.flush()?;
+                let mut answer = String::new();
+                std::io::stdin().lock().read_line(&mut answer)?;
+                let trimmed = answer.trim().to_ascii_lowercase();
+                if trimmed != "y" && trimmed != "yes" {
+                    writeln!(out, "Aborted.")?;
+                    return Ok(());
+                }
+            }
+
+            let removed = ingest::remove_source(&config, &name)?;
+            writeln!(
+                out,
+                "Removed source '{}' ({} pages deleted).",
+                removed.name, removed.pages_deleted
+            )?;
+            Ok(())
+        }
+        Commands::Query { sql, limit, format } => {
+            let result = execute_readonly_query(&config.db_path(), &sql, Some(limit))?;
+            write_query_result(out, &result, format)?;
+            Ok(())
+        }
+        other => {
+            let name = unimplemented_command_name(&other);
+            anyhow::bail!("subcommand `{name}` is not implemented yet");
+        }
+    }
+}
+
+fn unimplemented_command_name(command: &Commands) -> &'static str {
+    match command {
+        Commands::Add { .. } => "add",
+        Commands::List { .. } => "list",
+        Commands::Show { .. } => "show",
+        Commands::Sync { .. } => "sync",
+        Commands::Rm { .. } => "rm",
+        Commands::Query { .. } => "query",
+        Commands::Serve { .. } => "serve",
+        Commands::Mcp => "mcp",
+        Commands::Ui { .. } => "ui",
+        Commands::Daemon { command } => match command {
+            DaemonCommands::Start { .. } => "daemon start",
+            DaemonCommands::Stop => "daemon stop",
+            DaemonCommands::Status => "daemon status",
+            DaemonCommands::Install => "daemon install",
+            DaemonCommands::Uninstall => "daemon uninstall",
+        },
+        Commands::Skill { command } => match command {
+            SkillCommands::Install { .. } => "skill install",
+        },
+    }
+}
+
+fn write_sync_summary<W: Write>(out: &mut W, sum: &SyncSummary) -> std::io::Result<()> {
+    write!(
+        out,
+        "Synced '{}': +{} added, ~{} updated, ={} unchanged, {} stale, {} failed",
+        sum.source_name,
+        sum.pages_added,
+        sum.pages_updated,
+        sum.pages_unchanged,
+        sum.pages_stale,
+        sum.pages_failed
+    )?;
+    if sum.pruned > 0 {
+        write!(out, ", {} pruned", sum.pruned)?;
+    }
+    writeln!(out)
+}
+
+fn write_sources_table<W: Write>(out: &mut W, sources: &[SourceSummary]) -> std::io::Result<()> {
+    if sources.is_empty() {
+        return writeln!(out, "No sources registered.");
+    }
+
+    let headers = vec![
+        "NAME".to_string(),
+        "KIND".to_string(),
+        "STATUS".to_string(),
+        "ACTIVE".to_string(),
+        "STALE".to_string(),
+        "ERROR".to_string(),
+        "WORDS".to_string(),
+        "LAST_SYNCED".to_string(),
+        "ORIGIN".to_string(),
+    ];
+
+    let rows: Vec<Vec<String>> = sources
+        .iter()
+        .map(|s| {
+            vec![
+                s.name.clone(),
+                s.kind.as_str().to_string(),
+                s.status.clone(),
+                s.active_pages.to_string(),
+                s.stale_pages.to_string(),
+                s.error_pages.to_string(),
+                s.total_words.to_string(),
+                s.last_synced_at.as_deref().unwrap_or("-").to_string(),
+                s.origin.clone(),
+            ]
+        })
+        .collect();
+
+    render_ascii_table(out, &headers, &rows)
+}
+
+fn write_source_detail<W: Write>(out: &mut W, detail: &SourceDetail) -> std::io::Result<()> {
+    let s = &detail.source;
+    writeln!(out, "Name:        {}", s.name)?;
+    writeln!(out, "Kind:        {}", s.kind.as_str())?;
+    writeln!(out, "Origin:      {}", s.origin)?;
+    writeln!(out, "Status:      {}", s.status)?;
+    writeln!(
+        out,
+        "Tags:        {}",
+        if s.tags.is_empty() {
+            "-".to_string()
+        } else {
+            s.tags.join(", ")
+        }
+    )?;
+    writeln!(out, "Interval:    {}s", s.refresh_interval_secs)?;
+    writeln!(
+        out,
+        "Limits:      max_pages={}, max_depth={}, render_js={}",
+        s.max_pages, s.max_depth, s.render_js
+    )?;
+    writeln!(
+        out,
+        "Pages:       {} active, {} stale, {} error ({} words)",
+        s.active_pages, s.stale_pages, s.error_pages, s.total_words
+    )?;
+    writeln!(
+        out,
+        "Last Synced: {}",
+        s.last_synced_at.as_deref().unwrap_or("-")
+    )?;
+    if let Some(err) = &s.last_error {
+        writeln!(out, "Last Error:  {err}")?;
+    }
+
+    writeln!(out, "\nRecent Sync Runs:")?;
+    if detail.sync_runs.is_empty() {
+        writeln!(out, "  (none)")?;
+    } else {
+        let headers = vec![
+            "ID".to_string(),
+            "STATUS".to_string(),
+            "STARTED_AT".to_string(),
+            "ADDED".to_string(),
+            "UPDATED".to_string(),
+            "UNCHANGED".to_string(),
+            "STALE".to_string(),
+            "FAILED".to_string(),
+        ];
+        let rows: Vec<Vec<String>> = detail
+            .sync_runs
+            .iter()
+            .map(|r| {
+                vec![
+                    r.id.to_string(),
+                    r.status.clone(),
+                    r.started_at.clone(),
+                    r.pages_added.to_string(),
+                    r.pages_updated.to_string(),
+                    r.pages_unchanged.to_string(),
+                    r.pages_stale.to_string(),
+                    r.pages_failed.to_string(),
+                ]
+            })
+            .collect();
+        render_ascii_table(out, &headers, &rows)?;
+    }
+
+    writeln!(out, "\nStale / Error Pages:")?;
+    if detail.issue_pages.is_empty() {
+        writeln!(out, "  (none)")?;
+    } else {
+        let headers = vec![
+            "STATUS".to_string(),
+            "URI".to_string(),
+            "LAST_CHECKED".to_string(),
+            "ERROR".to_string(),
+        ];
+        let rows: Vec<Vec<String>> = detail
+            .issue_pages
+            .iter()
+            .map(|p| {
+                vec![
+                    p.status.clone(),
+                    p.uri.clone(),
+                    p.last_checked_at.clone(),
+                    p.error_message.as_deref().unwrap_or("-").to_string(),
+                ]
+            })
+            .collect();
+        render_ascii_table(out, &headers, &rows)?;
+    }
+
+    Ok(())
+}
+
+fn write_query_result<W: Write>(
+    out: &mut W,
+    result: &QueryResult,
+    format: QueryFormat,
+) -> anyhow::Result<()> {
+    match format {
+        QueryFormat::Json => {
+            serde_json::to_writer_pretty(&mut *out, result)?;
+            writeln!(out)?;
+        }
+        QueryFormat::Csv => {
+            write_csv_row(out, result.columns.iter().map(String::as_str))?;
+            for row in &result.rows {
+                let cells: Vec<String> = row.iter().map(format_csv_cell).collect();
+                write_csv_row(out, cells.iter().map(String::as_str))?;
+            }
+        }
+        QueryFormat::Table => {
+            if result.columns.is_empty() {
+                writeln!(out, "(0 rows)")?;
+                return Ok(());
+            }
+            let formatted_rows: Vec<Vec<String>> = result
+                .rows
+                .iter()
+                .map(|row| row.iter().map(format_table_cell).collect())
+                .collect();
+            render_ascii_table(out, &result.columns, &formatted_rows)?;
+            writeln!(
+                out,
+                "({} row{}, {} ms)",
+                result.row_count,
+                if result.row_count == 1 { "" } else { "s" },
+                result.elapsed_ms
+            )?;
+            if result.truncated {
+                if let Some(hint) = &result.truncation_hint {
+                    writeln!(out, "Note: {hint}")?;
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn render_ascii_table<W: Write>(
+    out: &mut W,
+    headers: &[String],
+    rows: &[Vec<String>],
+) -> std::io::Result<()> {
+    let mut widths: Vec<usize> = headers.iter().map(|h| h.chars().count()).collect();
+    for row in rows {
+        for (idx, cell) in row.iter().enumerate() {
+            if let Some(w) = widths.get_mut(idx) {
+                *w = (*w).max(cell.chars().count());
+            }
+        }
+    }
+
+    write_table_line(out, headers, &widths)?;
+    for (idx, width) in widths.iter().enumerate() {
+        if idx > 0 {
+            write!(out, "-+-")?;
+        }
+        for _ in 0..*width {
+            write!(out, "-")?;
+        }
+    }
+    writeln!(out)?;
+
+    for row in rows {
+        write_table_line(out, row, &widths)?;
+    }
+    Ok(())
+}
+
+fn write_table_line<W: Write>(
+    out: &mut W,
+    cells: &[String],
+    widths: &[usize],
+) -> std::io::Result<()> {
+    for (idx, width) in widths.iter().enumerate() {
+        if idx > 0 {
+            write!(out, " | ")?;
+        }
+        let val = cells.get(idx).map(String::as_str).unwrap_or("");
+        let char_len = val.chars().count();
+        write!(out, "{val}")?;
+        for _ in char_len..*width {
+            write!(out, " ")?;
+        }
+    }
+    writeln!(out)
+}
+
+fn format_table_cell(value: &Value) -> String {
+    match value {
+        Value::Null => "NULL".to_string(),
+        Value::Bool(b) => b.to_string(),
+        Value::Number(n) => n.to_string(),
+        Value::String(s) => s.replace('\r', "").replace('\n', "\\n"),
+        other => other.to_string(),
+    }
+}
+
+fn format_csv_cell(value: &Value) -> String {
+    match value {
+        Value::Null => String::new(),
+        Value::Bool(b) => b.to_string(),
+        Value::Number(n) => n.to_string(),
+        Value::String(s) => s.clone(),
+        other => other.to_string(),
+    }
+}
+
+fn write_csv_row<'a, W: Write, I: Iterator<Item = &'a str>>(
+    out: &mut W,
+    fields: I,
+) -> std::io::Result<()> {
+    for (idx, field) in fields.enumerate() {
+        if idx > 0 {
+            write!(out, ",")?;
+        }
+        if field.contains([',', '"', '\n', '\r']) {
+            write!(out, "\"{}\"", field.replace('"', "\"\""))?;
+        } else {
+            write!(out, "{field}")?;
+        }
+    }
+    writeln!(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::db::QueryResult;
+    use crate::ingest::SourceSummary;
+    use tempfile::tempdir;
+
+    fn run_args(vault_dir: &std::path::Path, args: &[&str]) -> anyhow::Result<String> {
+        let vault_str = vault_dir.to_string_lossy().into_owned();
+        let mut argv = vec!["web-vault".to_string(), "--data-dir".to_string(), vault_str];
+        argv.extend(args.iter().map(|s| (*s).to_string()));
+        let cli = Cli::try_parse_from(argv)?;
+        let mut buf = Vec::new();
+        run_cli_with_writer(cli, &mut buf)?;
+        Ok(String::from_utf8(buf)?)
+    }
+
+    #[test]
+    fn cli_parse_smoke() {
+        let cases: &[&[&str]] = &[
+            &[
+                "web-vault",
+                "add",
+                "https://example.com/docs",
+                "--name",
+                "example-docs",
+                "--tags",
+                "rust,sqlite",
+                "--interval",
+                "24h",
+                "--max-pages",
+                "200",
+                "--max-depth",
+                "4",
+                "--include",
+                "docs/*",
+                "--exclude",
+                "blog/*",
+                "--render-js",
+                "--no-sync",
+            ],
+            &["web-vault", "list", "--json"],
+            &["web-vault", "show", "example-docs"],
+            &["web-vault", "sync", "example-docs", "--prune"],
+            &["web-vault", "sync", "--all"],
+            &["web-vault", "rm", "example-docs", "--yes"],
+            &[
+                "web-vault",
+                "query",
+                "SELECT name FROM v_sources",
+                "--limit",
+                "25",
+                "--format",
+                "json",
+            ],
+            &["web-vault", "serve", "--bind", "0.0.0.0:4317"],
+            &["web-vault", "mcp"],
+            &["web-vault", "ui", "--port", "4317", "--no-open"],
+            &["web-vault", "daemon", "start", "--foreground"],
+            &["web-vault", "daemon", "stop"],
+            &["web-vault", "daemon", "status"],
+            &["web-vault", "daemon", "install"],
+            &["web-vault", "daemon", "uninstall"],
+            &[
+                "web-vault",
+                "skill",
+                "install",
+                "--global",
+                "--target",
+                "claude",
+                "--force",
+            ],
+            &["web-vault", "skill", "install", "--path", "/tmp/skills"],
+        ];
+
+        for args in cases {
+            Cli::try_parse_from(*args)
+                .unwrap_or_else(|e| panic!("failed to parse {:?}: {e}", args));
+        }
+    }
+
+    #[test]
+    fn end_to_end_add_sync_query_rm() {
+        let vault_dir = tempdir().expect("vault tempdir");
+        let docs_dir = tempdir().expect("docs tempdir");
+
+        std::fs::write(
+            docs_dir.path().join("wal.md"),
+            "# SQLite WAL\n\n## Concurrency\n\nWAL mode enables concurrent readers in SQLite.\n",
+        )
+        .expect("write wal.md");
+
+        let docs_str = docs_dir.path().to_string_lossy().into_owned();
+        let add_out = run_args(
+            vault_dir.path(),
+            &[
+                "add",
+                &docs_str,
+                "--name",
+                "sqlite-book",
+                "--tags",
+                "sqlite,db",
+                "--interval",
+                "0",
+            ],
+        )
+        .expect("add should succeed");
+        assert!(add_out.contains("sqlite-book"));
+
+        let list_json = run_args(vault_dir.path(), &["list", "--json"]).expect("list --json");
+        let listed: Vec<SourceSummary> =
+            serde_json::from_str(&list_json).expect("valid JSON from list --json");
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].name, "sqlite-book");
+        assert_eq!(listed[0].active_pages, 1);
+
+        let show_out = run_args(vault_dir.path(), &["show", "sqlite-book"]).expect("show");
+        assert!(show_out.contains("sqlite-book"));
+        assert!(show_out.contains("ok"));
+
+        // Update file and run sync
+        std::fs::write(
+            docs_dir.path().join("wal.md"),
+            "# SQLite WAL\n\n## Concurrency\n\nWAL mode enables concurrent readers and checkpointing.\n",
+        )
+        .expect("update wal.md");
+        let sync_out = run_args(vault_dir.path(), &["sync", "sqlite-book"]).expect("sync");
+        assert!(sync_out.contains("sqlite-book"));
+
+        let fts_sql = "SELECT src.name AS source, p.uri, s.heading_path \
+                       FROM sections_fts \
+                       JOIN sections s ON s.id = sections_fts.rowid \
+                       JOIN pages p ON p.id = s.page_id \
+                       JOIN sources src ON src.id = s.source_id \
+                       WHERE sections_fts MATCH 'checkpointing'";
+
+        let query_json = run_args(vault_dir.path(), &["query", fts_sql, "--format", "json"])
+            .expect("query json");
+        let qr: QueryResult = serde_json::from_str(&query_json).expect("valid JSON QueryResult");
+        assert_eq!(qr.row_count, 1);
+        assert_eq!(
+            qr.columns,
+            vec!["source", "uri", "heading_path"]
+                .into_iter()
+                .map(str::to_string)
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(qr.rows[0][0], serde_json::json!("sqlite-book"));
+        assert_eq!(qr.rows[0][1], serde_json::json!("wal.md"));
+        assert_eq!(qr.rows[0][2], serde_json::json!("SQLite WAL > Concurrency"));
+
+        let query_csv =
+            run_args(vault_dir.path(), &["query", fts_sql, "--format", "csv"]).expect("query csv");
+        assert!(query_csv.contains("source,uri,heading_path"));
+        assert!(query_csv.contains("sqlite-book,wal.md,SQLite WAL > Concurrency"));
+
+        let query_table = run_args(vault_dir.path(), &["query", fts_sql, "--format", "table"])
+            .expect("query table");
+        assert!(query_table.contains("sqlite-book"));
+        assert!(query_table.contains("SQLite WAL > Concurrency"));
+
+        let rm_out = run_args(vault_dir.path(), &["rm", "sqlite-book", "--yes"]).expect("rm --yes");
+        assert!(rm_out.contains("sqlite-book"));
+
+        let list_after = run_args(vault_dir.path(), &["list", "--json"]).expect("list after rm");
+        let after: Vec<SourceSummary> =
+            serde_json::from_str(&list_after).expect("valid JSON after rm");
+        assert!(after.is_empty());
+    }
+
+    #[test]
+    fn query_rejects_write_statements_through_cli() {
+        let vault_dir = tempdir().expect("vault tempdir");
+        let docs_dir = tempdir().expect("docs tempdir");
+        std::fs::write(docs_dir.path().join("doc.md"), "# Doc\n\nText.\n").expect("write");
+        let docs_str = docs_dir.path().to_string_lossy().into_owned();
+        run_args(vault_dir.path(), &["add", &docs_str, "--name", "docs"]).expect("add");
+
+        let err = run_args(vault_dir.path(), &["query", "DELETE FROM pages"])
+            .expect_err("write query must fail");
+        assert!(err.to_string().contains("invalid query"));
+    }
+}
