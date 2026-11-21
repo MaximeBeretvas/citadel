@@ -1,5 +1,4 @@
 use std::collections::HashSet;
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::path::Path;
 use std::time::Duration;
 
@@ -21,6 +20,7 @@ use crate::ingest::local::{
 use crate::ingest::normalize::{count_words, normalize_markdown};
 use crate::ingest::sections::split_sections;
 use crate::ingest::{SourceRecord, SyncSummary};
+use crate::sources::origin::is_private_host;
 
 const DEFAULT_CONCURRENCY: usize = 4;
 const DEFAULT_CRAWL_DELAY_MS: u64 = 100;
@@ -347,7 +347,7 @@ fn configure_website(seed: &Url, scope: &WebScope, max_pages: u32, max_depth: u3
     let base_segments = seed.path().split('/').filter(|s| !s.is_empty()).count();
     let effective_depth = base_segments.saturating_add(max_depth as usize).max(1);
 
-    let redirect_policy = if is_loopback_or_private_host(seed) {
+    let redirect_policy = if is_private_host(seed) {
         RedirectPolicy::Strict
     } else {
         RedirectPolicy::Loose
@@ -643,12 +643,12 @@ async fn discover_seed_urls(origin: &Url, scope: &WebScope) -> Vec<Url> {
 }
 
 fn build_seed_http_client(origin: &Url) -> std::result::Result<reqwest::Client, reqwest::Error> {
-    let allow_local = is_loopback_or_private_host(origin);
+    let allow_local = is_private_host(origin);
     let policy = reqwest::redirect::Policy::custom(move |attempt| {
         if attempt.previous().len() > 5 {
             return attempt.error("too many redirects");
         }
-        if !allow_local && is_loopback_or_private_host(attempt.url()) {
+        if !allow_local && is_private_host(attempt.url()) {
             return attempt.error("SSRF blocked: redirect to internal address");
         }
         attempt.follow()
@@ -985,36 +985,6 @@ fn pattern_to_url_regexes(authority_re: &str, origin_prefix: &str, raw_pat: &str
     out
 }
 
-fn is_loopback_or_private_host(url: &Url) -> bool {
-    let Some(host) = url.host_str() else {
-        return false;
-    };
-    let lower = host.trim_end_matches('.').to_ascii_lowercase();
-    if lower == "localhost" || lower.ends_with(".localhost") || lower.ends_with(".local") {
-        return true;
-    }
-    let unbracketed = lower.trim_start_matches('[').trim_end_matches(']');
-    let Ok(ip) = unbracketed.parse::<IpAddr>() else {
-        return false;
-    };
-    match ip {
-        IpAddr::V4(v4) => is_local_v4(v4),
-        IpAddr::V6(v6) => is_local_v6(v6),
-    }
-}
-
-fn is_local_v4(v4: Ipv4Addr) -> bool {
-    v4.is_loopback() || v4.is_private() || v4.is_link_local() || v4.is_unspecified()
-}
-
-fn is_local_v6(v6: Ipv6Addr) -> bool {
-    v6.is_loopback()
-        || v6.is_unspecified()
-        || (v6.segments()[0] & 0xfe00) == 0xfc00
-        || (v6.segments()[0] & 0xffc0) == 0xfe80
-        || v6.to_ipv4_mapped().is_some_and(is_local_v4)
-}
-
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
@@ -1204,7 +1174,7 @@ mod tests {
 
         let (addr, server_handle) = spawn_fixture_server(state).await;
         let vault_dir = tempdir().expect("vault tempdir");
-        let cfg = VaultConfig::new(vault_dir.path());
+        let cfg = VaultConfig::new(vault_dir.path()).allowing_private_origins();
         let origin = format!("http://{addr}/docs/");
 
         let Added {
@@ -1326,7 +1296,7 @@ mod tests {
         );
 
         let vault_dir = tempdir().expect("vault tempdir");
-        let cfg = VaultConfig::new(vault_dir.path());
+        let cfg = VaultConfig::new(vault_dir.path()).allowing_private_origins();
         let origin = format!("http://{addr}/docs/");
 
         let Added {
@@ -1396,7 +1366,7 @@ mod tests {
 
         let (addr, server_handle) = spawn_fixture_server(state.clone()).await;
         let vault_dir = tempdir().expect("vault tempdir");
-        let cfg = VaultConfig::new(vault_dir.path());
+        let cfg = VaultConfig::new(vault_dir.path()).allowing_private_origins();
         let origin = format!("http://{addr}/docs/");
 
         let Added {
@@ -1506,7 +1476,7 @@ mod tests {
 
         let (addr, server_handle) = spawn_fixture_server(state).await;
         let vault_dir = tempdir().expect("vault tempdir");
-        let cfg = VaultConfig::new(vault_dir.path());
+        let cfg = VaultConfig::new(vault_dir.path()).allowing_private_origins();
         let origin = format!("http://{addr}/docs/");
 
         let Added {
@@ -1593,7 +1563,7 @@ mod tests {
         );
 
         let vault_dir = tempdir().expect("vault tempdir");
-        let cfg = VaultConfig::new(vault_dir.path());
+        let cfg = VaultConfig::new(vault_dir.path()).allowing_private_origins();
         let origin = format!("http://{addr}/docs/");
 
         let Added {
@@ -1674,7 +1644,7 @@ mod tests {
 
         let (addr, server_handle) = spawn_fixture_server(state).await;
         let vault_dir = tempdir().expect("vault tempdir");
-        let cfg = VaultConfig::new(vault_dir.path());
+        let cfg = VaultConfig::new(vault_dir.path()).allowing_private_origins();
 
         // 1. Test include_patterns overriding /docs/ prefix to include /blog/included while ignoring /blog/ignored.
         let origin = format!("http://{addr}/docs/");
@@ -1708,7 +1678,7 @@ mod tests {
 
         // 2. Test the max_pages cap.
         let vault_dir2 = tempdir().expect("vault tempdir 2");
-        let cfg2 = VaultConfig::new(vault_dir2.path());
+        let cfg2 = VaultConfig::new(vault_dir2.path()).allowing_private_origins();
         let lifecycle2 = SourceLifecycle::new(cfg2.clone());
         let Added {
             source,

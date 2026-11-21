@@ -1,21 +1,70 @@
+//! Origin classification and the Private-origin rule.
+//!
+//! This is the only place that decides whether an Origin is a Private origin.
+//! The Source lifecycle applies it on `add` and before every web Sync; the
+//! crawler's redirect guard reuses [`is_private_host`].
+
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use url::{Host, Url};
 
+use crate::config::ALLOW_PRIVATE_ORIGINS_ENV;
 use crate::error::{Result, VaultError};
-use crate::ingest;
+use crate::ingest::{canonicalize_local_dir, SourceKind};
 
-/// Validate an HTTP(S) source URL and reject SSRF targets (loopback, private, link-local,
-/// CGNAT, unspecified, multicast, broadcast, and local hostnames).
-pub fn validate_web_url(raw: &str) -> Result<Url> {
-    let trimmed = raw.trim();
+/// Classify a raw Origin as a web URL or a local Markdown folder and normalize it.
+///
+/// Anything with a scheme (`://`, or `http:`, `https:`, `file:`, `ftp:`) is parsed as a
+/// URL and must be `http(s)://` with a host and no credentials; everything else must be
+/// an existing directory, returned canonicalized.
+pub(crate) fn classify_origin(raw_origin: &str) -> Result<(SourceKind, String)> {
+    let trimmed = raw_origin.trim();
     if trimmed.is_empty() {
         return Err(VaultError::Validation(
-            "origin URL must not be empty".into(),
+            "origin must not be empty; pass an http(s):// URL or local directory path".into(),
         ));
     }
 
+    if looks_like_url(trimmed) {
+        return Ok((SourceKind::Web, parse_web_origin(trimmed)?.into()));
+    }
+
+    let canon = canonicalize_local_dir(Path::new(trimmed))?;
+    let canon_str = canon.to_str().ok_or_else(|| {
+        VaultError::Validation(format!(
+            "local origin directory '{}' contains non-UTF-8 characters",
+            canon.display()
+        ))
+    })?;
+    Ok((SourceKind::Local, canon_str.to_string()))
+}
+
+/// Refuse a web Origin that is a Private origin unless the vault allows them.
+pub(crate) fn check_private_origin(origin: &str, allow_private_origins: bool) -> Result<()> {
+    let url = parse_web_origin(origin)?;
+    if !allow_private_origins && is_private_host(&url) {
+        return Err(VaultError::Validation(format!(
+            "origin URL '{origin}' is a private origin (loopback, private network, link-local \
+             or local hostname); set {ALLOW_PRIVATE_ORIGINS_ENV}=1 to allow it"
+        )));
+    }
+    Ok(())
+}
+
+/// Whether `url`'s host is a Private origin: loopback, private, link-local, CGNAT,
+/// unspecified, multicast, broadcast, or a local hostname.
+pub(crate) fn is_private_host(url: &Url) -> bool {
+    match url.host() {
+        Some(Host::Ipv4(ip)) => is_blocked_ipv4(ip),
+        Some(Host::Ipv6(ip)) => is_blocked_ipv6(ip),
+        Some(Host::Domain(domain)) => is_private_domain(domain),
+        None => false,
+    }
+}
+
+fn parse_web_origin(raw: &str) -> Result<Url> {
+    let trimmed = raw.trim();
     let parsed = Url::parse(trimmed)
         .map_err(|err| VaultError::Validation(format!("invalid origin URL '{trimmed}': {err}")))?;
 
@@ -25,73 +74,39 @@ pub fn validate_web_url(raw: &str) -> Result<Url> {
             parsed.scheme()
         )));
     }
-
     if !parsed.username().is_empty() || parsed.password().is_some() {
         return Err(VaultError::Validation(
             "origin URL must not contain embedded user credentials".into(),
         ));
     }
-
-    let Some(host) = parsed.host() else {
-        return Err(VaultError::Validation(format!(
+    match parsed.host_str() {
+        Some(host) if !host.trim_end_matches('.').is_empty() => Ok(parsed),
+        _ => Err(VaultError::Validation(format!(
             "origin URL '{trimmed}' must include a valid host"
-        )));
-    };
-
-    match host {
-        Host::Ipv4(ip) => {
-            if is_blocked_ipv4(ip) {
-                return Err(VaultError::Validation(format!(
-                    "origin URL '{trimmed}' targets blocked IPv4 address {ip}"
-                )));
-            }
-        }
-        Host::Ipv6(ip) => {
-            if is_blocked_ipv6(ip) {
-                return Err(VaultError::Validation(format!(
-                    "origin URL '{trimmed}' targets blocked IPv6 address {ip}"
-                )));
-            }
-        }
-        Host::Domain(domain) => validate_domain_host(trimmed, domain)?,
+        ))),
     }
-
-    Ok(parsed)
 }
 
-/// Validate that `raw` refers to an existing directory and return its canonical path.
-pub fn validate_local_dir(raw: &str) -> Result<PathBuf> {
-    ingest::canonicalize_local_dir(Path::new(raw.trim()))
+fn looks_like_url(origin: &str) -> bool {
+    let lower = origin.to_ascii_lowercase();
+    lower.contains("://")
+        || lower.starts_with("http:")
+        || lower.starts_with("https:")
+        || lower.starts_with("file:")
+        || lower.starts_with("ftp:")
 }
 
-fn validate_domain_host(raw: &str, domain: &str) -> Result<()> {
+fn is_private_domain(domain: &str) -> bool {
     let normalized = domain.trim_end_matches('.').to_ascii_lowercase();
-    if normalized.is_empty() {
-        return Err(VaultError::Validation(format!(
-            "origin URL '{raw}' must include a valid host"
-        )));
-    }
-
     if normalized == "localhost"
         || normalized == "local"
         || normalized.ends_with(".localhost")
         || normalized.ends_with(".local")
     {
-        return Err(VaultError::Validation(format!(
-            "origin URL '{raw}' targets blocked local hostname '{domain}'"
-        )));
+        return true;
     }
-
     let unbracketed = normalized.trim_start_matches('[').trim_end_matches(']');
-    if let Ok(ip) = unbracketed.parse::<IpAddr>() {
-        if is_blocked_ip(ip) {
-            return Err(VaultError::Validation(format!(
-                "origin URL '{raw}' targets blocked IP address {ip}"
-            )));
-        }
-    }
-
-    Ok(())
+    unbracketed.parse::<IpAddr>().is_ok_and(is_blocked_ip)
 }
 
 fn is_blocked_ip(ip: IpAddr) -> bool {
@@ -146,8 +161,20 @@ mod tests {
     use super::*;
     use tempfile::tempdir;
 
+    fn validate_web(raw: &str) -> Result<String> {
+        match classify_origin(raw)? {
+            (SourceKind::Web, origin) => {
+                check_private_origin(&origin, false)?;
+                Ok(origin)
+            }
+            (SourceKind::Local, origin) => Err(VaultError::Validation(format!(
+                "expected a web origin, got local folder {origin}"
+            ))),
+        }
+    }
+
     #[test]
-    fn blocks_ssrf_targets() {
+    fn blocks_private_origins_and_bad_schemes() {
         let blocked = [
             "",
             "file:///etc/passwd",
@@ -187,8 +214,9 @@ mod tests {
         ];
 
         for target in blocked {
-            let err = validate_web_url(target)
-                .expect_err(&format!("expected SSRF/scheme rejection for {target}"));
+            let err = validate_web(target).expect_err(&format!(
+                "expected private-origin/scheme rejection for {target}"
+            ));
             assert!(
                 matches!(err, VaultError::Validation(_)),
                 "expected Validation error for {target}, got {err:?}"
@@ -204,18 +232,34 @@ mod tests {
         ];
 
         for target in allowed {
-            let parsed =
-                validate_web_url(target).unwrap_or_else(|e| panic!("expected {target} ok: {e}"));
-            assert!(matches!(parsed.scheme(), "http" | "https"));
+            let origin =
+                validate_web(target).unwrap_or_else(|e| panic!("expected {target} ok: {e}"));
+            assert!(origin.starts_with("http"));
         }
+    }
 
-        // Verify local directory validation delegates to canonicalize_local_dir.
+    #[test]
+    fn private_origins_pass_when_allowed() {
+        for target in [
+            "http://127.0.0.1:8080/docs",
+            "http://printer.local/",
+            "http://[::1]/",
+        ] {
+            check_private_origin(target, true)
+                .unwrap_or_else(|e| panic!("expected {target} allowed: {e}"));
+        }
+    }
+
+    #[test]
+    fn classifies_local_directories() {
         let dir = tempdir().expect("tempdir");
         let file_path = dir.path().join("note.md");
         std::fs::write(&file_path, "# Hi\n").expect("write note");
-        let canon = validate_local_dir(&dir.path().to_string_lossy()).expect("valid dir");
-        assert!(canon.is_dir());
-        assert!(validate_local_dir(&file_path.to_string_lossy()).is_err());
-        assert!(validate_local_dir("/nonexistent/path/web-vault-check").is_err());
+
+        let (kind, canon) = classify_origin(&dir.path().to_string_lossy()).expect("valid dir");
+        assert_eq!(kind, SourceKind::Local);
+        assert!(Path::new(&canon).is_dir());
+        assert!(classify_origin(&file_path.to_string_lossy()).is_err());
+        assert!(classify_origin("/nonexistent/path/web-vault-check").is_err());
     }
 }

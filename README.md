@@ -6,7 +6,7 @@ Local knowledge vault and MCP server for web documentation sites and local Markd
 
 - **Unified ingestion:** Crawl `http(s)://` docs sites (`spider`, `sitemap.xml`, `llms.txt`, optional headless Chromium) and watch local Markdown folders with incremental SHA-256 diffing and `stale`/`error` tracking.
 - **SQLite + FTS5 search:** Single-file WAL database with heading-level sections (`H1`–`H3`), breadcrumbs, and full-text search views (`v_sources`, `v_recent_changes`, `pages_fts`, `sections_fts`).
-- **Hardened 2-tool MCP server:** Exposes `query` (strictly read-only SQLite authorizer, 5s timeout, row/byte caps) and `manage` (SSRF-guarded URL and canonicalized path validation) over Streamable HTTP (`/mcp`) or `stdio`.
+- **Hardened 2-tool MCP server:** Exposes `query` (strictly read-only SQLite authorizer, 5s timeout, row/byte caps) and `manage` (Private-origin-guarded URL and canonicalized path validation) over Streamable HTTP (`/mcp`) or `stdio`.
 - **Self-contained runtime:** Single Rust binary with bundled SQLite and `rust-embed` offline Web UI (Sources, Knowledge Browser, Changes & Health, SQL Explorer).
 
 ## Quickstart (Apple `container` — Default)
@@ -55,7 +55,7 @@ web-vault daemon install
 `web-vault` exposes two MCP tools:
 
 - **`query`**: Execute a single read-only SQLite/FTS5 `SELECT` statement against the vault (`v_sources`, `pages`, `sections`, `pages_fts`, `sections_fts`, `v_recent_changes`) with `SQLITE_OPEN_READ_ONLY`, `PRAGMA query_only = ON`, authorizer allowlist, 5-second timeout, and row/byte caps.
-- **`manage`**: Register, inspect, sync, or remove sources (`add`, `list`, `show`, `sync`, `rm`) with SSRF protection on URLs and directory canonicalization on local paths.
+- **`manage`**: Register, inspect, sync, or remove sources (`add`, `list`, `show`, `sync`, `rm`) with directory canonicalization on local paths. Every entry point (CLI, UI, MCP) refuses Private origins (loopback, private network, link-local, `localhost`); set `WEB_VAULT_ALLOW_PRIVATE_ORIGINS=1` to index intranet or `localhost` docs.
 
 ### Streamable HTTP (Recommended with `web-vault serve` or Apple `container`)
 

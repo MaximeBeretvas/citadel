@@ -1,6 +1,5 @@
 pub mod http;
 pub mod prompt;
-pub mod validate;
 
 use std::io::{BufRead, Write};
 
@@ -319,26 +318,9 @@ async fn call_manage_add(
         .filter(|s| !s.is_empty())
         .ok_or_else(|| "missing required parameter 'origin' for action 'add'".to_string())?;
 
-    let validated_origin = if looks_like_url(raw_origin) {
-        validate::validate_web_url(raw_origin)
-            .map_err(|err| err.to_string())?
-            .into()
-    } else {
-        let canon = validate::validate_local_dir(raw_origin).map_err(|err| err.to_string())?;
-        canon
-            .to_str()
-            .ok_or_else(|| {
-                format!(
-                    "local origin directory '{}' contains non-UTF-8 characters",
-                    canon.display()
-                )
-            })?
-            .to_string()
-    };
-
     let sync_now = args.sync_now.unwrap_or(true);
     let params = AddSourceParams {
-        origin: validated_origin,
+        origin: raw_origin.to_string(),
         name: args.name,
         tags: args.tags.unwrap_or_default(),
         refresh_interval_secs: args.refresh_interval_secs,
@@ -352,10 +334,7 @@ async fn call_manage_add(
     let added = SourceLifecycle::new(config.clone())
         .add(params, sync_now)
         .await
-        .map_err(|err| {
-            let msg = err.to_string();
-            msg.replace("pass --no-sync", "pass sync_now: false")
-        })?;
+        .map_err(|err| err.to_string())?;
 
     Ok(json!({
         "action": "add",
@@ -447,17 +426,6 @@ fn require_non_empty_name<'a>(
     raw.map(str::trim)
         .filter(|s| !s.is_empty())
         .ok_or_else(|| format!("missing required parameter 'name' for action '{action}'"))
-}
-
-fn looks_like_url(origin: &str) -> bool {
-    let lower = origin.to_ascii_lowercase();
-    lower.contains("://")
-        || lower.starts_with("http:")
-        || lower.starts_with("https:")
-        || lower.starts_with("file:")
-        || lower.starts_with("ftp:")
-        || lower.starts_with("javascript:")
-        || lower.starts_with("data:")
 }
 
 fn tool_ok_json(payload: &Value) -> Value {
@@ -825,7 +793,7 @@ mod tests {
                     "name": "manage",
                     "arguments": {
                         "action": "add",
-                        "origin": "http://127.0.0.1/secret"
+                        "origin": "http://169.254.169.254/latest/meta-data/"
                     }
                 }
             }),

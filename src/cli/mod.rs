@@ -731,6 +731,20 @@ mod tests {
     }
 
     #[test]
+    fn add_rejects_private_origin() {
+        let vault_dir = tempdir().expect("vault tempdir");
+        let err = run_args(vault_dir.path(), &["add", "http://127.0.0.1/", "--no-sync"])
+            .expect_err("loopback origin must be refused");
+        let vault_err = err
+            .downcast_ref::<crate::error::VaultError>()
+            .expect("VaultError");
+        assert!(
+            matches!(vault_err, crate::error::VaultError::Validation(_)),
+            "{vault_err:?}"
+        );
+    }
+
+    #[test]
     fn cli_parse_smoke() {
         let cases: &[&[&str]] = &[
             &[

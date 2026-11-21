@@ -14,10 +14,13 @@ use crate::config::VaultConfig;
 use crate::db::open_rw_db;
 use crate::error::{Result, VaultError};
 use crate::ingest::{
-    canonicalize_local_dir, load_all_sources, load_source_by_id, load_source_by_name, local,
-    sync_local_source, sync_web_source, SourceKind, SourceRecord, SyncSummary, DEFAULT_MAX_DEPTH,
-    DEFAULT_MAX_PAGES,
+    load_all_sources, load_source_by_id, load_source_by_name, local, sync_local_source,
+    sync_web_source, SourceKind, SourceRecord, SyncSummary, DEFAULT_MAX_DEPTH, DEFAULT_MAX_PAGES,
 };
+
+pub(crate) mod origin;
+
+use origin::{check_private_origin, classify_origin};
 
 const DEFAULT_REFRESH_INTERVAL_SECS: i64 = 86_400;
 const MAX_ALLOWED_PAGES: u32 = 5_000;
@@ -132,7 +135,10 @@ impl SourceLifecycle {
                 })
                 .await
             }
-            SourceKind::Web => sync_web_source(&self.config.db_path(), source, prune).await,
+            SourceKind::Web => {
+                check_private_origin(&source.origin, self.config.allow_private_origins)?;
+                sync_web_source(&self.config.db_path(), source, prune).await
+            }
         }
     }
 }
@@ -184,6 +190,9 @@ pub struct RemovedSource {
 
 fn register_source_row(config: &VaultConfig, params: AddSourceParams) -> Result<SourceRecord> {
     let (kind, normalized_origin) = classify_origin(&params.origin)?;
+    if kind == SourceKind::Web {
+        check_private_origin(&normalized_origin, config.allow_private_origins)?;
+    }
     let refresh_interval_secs = params
         .refresh_interval_secs
         .unwrap_or(DEFAULT_REFRESH_INTERVAL_SECS);
@@ -262,44 +271,6 @@ fn record_pre_walk_error(conn: &Connection, source_id: i64, message: &str) {
         "UPDATE sources SET status = 'error', last_error = ?2 WHERE id = ?1",
         params![source_id, message],
     );
-}
-
-fn classify_origin(raw_origin: &str) -> Result<(SourceKind, String)> {
-    let trimmed = raw_origin.trim();
-    if trimmed.is_empty() {
-        return Err(VaultError::Validation(
-            "origin must not be empty; pass an http(s):// URL or local directory path".into(),
-        ));
-    }
-
-    if trimmed.contains("://") {
-        let parsed = Url::parse(trimmed).map_err(|err| {
-            VaultError::Validation(format!("invalid origin URL '{trimmed}': {err}"))
-        })?;
-
-        if !matches!(parsed.scheme(), "http" | "https") || parsed.host_str().is_none() {
-            return Err(VaultError::Validation(format!(
-                "origin URL '{trimmed}' must use http:// or https:// with a valid host"
-            )));
-        }
-
-        if !parsed.username().is_empty() || parsed.password().is_some() {
-            return Err(VaultError::Validation(
-                "origin URL must not contain embedded user credentials".into(),
-            ));
-        }
-
-        return Ok((SourceKind::Web, parsed.into()));
-    }
-
-    let canon = canonicalize_local_dir(Path::new(trimmed))?;
-    let canon_str = canon.to_str().ok_or_else(|| {
-        VaultError::Validation(format!(
-            "local origin directory '{}' contains non-UTF-8 characters",
-            canon.display()
-        ))
-    })?;
-    Ok((SourceKind::Local, canon_str.to_string()))
 }
 
 fn validate_source_limits(

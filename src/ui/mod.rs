@@ -232,6 +232,26 @@ mod tests {
     use super::*;
     use crate::db::open_rw_db;
 
+    #[tokio::test]
+    async fn create_source_rejects_private_origin() {
+        let vault_dir = tempdir().expect("vault tempdir");
+        let app = build_router(VaultConfig::new(vault_dir.path()));
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/api/sources")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        json!({"origin": "http://10.0.0.1/", "sync_now": false}).to_string(),
+                    ))
+                    .expect("build request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
     async fn read_json_body(resp: axum::response::Response) -> Value {
         let bytes = resp
             .into_body()

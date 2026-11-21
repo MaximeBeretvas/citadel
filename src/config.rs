@@ -6,32 +6,45 @@ use crate::error::{Result, VaultError};
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VaultConfig {
     pub data_dir: PathBuf,
+    /// Allow Sources whose Origin is a Private origin (`WEB_VAULT_ALLOW_PRIVATE_ORIGINS`).
+    pub allow_private_origins: bool,
 }
+
+/// Environment variable that allows Private origins when set to `1` or `true`.
+pub const ALLOW_PRIVATE_ORIGINS_ENV: &str = "WEB_VAULT_ALLOW_PRIVATE_ORIGINS";
 
 impl VaultConfig {
     /// Construct a configuration pointing directly at `data_dir`.
     pub fn new(data_dir: impl Into<PathBuf>) -> Self {
         Self {
             data_dir: data_dir.into(),
+            allow_private_origins: false,
         }
+    }
+
+    /// Return this configuration with Private origins allowed.
+    pub fn allowing_private_origins(mut self) -> Self {
+        self.allow_private_origins = true;
+        self
     }
 
     /// Resolve configuration using `--data-dir` > `WEB_VAULT_HOME` > OS data dir.
     pub fn resolve(explicit: Option<PathBuf>) -> Result<Self> {
         let env_val = std::env::var("WEB_VAULT_HOME").ok();
-        Self::resolve_with_env(explicit, env_val.as_deref())
+        let mut config = Self::resolve_with_env(explicit, env_val.as_deref())?;
+        config.allow_private_origins =
+            parse_flag(std::env::var(ALLOW_PRIVATE_ORIGINS_ENV).ok().as_deref());
+        Ok(config)
     }
 
     /// Resolve configuration with an explicit optional `WEB_VAULT_HOME` value.
     pub fn resolve_with_env(explicit: Option<PathBuf>, env_val: Option<&str>) -> Result<Self> {
         if let Some(dir) = explicit.filter(|p| !p.as_os_str().is_empty()) {
-            return Ok(Self { data_dir: dir });
+            return Ok(Self::new(dir));
         }
 
         if let Some(val) = env_val.map(str::trim).filter(|s| !s.is_empty()) {
-            return Ok(Self {
-                data_dir: PathBuf::from(val),
-            });
+            return Ok(Self::new(val));
         }
 
         let dirs =
@@ -42,9 +55,7 @@ impl VaultConfig {
                 )
             })?;
 
-        Ok(Self {
-            data_dir: dirs.data_dir().to_path_buf(),
-        })
+        Ok(Self::new(dirs.data_dir()))
     }
 
     /// Path to the primary SQLite database (`vault.db`).
@@ -69,9 +80,25 @@ impl VaultConfig {
     }
 }
 
+/// Parse a boolean environment flag: `1` or `true` (any case) enables it.
+fn parse_flag(raw: Option<&str>) -> bool {
+    raw.map(str::trim)
+        .is_some_and(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parses_allow_private_origins_flag() {
+        assert!(parse_flag(Some("1")));
+        assert!(parse_flag(Some("TRUE")));
+        assert!(!parse_flag(Some("0")));
+        assert!(!parse_flag(Some("yes")));
+        assert!(!parse_flag(None));
+        assert!(!VaultConfig::new("/tmp/x").allow_private_origins);
+    }
 
     #[test]
     fn resolves_explicit_data_dir_over_env() {

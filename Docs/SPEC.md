@@ -60,6 +60,7 @@ Resolved via `WEB_VAULT_HOME` env var, `--data-dir` flag, or OS defaults (`direc
 - **Linux (native):** `${XDG_DATA_HOME:-~/.local/share}/web-vault/`
 - **Files inside data dir:**
   - `vault.db` (+ `vault.db-wal`, `vault.db-shm`) — primary SQLite database
+- **`WEB_VAULT_ALLOW_PRIVATE_ORIGINS`:** `1` or `true` allows web Sources on Private origins (intranet docs, `localhost`); off by default.
   - `daemon.pid` — active daemon PID lockfile
   - `daemon.log` — rotating daemon log
 
@@ -363,7 +364,7 @@ To eliminate false-positive diffs (such as volatile `created:` / `updated:` / `c
 }
 ```
 - **Validation & Safety Guardrails for `manage`:**
-  - `origin` URLs must use `http://` or `https://` and reject private/loopback SSRF targets (`127.0.0.1`, `169.254.169.254`, `localhost`, RFC1918) unless explicitly enabled via config.
+  - `origin` URLs must use `http://` or `https://` and reject Private origins (loopback, RFC1918, link-local such as `169.254.169.254`, CGNAT, multicast, `localhost`/`*.local`) unless `WEB_VAULT_ALLOW_PRIVATE_ORIGINS=1`. The same rule (`src/sources/origin.rs`) applies to every entry point: CLI `add`, UI `POST /api/sources`, MCP `manage add`, and every Sync, including the scheduler.
   - Local `origin` paths must resolve to an existing directory (`canonicalize`) and only ingest `*.md` / `*.markdown` files.
   - `remove` returns the deleted source name and page count; `add`/`sync` returns structured sync summary (`pages_added`, `pages_updated`, `pages_unchanged`, `pages_stale`, `pages_failed`).
 - **Error response (both tools):** `isError: true` with an actionable error message (e.g., `"Write operations are disabled on MCP query tool"`, `"no such column: ..."`, or `"origin must be an http(s) URL or existing directory"`), enabling immediate LLM self-correction.
@@ -381,6 +382,8 @@ web-vault
   show <name>                     # source details, sync history, stale/error pages
   sync [<name>] [--all] [--prune] # manual sync for one or all sources
   rm <name> [--yes]               # remove source and cascade stored pages
+                                  # add/sync refuse Private origins (loopback, RFC1918,
+                                  # link-local, localhost) unless WEB_VAULT_ALLOW_PRIVATE_ORIGINS=1
   query "<sql>" [--limit <n>] [--format table|json|csv]
   serve [--bind 0.0.0.0:4317]     # all-in-one server: daemon + Web UI + MCP HTTP (/mcp) (Container default)
   mcp                             # start stdio MCP server (native / container exec)
