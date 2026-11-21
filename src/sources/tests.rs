@@ -463,3 +463,69 @@ async fn sync_all_continues_after_failure() {
     assert_failure_recorded(&config, "b-broken");
     drop((first, last));
 }
+
+#[tokio::test]
+async fn sync_all_skips_source_removed_mid_run() {
+    let vault_dir = tempdir().expect("vault tempdir");
+    let config = VaultConfig::new(vault_dir.path());
+    let lifecycle = SourceLifecycle::new(config.clone());
+    let docs = tempdir().expect("docs");
+    std::fs::write(docs.path().join("p.md"), "# P\n\nPage.\n").expect("write");
+    add_local(&lifecycle, docs.path(), "kept").await;
+
+    // A claim attempt on a Source id that no longer exists is "not found", not a failure.
+    let mut ghost = crate::ingest::load_source_by_name(
+        &crate::db::open_rw_db(&config.db_path()).expect("open db"),
+        "kept",
+    )
+    .expect("load");
+    ghost.id += 1_000;
+    let err = lifecycle
+        .claim_record(ghost)
+        .await
+        .expect_err("ghost source");
+    assert!(matches!(err, VaultError::NotFound(_)), "{err:?}");
+}
+
+#[tokio::test]
+async fn dropped_sync_future_still_finishes_in_background() {
+    let (addr, server) = spawn_slow_site(std::time::Duration::from_millis(300)).await;
+    let vault_dir = tempdir().expect("vault tempdir");
+    let config = VaultConfig::new(vault_dir.path()).allowing_private_origins();
+    let lifecycle = SourceLifecycle::new(config.clone());
+    lifecycle
+        .add(
+            AddSourceParams {
+                origin: format!("http://{addr}/docs/"),
+                name: Some("slow".into()),
+                ..Default::default()
+            },
+            false,
+        )
+        .await
+        .expect("register");
+
+    // The MCP HTTP transport: the request future is dropped when the client disconnects.
+    let request = crate::mcp::handle_jsonrpc_payload(
+        &config,
+        serde_json::json!({
+            "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+            "params": {"name": "manage", "arguments": {"action": "sync", "name": "slow"}}
+        }),
+    );
+    let _ = tokio::time::timeout(std::time::Duration::from_millis(50), request).await;
+
+    let mut status = String::new();
+    for _ in 0..40 {
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        status = crate::ingest::show_source(&config, "slow")
+            .expect("show")
+            .source
+            .status;
+        if status == "ok" {
+            break;
+        }
+    }
+    server.abort();
+    assert_eq!(status, "ok", "sync must not be cancelled with its caller");
+}

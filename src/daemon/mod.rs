@@ -305,6 +305,9 @@ pub fn select_due_web_sources(conn: &Connection) -> Result<Vec<SourceRecord>> {
 }
 
 /// Select all `web` sources that are due for refresh at `now_epoch_secs` (UTC Unix seconds).
+///
+/// A Source is due once `refresh_interval_secs` has passed since its last Sync attempt,
+/// successful or not.
 pub fn select_due_web_sources_at(
     conn: &Connection,
     now_epoch_secs: i64,
@@ -313,14 +316,18 @@ pub fn select_due_web_sources_at(
         "SELECT id, name, kind, origin, tags, include_patterns, exclude_patterns,
                 max_pages, max_depth, render_js, refresh_interval_secs,
                 status, last_synced_at, last_error, created_at
-         FROM sources
+         FROM (
+             SELECT s.*,
+                    -- Last attempt, failed or not, so a failing Source waits its interval.
+                    MAX(COALESCE(unixepoch(s.last_synced_at), 0),
+                        COALESCE((SELECT MAX(unixepoch(r.started_at))
+                                  FROM sync_runs r WHERE r.source_id = s.id), 0)) AS last_attempt
+             FROM sources s
+         )
          WHERE kind = 'web'
            AND refresh_interval_secs > 0
-           AND (
-               last_synced_at IS NULL
-               OR unixepoch(last_synced_at) + refresh_interval_secs <= ?1
-           )
-         ORDER BY COALESCE(unixepoch(last_synced_at), 0) ASC, id ASC",
+           AND last_attempt + refresh_interval_secs <= ?1
+         ORDER BY last_attempt ASC, id ASC",
     )?;
     let rows = stmt.query_map([now_epoch_secs], map_source_record)?;
     let mut out = Vec::new();
@@ -352,6 +359,9 @@ pub async fn run_scheduler_with_options(
 ) -> Result<()> {
     let semaphore = Arc::new(Semaphore::new(max_concurrency.max(1)));
     let lifecycle = SourceLifecycle::new(config.clone());
+    // Sources this scheduler has already queued, so each tick does not queue them again.
+    // This is not exclusion: the Sync claim, taken once a slot is free, decides who syncs.
+    let queued: Arc<std::sync::Mutex<HashSet<i64>>> = Arc::default();
     let mut tasks: JoinSet<()> = JoinSet::new();
 
     let mut ticker = tokio::time::interval(tick_interval.max(Duration::from_millis(10)));
@@ -378,52 +388,19 @@ pub async fn run_scheduler_with_options(
                     if cancel.is_cancelled() {
                         break;
                     }
-                    // The Sync claim is the only exclusion: a Source syncing anywhere
-                    // (this scheduler, the UI, the CLI, another process) is skipped.
-                    let claimed = match lifecycle.claim(&source.name).await {
-                        Ok(Some(claimed)) => claimed,
-                        Ok(None) => {
-                            tracing::debug!(source = %source.name, "skipped: already syncing");
-                            continue;
-                        }
-                        Err(err) => {
-                            tracing::warn!(source = %source.name, error = %err, "scheduler failed to claim source");
-                            continue;
-                        }
-                    };
+                    if !queued.lock().map(|mut q| q.insert(source.id)).unwrap_or(false) {
+                        continue;
+                    }
 
                     let sem = Arc::clone(&semaphore);
                     let task_cancel = cancel.clone();
+                    let lifecycle = lifecycle.clone();
+                    let queued = Arc::clone(&queued);
 
                     tasks.spawn(async move {
-                        let permit = tokio::select! {
-                            _ = task_cancel.cancelled() => None,
-                            acquired = sem.acquire_owned() => acquired.ok(),
-                        };
-                        let Some(_permit) = permit else {
-                            return;
-                        };
-
-                        let jitter = compute_jitter(max_jitter_secs, claimed.source().id);
-                        let proceed = if jitter.is_zero() {
-                            !task_cancel.is_cancelled()
-                        } else {
-                            tokio::select! {
-                                _ = task_cancel.cancelled() => false,
-                                _ = tokio::time::sleep(jitter) => true,
-                            }
-                        };
-                        if !proceed {
-                            return;
-                        }
-
-                        let name = claimed.source().name.clone();
-                        tracing::info!(source = %name, "starting scheduled web sync");
-                        match claimed.run(false).await {
-                            Ok(summary) => log_sync_summary(&summary, "scheduled web sync complete"),
-                            Err(err) => {
-                                tracing::warn!(source = %name, error = %err, "scheduled web sync failed");
-                            }
+                        scheduled_sync(&lifecycle, source.clone(), &sem, max_jitter_secs, &task_cancel).await;
+                        if let Ok(mut q) = queued.lock() {
+                            q.remove(&source.id);
                         }
                     });
                 }
@@ -434,6 +411,55 @@ pub async fn run_scheduler_with_options(
     // Drain in-flight tasks so any active SQLite transactions finish cleanly.
     while tasks.join_next().await.is_some() {}
     Ok(())
+}
+
+/// Wait for a free slot and the jitter delay, then claim and sync one due Source.
+/// Claiming only now means a Source waiting in the queue is not reported as syncing.
+async fn scheduled_sync(
+    lifecycle: &SourceLifecycle,
+    source: SourceRecord,
+    semaphore: &Arc<Semaphore>,
+    max_jitter_secs: u64,
+    cancel: &CancellationToken,
+) {
+    let permit = tokio::select! {
+        _ = cancel.cancelled() => None,
+        acquired = Arc::clone(semaphore).acquire_owned() => acquired.ok(),
+    };
+    let Some(_permit) = permit else {
+        return;
+    };
+
+    let jitter = compute_jitter(max_jitter_secs, source.id);
+    if !jitter.is_zero() {
+        tokio::select! {
+            _ = cancel.cancelled() => return,
+            _ = tokio::time::sleep(jitter) => {}
+        }
+    }
+    if cancel.is_cancelled() {
+        return;
+    }
+
+    let name = source.name.clone();
+    let claimed = match lifecycle.claim_record(source).await {
+        Ok(Some(claimed)) => claimed,
+        Ok(None) => {
+            tracing::debug!(source = %name, "skipped: already syncing");
+            return;
+        }
+        Err(err) => {
+            tracing::warn!(source = %name, error = %err, "scheduler failed to claim source");
+            return;
+        }
+    };
+    tracing::info!(source = %name, "starting scheduled web sync");
+    match claimed.run(false).await {
+        Ok(summary) => log_sync_summary(&summary, "scheduled web sync complete"),
+        Err(err) => {
+            tracing::warn!(source = %name, error = %err, "scheduled web sync failed");
+        }
+    }
 }
 
 fn log_sync_summary(summary: &SyncSummary, message: &str) {
@@ -785,6 +811,32 @@ mod tests {
             names,
             vec!["never-synced-web", "overdue-web", "syncing-web"]
         );
+    }
+
+    #[test]
+    fn failed_sync_waits_for_refresh_interval() {
+        let dir = tempdir().expect("tempdir");
+        let conn = open_rw_db(&dir.path().join("vault.db")).expect("open_rw_db");
+        let now_epoch: i64 = 1_800_000_000;
+        // Never synced successfully, but its last attempt failed 10 minutes ago.
+        conn.execute(
+            "INSERT INTO sources (name, kind, origin, refresh_interval_secs, status, last_synced_at)
+             VALUES ('refused', 'web', 'http://10.0.0.5/docs', 3600, 'error', NULL)",
+            [],
+        )
+        .expect("insert refused");
+        conn.execute(
+            "INSERT INTO sync_runs (source_id, started_at, finished_at, status, error_message)
+             VALUES (1, strftime('%Y-%m-%dT%H:%M:%SZ', ?1, 'unixepoch'),
+                     strftime('%Y-%m-%dT%H:%M:%SZ', ?1, 'unixepoch'), 'error', 'refused')",
+            [now_epoch - 600],
+        )
+        .expect("insert failed run");
+
+        let due = select_due_web_sources_at(&conn, now_epoch).expect("due");
+        assert!(due.is_empty(), "retried before its interval: {due:?}");
+        let due_later = select_due_web_sources_at(&conn, now_epoch + 3_000).expect("due later");
+        assert_eq!(due_later.len(), 1);
     }
 
     #[test]

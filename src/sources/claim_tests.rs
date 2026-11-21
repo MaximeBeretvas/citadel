@@ -113,3 +113,15 @@ fn real_liveness_check_sees_dead_and_live_pids() {
     child.wait().expect("wait true");
     assert!(!(env.pid_alive)(pid), "exited child is not running");
 }
+
+#[test]
+fn own_claim_never_expires_for_its_holder() {
+    let (_dir, conn, id) = vault_with_source();
+    let clock = Arc::new(AtomicI64::new(T0));
+    let holder = env(100, "a", &clock, true);
+    assert!(try_acquire(&conn, id, &holder).expect("claim"));
+
+    // Six hours later a second task in the same process must not take over its own claim.
+    clock.store(T0 + MAX_CLAIM_AGE_SECS + 1, Ordering::SeqCst);
+    assert!(!try_acquire(&conn, id, &holder).expect("own expired claim stays held"));
+}

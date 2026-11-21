@@ -11,5 +11,6 @@ The CLI, `web-vault mcp` (stdio) and `serve`/`daemon` run as separate processes 
 ## Consequences
 
 - The instance token exists because pids repeat: the container's `serve` entrypoint is pid 1 on every start, so a pid check alone would treat a crashed run's claim as still held by the restarted process.
-- Pid liveness is only meaningful on one host. A vault volume shared between a container and the host relies on the age limit alone.
+- Pid liveness is only meaningful within one pid namespace. The claim does not yet record which host or namespace holds it, so on a vault shared between namespaces (the container's `serve` plus a host CLI on a bind-mounted volume, or two containers), a live holder's pid looks dead and its claim can be taken over mid-Sync. The default `make run` setup keeps the vault in a named volume used only by the container, so this needs an unusual setup. Follow-up: store a host/namespace identity with the claim and check liveness only when it matches the local one; otherwise rely on the age limit.
+- There is no heartbeat, so a Sync that runs longer than the hard age limit (6h) can be taken over by another process while it still runs. A process never treats its own claim as expired.
 - `sources.status = 'syncing'` remains the displayed status; `sync_claims` is the source of truth for exclusion.

@@ -121,10 +121,17 @@ impl SourceLifecycle {
         };
         let config = self.config.clone();
         let name = name.to_string();
-        let removed = blocking(move || remove_source(&config, &name)).await?;
-        // Deleting the Source cascaded its claim row away.
-        claimed.released = true;
-        Ok(Removal::Removed(removed))
+        match blocking(move || remove_source(&config, &name)).await {
+            Ok(removed) => {
+                // Deleting the Source cascaded its claim row away.
+                claimed.released = true;
+                Ok(Removal::Removed(removed))
+            }
+            Err(err) => {
+                claimed.release().await;
+                Err(err)
+            }
+        }
     }
 
     /// Sync one Source by name, unless another Sync of it is running.
@@ -154,6 +161,10 @@ impl SourceLifecycle {
             let result = match self.claim_record(source).await {
                 Ok(Some(claimed)) => claimed.run(prune).await.map(SyncOutcome::Synced),
                 Ok(None) => Ok(SyncOutcome::AlreadySyncing),
+                Err(VaultError::NotFound(_)) => {
+                    tracing::info!(source = %name, "skipped: removed during sync_all");
+                    continue;
+                }
                 Err(err) => Err(err),
             };
             results.push(SourceSyncResult { name, result });
@@ -177,16 +188,36 @@ impl SourceLifecycle {
         self.claim_record(source).await
     }
 
-    async fn claim_record(&self, source: SourceRecord) -> Result<Option<ClaimedSync>> {
+    /// Claim a Source, then reload it so the Sync uses its current settings. A Source
+    /// removed since `source` was loaded is `NotFound`.
+    pub(crate) async fn claim_record(&self, source: SourceRecord) -> Result<Option<ClaimedSync>> {
         let config = self.config.clone();
         let env = self.claims.clone();
         let id = source.id;
-        let acquired = blocking(move || {
+        let claimed = blocking(move || {
             let conn = open_rw_db(&config.db_path())?;
-            claim::try_acquire(&conn, id, &env)
+            let not_found = || VaultError::NotFound(format!("source '{}' not found", source.name));
+            let exists: bool = conn.query_row(
+                "SELECT EXISTS (SELECT 1 FROM sources WHERE id = ?1)",
+                [id],
+                |r| r.get(0),
+            )?;
+            if !exists {
+                return Err(not_found());
+            }
+            if !claim::try_acquire(&conn, id, &env)? {
+                return Ok(None);
+            }
+            match load_source_by_id(&conn, id) {
+                Ok(fresh) => Ok(Some(fresh)),
+                Err(err) => {
+                    claim::release(&conn, id, &env)?;
+                    Err(err)
+                }
+            }
         })
         .await?;
-        Ok(acquired.then(|| ClaimedSync {
+        Ok(claimed.map(|source| ClaimedSync {
             lifecycle: self.clone(),
             source,
             released: false,
@@ -267,8 +298,24 @@ impl ClaimedSync {
     }
 
     /// Run the Sync, then release the claim whether it succeeded or failed.
-    pub async fn run(mut self, prune: bool) -> Result<SyncSummary> {
+    ///
+    /// The Sync runs as its own task: dropping the returned future (an HTTP client that
+    /// disconnects, a timed-out caller) does not cancel a crawl half-way.
+    pub async fn run(self, prune: bool) -> Result<SyncSummary> {
+        tokio::spawn(self.run_to_completion(prune))
+            .await
+            .map_err(|err| VaultError::Other(format!("sync task failed: {err}")))?
+    }
+
+    async fn run_to_completion(mut self, prune: bool) -> Result<SyncSummary> {
         let result = self.lifecycle.sync_record(&self.source, prune).await;
+        self.release().await;
+        result
+    }
+
+    /// Release the claim now. A failure is logged, never returned: the Sync's own result
+    /// is what callers report.
+    async fn release(&mut self) {
         self.released = true;
         let (config, env, id) = self.release_parts();
         let released = blocking(move || {
@@ -276,9 +323,9 @@ impl ClaimedSync {
             claim::release(&conn, id, &env)
         })
         .await;
-        let summary = result?;
-        released?;
-        Ok(summary)
+        if let Err(err) = released {
+            tracing::warn!(source_id = id, error = %err, "failed to release sync claim");
+        }
     }
 
     fn release_parts(&self) -> (VaultConfig, ClaimEnv, i64) {

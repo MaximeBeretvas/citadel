@@ -132,7 +132,8 @@ pub(crate) fn try_acquire(conn: &Connection, source_id: i64, env: &ClaimEnv) -> 
     let reused_pid = holder_pid == env.pid && holder_token != env.token;
     let expired = now - claimed_at >= MAX_CLAIM_AGE_SECS;
     let held_by_us = holder_pid == env.pid && holder_token == env.token;
-    let abandoned = reused_pid || expired || (!held_by_us && !(env.pid_alive)(holder_pid));
+    // Our own live claim is never abandoned, however old: another task of ours is running it.
+    let abandoned = !held_by_us && (reused_pid || expired || !(env.pid_alive)(holder_pid));
     if !abandoned {
         return Ok(false);
     }

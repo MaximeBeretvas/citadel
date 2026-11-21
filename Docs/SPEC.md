@@ -60,9 +60,9 @@ Resolved via `WEB_VAULT_HOME` env var, `--data-dir` flag, or OS defaults (`direc
 - **Linux (native):** `${XDG_DATA_HOME:-~/.local/share}/web-vault/`
 - **Files inside data dir:**
   - `vault.db` (+ `vault.db-wal`, `vault.db-shm`) — primary SQLite database
-- **`WEB_VAULT_ALLOW_PRIVATE_ORIGINS`:** `1` or `true` allows web Sources on Private origins (intranet docs, `localhost`); off by default.
   - `daemon.pid` — active daemon PID lockfile
   - `daemon.log` — rotating daemon log
+- **`WEB_VAULT_ALLOW_PRIVATE_ORIGINS`:** `1` or `true` allows web Sources on Private origins (intranet docs, `localhost`); off by default.
 
 ---
 

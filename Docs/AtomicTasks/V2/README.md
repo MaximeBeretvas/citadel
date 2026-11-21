@@ -29,6 +29,12 @@ V2 deepens this into one **Source lifecycle module** (`src/sources/`) that every
   - Exercised through the module's interface on a tempdir vault, with a loopback fixture and Private origins allowed.
   - The clock and pid-liveness checks sit behind a crate-private hook.
 
+## Follow-ups (not in V2)
+
+- **DNS-based Private origins:** the Private-origin rule checks the URL host text only. A public name that resolves to a private address (e.g. `169.254.169.254.nip.io`) passes on `add`, on Sync and in the redirect guard, as do NAT64 (`64:ff9b::/96`) and 6to4 (`2002::/16`) literals embedding private IPv4. Fix: resolve the host, check every resolved IP, pin it in the HTTP client, and add the embedded-IPv4 checks.
+- **Sync claims across pid namespaces:** see [ADR-0001](../../adr/0001-database-sync-claim.md) consequences.
+- **Upgrading vaults with private-origin Sources:** the generated launchd/systemd units and `make run` do not pass `WEB_VAULT_ALLOW_PRIVATE_ORIGINS` through; such Sources fail every Sync (once per refresh interval) until the daemon sees the flag.
+
 ## Dependency DAG
 
 ```mermaid
