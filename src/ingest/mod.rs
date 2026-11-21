@@ -891,7 +891,7 @@ fn parse_json_list(raw: &str) -> Result<Vec<String>> {
         .map_err(|err| VaultError::Other(format!("failed to decode stored JSON list: {err}")))
 }
 
-fn map_source_record(row: &Row<'_>) -> rusqlite::Result<SourceRecord> {
+pub(crate) fn map_source_record(row: &Row<'_>) -> rusqlite::Result<SourceRecord> {
     let kind_raw: String = row.get(2)?;
     let tags_raw: String = row.get(4)?;
     let includes_raw: String = row.get(5)?;

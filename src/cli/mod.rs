@@ -326,6 +326,61 @@ pub fn run_cli_with_writer<W: Write>(cli: Cli, out: &mut W) -> anyhow::Result<()
             rt.block_on(crate::ui::run_ui_server(config, port, no_open))?;
             Ok(())
         }
+        Commands::Daemon { command } => match command {
+            DaemonCommands::Start { foreground } => {
+                if let Some(pid) = crate::daemon::start_daemon(&config, foreground)? {
+                    writeln!(
+                        out,
+                        "Started web-vault daemon (pid {pid}, log: {}).",
+                        config.log_path().display()
+                    )?;
+                }
+                Ok(())
+            }
+            DaemonCommands::Stop => {
+                match crate::daemon::stop_daemon(&config)? {
+                    Some(pid) => writeln!(out, "Stopped web-vault daemon (pid {pid}).")?,
+                    None => writeln!(out, "Daemon is not running.")?,
+                }
+                Ok(())
+            }
+            DaemonCommands::Status => {
+                match crate::daemon::daemon_status(&config)? {
+                    crate::daemon::DaemonStatus::Running(pid) => {
+                        writeln!(out, "Daemon is running (pid {pid}).")?;
+                    }
+                    crate::daemon::DaemonStatus::Stopped => {
+                        writeln!(out, "Daemon is stopped.")?;
+                    }
+                    crate::daemon::DaemonStatus::Stale => {
+                        writeln!(
+                            out,
+                            "Daemon is not running (stale lockfile at {}).",
+                            config.pid_path().display()
+                        )?;
+                    }
+                }
+                Ok(())
+            }
+            DaemonCommands::Install => {
+                let path = crate::daemon::install_service(&config)?;
+                writeln!(out, "Installed background service at {}.", path.display())?;
+                Ok(())
+            }
+            DaemonCommands::Uninstall => {
+                match crate::daemon::uninstall_service()? {
+                    Some(path) => {
+                        writeln!(
+                            out,
+                            "Uninstalled background service from {}.",
+                            path.display()
+                        )?;
+                    }
+                    None => writeln!(out, "No background service was installed.")?,
+                }
+                Ok(())
+            }
+        },
         Commands::Skill { command } => match command {
             SkillCommands::Install {
                 path,
