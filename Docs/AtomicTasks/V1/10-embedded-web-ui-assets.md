@@ -20,10 +20,14 @@ Build and embed the lightweight, zero-CDN static Web UI (`src/ui/assets/`) using
 
 ## Acceptance Criteria
 - Clean, fast, responsive UI with dark/light support and zero build step (vanilla HTML/CSS/JS).
-- **Sources view:** table of web + local sources, status badges, page/stale/error counts, Add Source modal (URL or folder), Sync Now & Delete buttons.
-- **Knowledge Browser:** filter by source or search text, view page Markdown and heading sections.
-- **Changes & Health:** recent diffs (`v_recent_changes`) with colored `+`/`-` unified diff viewer + list of `stale`/`error` pages.
-- **SQL Explorer:** interactive read-only SQL box calling `POST /api/query` with tabular result rendering and quick example presets.
+- Supports URL hash routing (`#sources`, `#browser`, `#changes`, `#sql`) so every view can be deep-linked and captured deterministically by headless Chrome.
+- **Sources view (`#sources`):** table of web + local sources, status badges, page/stale/error counts, Add Source modal (URL or folder), Sync Now & Delete buttons.
+- **Knowledge Browser (`#browser`):** filter by source or search text, view page Markdown and heading sections.
+- **Changes & Health (`#changes`):** recent diffs (`v_recent_changes`) with colored `+`/`-` unified diff viewer + list of `stale`/`error` pages.
+- **SQL Explorer (`#sql`):** interactive read-only SQL box calling `POST /api/query` with tabular result rendering and quick example presets.
+
+## Visual Verification
+Run the **Portable UI Visual Feedback Loop** in [REVIEW.md](../../../REVIEW.md#3-portable-ui-visual-feedback-loop-srcui) using headless Chrome/Chromium to capture and visually inspect `#sources`, `#browser`, `#changes`, `#sql`, narrow mobile (`480x900`), and dark mode before `HumanAudit`.
 
 ## Checks Gate
 ```bash

@@ -4,6 +4,7 @@
 Read the authoritative doc before acting on its branch; never duplicate its details here:
 - [Docs/PRD.md](./Docs/PRD.md) — product scope, user journeys, functional & non-functional requirements.
 - [Docs/SPEC.md](./Docs/SPEC.md) — Rust crate stack, module layout, SQLite + FTS5 schema, MCP `query`/`manage` contracts, CLI, embedded UI, and Apple `container`/native deployment.
+- [REVIEW.md](./REVIEW.md) — grounded verification & visual feedback loops (headless Chrome UI screenshots, MCP JSON-RPC probes, container smoke tests) and `HumanAudit` evidence format.
 - `Docs/AtomicTasks/` *(created in AtomicTasks)* — ordered atomic task specs and acceptance criteria.
 
 ## Execution Loop
