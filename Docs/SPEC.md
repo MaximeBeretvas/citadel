@@ -465,7 +465,9 @@ Running `citadel setup` in an interactive TTY launches a guided `cliclack` wizar
 ### Self-Update & Automatic Update Awareness (`citadel update`)
 
 #### Release Artifacts (GitHub Releases)
-- Published on GitHub Releases as versioned tarballs (`citadel-v<semver>-<target>.tar.gz` for `aarch64-apple-darwin`, `x86_64-apple-darwin`, `aarch64-unknown-linux-gnu`, `x86_64-unknown-linux-gnu`) alongside a `checksums.sha256` manifest.
+- Published on GitHub Releases as versioned tarballs (`citadel-v<semver>-<target>.tar.gz` for `aarch64-apple-darwin`, `x86_64-apple-darwin`, `aarch64-unknown-linux-gnu`, `x86_64-unknown-linux-gnu`) alongside a `checksums.sha256` manifest (`sha256sum` format). Each tarball holds the `citadel` binary at its root.
+- Produced by `.github/workflows/release.yml` when a `vX.Y.Z` tag is pushed; the tag must equal `v` + the `Cargo.toml` version or the run fails before building (see §10). `tests/ci_workflows.rs` pins the workflow to this contract.
+- Linux binaries are built on Ubuntu 22.04 and need glibc 2.35+. No Windows artifact is published.
 
 #### `citadel update` Execution
 1. **Container detection:** If running inside an OCI container (`/.dockerenv`, `/run/.containerenv`, or `CITADEL_CONTAINER=1`; Apple `container` creates neither marker file, so `make run` and the documented `container run` command set `CITADEL_CONTAINER=1`), do **not** mutate the container binary. Instead print the current and latest version (a short live check, falling back to `update-check.json`) and, unless already up to date, the exact steps to check out the release source (`git fetch --tags && git checkout vX.Y.Z`), rebuild the image and recreate the container with Apple `container` (or `make build && make run`).
@@ -539,6 +541,7 @@ Uses Apple's native macOS OCI runtime (**`container`**, `https://github.com/appl
 
 ### 8.2 Optional Native Install (macOS / Linux)
 - **Install:** `cargo install --path .` (or prebuilt GitHub Release binary) puts `citadel` on `$PATH`.
+- **Windows:** not yet tested and no prebuilt binary; install with `cargo install --git https://github.com/mberetvas/citadel --locked` or build from source. `citadel update` and `citadel daemon install` are unsupported there.
 - **PID & single-instance lock:** Acquires an advisory file lock on `daemon.pid` so only one daemon runs per `CITADEL_HOME`.
 - **OS service integration (`citadel daemon install`):**
   - **macOS:** Generates `~/Library/LaunchAgents/com.citadel.daemon.plist` (`KeepAlive`, `RunAtLoad`) and loads via `launchctl`.
@@ -559,3 +562,34 @@ Uses Apple's native macOS OCI runtime (**`container`**, `https://github.com/appl
 | **SQLite safety tests** | Verify MCP `query` rejects `INSERT`, `UPDATE`, `DELETE`, `DROP`, `ATTACH`, `PRAGMA`, multi-statements, and enforces timeout + row/byte caps. |
 | **Integration tests** | Local `wiremock`/Axum fixture site crawled via `spider` -> stored -> modified -> re-crawled (verifying `pages_updated`, `page_revisions`, and `stale` marking on removed URL); temp Markdown folder sync; end-to-end `citadel mcp` `stdio` JSON-RPC round-trip (verifying zero update-notice pollution on `stdout`); mock GitHub Release download/verify/swap test for `citadel update`. |
 | **Resource budget check** | Verify idle `citadel daemon` RSS stays under ~25 MB on a 1,000-page vault. |
+
+---
+
+## 10. CI & Release
+
+### PR Checks Gate (`.github/workflows/ci.yml`)
+- Runs on every `pull_request` and on `push` to `main`, with `contents: read` only; a newer push to the same ref cancels the older run.
+- Matrix `ubuntu-latest` and `macos-latest`, each running the AGENTS.md checks gate: `cargo fmt --check`, `cargo clippy --all-targets --locked -- -D warnings`, `cargo test --locked`.
+- Both jobs, `checks (ubuntu-latest)` and `checks (macos-latest)`, are required status checks on `main`, so a red PR cannot be merged.
+
+### Release (`.github/workflows/release.yml`)
+- Trigger: push of a `v*` tag.
+- Guard: the tag must equal `v` + `Cargo.toml` `version`.
+- Build matrix (`cargo build --release --locked --target <target>`):
+
+| Target | Runner |
+|---|---|
+| `aarch64-apple-darwin` | `macos-latest` |
+| `x86_64-apple-darwin` | `macos-latest` (cross-compiled) |
+| `x86_64-unknown-linux-gnu` | `ubuntu-22.04` |
+| `aarch64-unknown-linux-gnu` | `ubuntu-22.04-arm` |
+
+- Each build packs `citadel-vX.Y.Z-<target>.tar.gz` with `citadel` at the root. A `publish` job (the only job with `contents: write`) writes `checksums.sha256` and runs `gh release create <tag> --generate-notes` with all assets.
+
+### Release Process
+1. Bump `version` in `Cargo.toml` (and `Cargo.lock`) on a branch; merge it to `main` through the PR gate.
+2. `git tag vX.Y.Z && git push origin vX.Y.Z`.
+3. Check the Release page lists the four tarballs and `checksums.sha256`; `citadel update --check` on an older build reports the new version.
+
+### Out of Scope
+Windows CI, binaries, self-update and daemon (Windows is not yet tested); container image builds in CI (no Apple `container` on GitHub runners); `--features chrome` release builds; macOS signing/notarization; dependency auditing; automated version bumps.
