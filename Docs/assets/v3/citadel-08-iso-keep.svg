@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256" role="img" aria-label="Citadel — Isometric Keep">
+  <title>Citadel — Isometric Keep</title>
+  <!-- A data block drawn as an isometric keep: crenels cut into both walls, beacon on the roof -->
+  <g fill="#0f172a" transform="translate(0,-5)">
+    <path fill-rule="evenodd" d="M128,52 L200,94 L128,136 L56,94 Z M128,82 A13,7.5 0 1 0 128,106 A13,7.5 0 1 0 128,82 Z"/>
+    <path d="M56,100 L72.5,109.5 L72.5,123.5 L83.72,129.96 L83.72,115.96 L94.28,122.04 L94.28,136.04 L105.5,142.5 L105.5,128.5 L122,138 L122,214 L56,176 Z"/>
+    <path d="M200,100 L183.5,109.5 L183.5,123.5 L172.28,129.96 L172.28,115.96 L161.72,122.04 L161.72,136.04 L150.5,142.5 L150.5,128.5 L134,138 L134,214 L200,176 Z"/>
+  </g>
+</svg>

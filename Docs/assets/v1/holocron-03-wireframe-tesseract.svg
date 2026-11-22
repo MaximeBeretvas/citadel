@@ -1,0 +1,54 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" width="128" height="128" role="img" aria-label="Holocron — Wireframe Tesseract">
+  <defs>
+    <linearGradient id="h3-bg" x1="0" y1="0" x2="128" y2="128" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#0e1223"/>
+      <stop offset="100%" stop-color="#020617"/>
+    </linearGradient>
+    <radialGradient id="h3-core-glow" cx="64" cy="64" r="32" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#22c55e" stop-opacity="0.45"/>
+      <stop offset="60%" stop-color="#06b6d4" stop-opacity="0.14"/>
+      <stop offset="100%" stop-color="#06b6d4" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="h3-outer" x1="24" y1="20" x2="104" y2="108" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#38bdf8"/>
+      <stop offset="100%" stop-color="#22c55e"/>
+    </linearGradient>
+  </defs>
+
+  <!-- Tile -->
+  <rect x="4" y="4" width="120" height="120" rx="28" fill="url(#h3-bg)"/>
+  <rect x="4.75" y="4.75" width="118.5" height="118.5" rx="27.25" fill="none" stroke="#334155" stroke-width="1.5"/>
+
+  <!-- Inner energy glow -->
+  <circle cx="64" cy="64" r="32" fill="url(#h3-core-glow)"/>
+
+  <!-- Back-facing subtle outer cube edges -->
+  <path d="M64 20 L64 64 M25.9 86 L64 64 L102.1 86" fill="none" stroke="#334155" stroke-width="1.75" stroke-dasharray="3 3" stroke-linecap="round"/>
+
+  <!-- Tesseract connecting vectors (outer R=44 to inner r=21) -->
+  <g stroke="#38bdf8" stroke-opacity="0.55" stroke-width="1.75" stroke-linecap="round">
+    <line x1="64" y1="20" x2="64" y2="43"/>
+    <line x1="102.1" y1="42" x2="82.2" y2="53.5"/>
+    <line x1="102.1" y1="86" x2="82.2" y2="74.5"/>
+    <line x1="64" y1="108" x2="64" y2="85"/>
+    <line x1="25.9" y1="86" x2="45.8" y2="74.5"/>
+    <line x1="25.9" y1="42" x2="45.8" y2="53.5"/>
+  </g>
+
+  <!-- Suspended solid inner data cube (r=21) -->
+  <polygon points="64,43 82.2,53.5 64,64 45.8,53.5" fill="#86efac"/>
+  <polygon points="45.8,53.5 64,64 64,85 45.8,74.5" fill="#22c55e"/>
+  <polygon points="82.2,53.5 64,64 64,85 82.2,74.5" fill="#15803d"/>
+
+  <!-- Outer wireframe cube (R=44) -->
+  <polygon points="64,20 102.1,42 102.1,86 64,108 25.9,86 25.9,42" fill="none" stroke="url(#h3-outer)" stroke-width="3" stroke-linejoin="round"/>
+  <path d="M25.9 42 L64 64 L102.1 42 M64 64 L64 108" fill="none" stroke="url(#h3-outer)" stroke-opacity="0.35" stroke-width="2" stroke-linejoin="round"/>
+
+  <!-- Luminous corner nodes -->
+  <circle cx="64" cy="20" r="3.5" fill="#f8fafc"/>
+  <circle cx="102.1" cy="42" r="3.5" fill="#38bdf8"/>
+  <circle cx="102.1" cy="86" r="3.5" fill="#22c55e"/>
+  <circle cx="64" cy="108" r="3.5" fill="#4ade80"/>
+  <circle cx="25.9" cy="86" r="3.5" fill="#22c55e"/>
+  <circle cx="25.9" cy="42" r="3.5" fill="#38bdf8"/>
+</svg>

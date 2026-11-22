@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" width="128" height="128" role="img" aria-label="Holocron — Query Core">
+  <title>Holocron — Query Core</title>
+  <defs>
+    <linearGradient id="h2-bg" x1="0" y1="0" x2="128" y2="128" gradientUnits="userSpaceOnUse"><stop offset="0" stop-color="#ffffff"/><stop offset="1" stop-color="#f1f5f9"/></linearGradient>
+  </defs>
+  <rect x="4" y="4" width="120" height="120" rx="28" fill="url(#h2-bg)"/>
+  <rect x="4.75" y="4.75" width="118.5" height="118.5" rx="27.25" fill="none" stroke="#cbd5e1" stroke-width="1.5"/>
+  <!-- Cube silhouette, top face tinted; a green query core sits where the three faces meet -->
+  <polygon points="64,24 98.6,44 64,64 29.4,44" fill="#dcfce7"/>
+  <g fill="none" stroke="#0f172a" stroke-width="8" stroke-linejoin="round" stroke-linecap="round">
+    <polygon points="64,24 98.6,44 98.6,84 64,104 29.4,84 29.4,44"/>
+    <path d="M29.4,44 L64,64 L98.6,44 M64,64 L64,104"/>
+  </g>
+  <circle cx="64" cy="64" r="13" fill="#ffffff"/>
+  <circle cx="64" cy="64" r="8.5" fill="#15803d"/>
+</svg>

@@ -1,0 +1,236 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Icon Comparison — v1 vs v2</title>
+  <style>
+    :root {
+      --bg: #f8fafc;
+      --surface: #ffffff;
+      --border: #e2e8f0;
+      --text: #0f172a;
+      --muted: #475569;
+      --accent: #15803d;
+    }
+    [data-theme="dark"] {
+      --bg: #020617;
+      --surface: #0e1223;
+      --border: #1e293b;
+      --text: #f8fafc;
+      --muted: #94a3b8;
+      --accent: #22c55e;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: -apple-system, BlinkMacSystemFont, "IBM Plex Sans", "Segoe UI", sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      padding: 32px;
+      line-height: 1.5;
+    }
+    .wrap { max-width: 1180px; margin: 0 auto; }
+    header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 28px;
+      padding-bottom: 16px;
+      border-bottom: 1px solid var(--border);
+    }
+    h1 { margin: 0; font-size: 22px; font-weight: 700; letter-spacing: -0.02em; }
+    h2 {
+      margin: 32px 0 14px;
+      font-size: 14px;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      color: var(--muted);
+    }
+    button {
+      background: var(--surface);
+      color: var(--text);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 8px 14px;
+      font-size: 13px;
+      font-weight: 600;
+      cursor: pointer;
+    }
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(5, minmax(180px, 1fr));
+      gap: 16px;
+    }
+    @media (max-width: 980px) {
+      .grid { grid-template-columns: repeat(auto-fill, minmax(190px, 1fr)); }
+    }
+    .card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      padding: 18px 14px 16px;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      text-align: center;
+      gap: 12px;
+    }
+    .hero { width: 112px; height: 112px; }
+    .sizes {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      padding: 8px 12px;
+      border-radius: 8px;
+      background: var(--bg);
+      border: 1px solid var(--border);
+    }
+    .sizes img.md { width: 32px; height: 32px; }
+    .sizes img.sm { width: 20px; height: 20px; }
+    .sizes img.xs { width: 16px; height: 16px; }
+    h3 { display: flex; align-items: center; gap: 10px; margin: 20px 0 10px; font-size: 13px; font-weight: 700; }
+    .sub { margin: 4px 0 0; font-size: 13px; color: var(--muted); }
+    .badge { font-size: 11px; font-weight: 700; padding: 2px 8px; border-radius: 999px; border: 1px solid var(--border); color: var(--muted); }
+    .badge.v2 { color: var(--accent); border-color: var(--accent); }
+    .title { font-size: 13px; font-weight: 700; }
+    .file { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11px; color: var(--muted); }
+  </style>
+</head>
+<body data-theme="dark">
+  <div class="wrap">
+    <header>
+      <div>
+        <h1>Icon Comparison — Citadel &amp; Holocron</h1>
+        <p class="sub">v1 by Google Neon · v2 by Claude Opus 5.5</p>
+      </div>
+      <button id="toggle">Switch to Light Mode</button>
+    </header>
+
+    <h2>Citadel</h2>
+    <h3><span class="badge v1">v1</span>Google Neon</h3>
+    <div class="grid">
+      <div class="card">
+        <img class="hero" src="./v1/citadel-01-high-tower.svg" alt="Citadel 01">
+        <div class="sizes"><img class="md" src="./v1/citadel-01-high-tower.svg" alt=""><img class="sm" src="./v1/citadel-01-high-tower.svg" alt=""><img class="xs" src="./v1/citadel-01-high-tower.svg" alt=""></div>
+        <div><div class="title">01 · High Tower Beacon</div><div class="file">citadel-01-high-tower.svg</div></div>
+      </div>
+      <div class="card">
+        <img class="hero" src="./v1/citadel-02-fortress-tomes.svg" alt="Citadel 02">
+        <div class="sizes"><img class="md" src="./v1/citadel-02-fortress-tomes.svg" alt=""><img class="sm" src="./v1/citadel-02-fortress-tomes.svg" alt=""><img class="xs" src="./v1/citadel-02-fortress-tomes.svg" alt=""></div>
+        <div><div class="title">02 · Fortress of Tomes</div><div class="file">citadel-02-fortress-tomes.svg</div></div>
+      </div>
+      <div class="card">
+        <img class="hero" src="./v1/citadel-03-maester-chain.svg" alt="Citadel 03">
+        <div class="sizes"><img class="md" src="./v1/citadel-03-maester-chain.svg" alt=""><img class="sm" src="./v1/citadel-03-maester-chain.svg" alt=""><img class="xs" src="./v1/citadel-03-maester-chain.svg" alt=""></div>
+        <div><div class="title">03 · Maester Chain Seal</div><div class="file">citadel-03-maester-chain.svg</div></div>
+      </div>
+      <div class="card">
+        <img class="hero" src="./v1/citadel-04-swiss-monolith.svg" alt="Citadel 04">
+        <div class="sizes"><img class="md" src="./v1/citadel-04-swiss-monolith.svg" alt=""><img class="sm" src="./v1/citadel-04-swiss-monolith.svg" alt=""><img class="xs" src="./v1/citadel-04-swiss-monolith.svg" alt=""></div>
+        <div><div class="title">04 · Swiss Monolith</div><div class="file">citadel-04-swiss-monolith.svg</div></div>
+      </div>
+      <div class="card">
+        <img class="hero" src="./v1/citadel-05-vaulted-arch.svg" alt="Citadel 05">
+        <div class="sizes"><img class="md" src="./v1/citadel-05-vaulted-arch.svg" alt=""><img class="sm" src="./v1/citadel-05-vaulted-arch.svg" alt=""><img class="xs" src="./v1/citadel-05-vaulted-arch.svg" alt=""></div>
+        <div><div class="title">05 · Vaulted Library Arch</div><div class="file">citadel-05-vaulted-arch.svg</div></div>
+      </div>
+    </div>
+    <h3><span class="badge v2">v2</span>Claude Opus 5.5</h3>
+    <div class="grid">
+      <div class="card">
+        <img class="hero" src="./v2/citadel-01-vault-keep.svg" alt="Citadel 01">
+        <div class="sizes"><img class="md" src="./v2/citadel-01-vault-keep.svg" alt=""><img class="sm" src="./v2/citadel-01-vault-keep.svg" alt=""><img class="xs" src="./v2/citadel-01-vault-keep.svg" alt=""></div>
+        <div><div class="title">01 · Vault Keep</div><div class="file">citadel-01-vault-keep.svg</div></div>
+      </div>
+      <div class="card">
+        <img class="hero" src="./v2/citadel-02-ring-wall.svg" alt="Citadel 02">
+        <div class="sizes"><img class="md" src="./v2/citadel-02-ring-wall.svg" alt=""><img class="sm" src="./v2/citadel-02-ring-wall.svg" alt=""><img class="xs" src="./v2/citadel-02-ring-wall.svg" alt=""></div>
+        <div><div class="title">02 · Ring Wall C</div><div class="file">citadel-02-ring-wall.svg</div></div>
+      </div>
+      <div class="card">
+        <img class="hero" src="./v2/citadel-03-library-towers.svg" alt="Citadel 03">
+        <div class="sizes"><img class="md" src="./v2/citadel-03-library-towers.svg" alt=""><img class="sm" src="./v2/citadel-03-library-towers.svg" alt=""><img class="xs" src="./v2/citadel-03-library-towers.svg" alt=""></div>
+        <div><div class="title">03 · Library Towers</div><div class="file">citadel-03-library-towers.svg</div></div>
+      </div>
+      <div class="card">
+        <img class="hero" src="./v2/citadel-04-star-fort.svg" alt="Citadel 04">
+        <div class="sizes"><img class="md" src="./v2/citadel-04-star-fort.svg" alt=""><img class="sm" src="./v2/citadel-04-star-fort.svg" alt=""><img class="xs" src="./v2/citadel-04-star-fort.svg" alt=""></div>
+        <div><div class="title">04 · Star Fort Prompt</div><div class="file">citadel-04-star-fort.svg</div></div>
+      </div>
+      <div class="card">
+        <img class="hero" src="./v2/citadel-05-gate-terminal.svg" alt="Citadel 05">
+        <div class="sizes"><img class="md" src="./v2/citadel-05-gate-terminal.svg" alt=""><img class="sm" src="./v2/citadel-05-gate-terminal.svg" alt=""><img class="xs" src="./v2/citadel-05-gate-terminal.svg" alt=""></div>
+        <div><div class="title">05 · Gate Terminal</div><div class="file">citadel-05-gate-terminal.svg</div></div>
+      </div>
+    </div>
+
+    <h2>Holocron</h2>
+    <h3><span class="badge v1">v1</span>Google Neon</h3>
+    <div class="grid">
+      <div class="card">
+        <img class="hero" src="./v1/holocron-01-jedi-cube.svg" alt="Holocron 01">
+        <div class="sizes"><img class="md" src="./v1/holocron-01-jedi-cube.svg" alt=""><img class="sm" src="./v1/holocron-01-jedi-cube.svg" alt=""><img class="xs" src="./v1/holocron-01-jedi-cube.svg" alt=""></div>
+        <div><div class="title">01 · Jedi Luminous Cube</div><div class="file">holocron-01-jedi-cube.svg</div></div>
+      </div>
+      <div class="card">
+        <img class="hero" src="./v1/holocron-02-apex-pyramid.svg" alt="Holocron 02">
+        <div class="sizes"><img class="md" src="./v1/holocron-02-apex-pyramid.svg" alt=""><img class="sm" src="./v1/holocron-02-apex-pyramid.svg" alt=""><img class="xs" src="./v1/holocron-02-apex-pyramid.svg" alt=""></div>
+        <div><div class="title">02 · Apex Pyramid</div><div class="file">holocron-02-apex-pyramid.svg</div></div>
+      </div>
+      <div class="card">
+        <img class="hero" src="./v1/holocron-03-wireframe-tesseract.svg" alt="Holocron 03">
+        <div class="sizes"><img class="md" src="./v1/holocron-03-wireframe-tesseract.svg" alt=""><img class="sm" src="./v1/holocron-03-wireframe-tesseract.svg" alt=""><img class="xs" src="./v1/holocron-03-wireframe-tesseract.svg" alt=""></div>
+        <div><div class="title">03 · Wireframe Tesseract</div><div class="file">holocron-03-wireframe-tesseract.svg</div></div>
+      </div>
+      <div class="card">
+        <img class="hero" src="./v1/holocron-04-crystal-octahedron.svg" alt="Holocron 04">
+        <div class="sizes"><img class="md" src="./v1/holocron-04-crystal-octahedron.svg" alt=""><img class="sm" src="./v1/holocron-04-crystal-octahedron.svg" alt=""><img class="xs" src="./v1/holocron-04-crystal-octahedron.svg" alt=""></div>
+        <div><div class="title">04 · Crystal Octahedron</div><div class="file">holocron-04-crystal-octahedron.svg</div></div>
+      </div>
+      <div class="card">
+        <img class="hero" src="./v1/holocron-05-emerald-cube.svg" alt="Holocron 05">
+        <div class="sizes"><img class="md" src="./v1/holocron-05-emerald-cube.svg" alt=""><img class="sm" src="./v1/holocron-05-emerald-cube.svg" alt=""><img class="xs" src="./v1/holocron-05-emerald-cube.svg" alt=""></div>
+        <div><div class="title">05 · Emerald Knowledge Cube</div><div class="file">holocron-05-emerald-cube.svg</div></div>
+      </div>
+    </div>
+    <h3><span class="badge v2">v2</span>Claude Opus 5.5</h3>
+    <div class="grid">
+      <div class="card">
+        <img class="hero" src="./v2/holocron-01-layered-index.svg" alt="Holocron 01">
+        <div class="sizes"><img class="md" src="./v2/holocron-01-layered-index.svg" alt=""><img class="sm" src="./v2/holocron-01-layered-index.svg" alt=""><img class="xs" src="./v2/holocron-01-layered-index.svg" alt=""></div>
+        <div><div class="title">01 · Layered Index Cube</div><div class="file">holocron-01-layered-index.svg</div></div>
+      </div>
+      <div class="card">
+        <img class="hero" src="./v2/holocron-02-query-core.svg" alt="Holocron 02">
+        <div class="sizes"><img class="md" src="./v2/holocron-02-query-core.svg" alt=""><img class="sm" src="./v2/holocron-02-query-core.svg" alt=""><img class="xs" src="./v2/holocron-02-query-core.svg" alt=""></div>
+        <div><div class="title">02 · Query Core</div><div class="file">holocron-02-query-core.svg</div></div>
+      </div>
+      <div class="card">
+        <img class="hero" src="./v2/holocron-03-synced-cube.svg" alt="Holocron 03">
+        <div class="sizes"><img class="md" src="./v2/holocron-03-synced-cube.svg" alt=""><img class="sm" src="./v2/holocron-03-synced-cube.svg" alt=""><img class="xs" src="./v2/holocron-03-synced-cube.svg" alt=""></div>
+        <div><div class="title">03 · Synced Cube</div><div class="file">holocron-03-synced-cube.svg</div></div>
+      </div>
+      <div class="card">
+        <img class="hero" src="./v2/holocron-04-lit-cell.svg" alt="Holocron 04">
+        <div class="sizes"><img class="md" src="./v2/holocron-04-lit-cell.svg" alt=""><img class="sm" src="./v2/holocron-04-lit-cell.svg" alt=""><img class="xs" src="./v2/holocron-04-lit-cell.svg" alt=""></div>
+        <div><div class="title">04 · Lit Index Cell</div><div class="file">holocron-04-lit-cell.svg</div></div>
+      </div>
+      <div class="card">
+        <img class="hero" src="./v2/holocron-05-opened-archive.svg" alt="Holocron 05">
+        <div class="sizes"><img class="md" src="./v2/holocron-05-opened-archive.svg" alt=""><img class="sm" src="./v2/holocron-05-opened-archive.svg" alt=""><img class="xs" src="./v2/holocron-05-opened-archive.svg" alt=""></div>
+        <div><div class="title">05 · Opened Archive</div><div class="file">holocron-05-opened-archive.svg</div></div>
+      </div>
+    </div>
+  </div>
+  <script>
+    const btn = document.getElementById('toggle');
+    btn.addEventListener('click', () => {
+      const dark = document.body.dataset.theme === 'dark';
+      document.body.dataset.theme = dark ? 'light' : 'dark';
+      btn.textContent = dark ? 'Switch to Dark Mode' : 'Switch to Light Mode';
+    });
+  </script>
+</body>
+</html>

@@ -1,0 +1,23 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" width="128" height="128" role="img" aria-label="Citadel — Swiss Geometric Monolith">
+  <defs>
+    <linearGradient id="c4-bg" x1="0" y1="0" x2="128" y2="128" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#ffffff"/>
+      <stop offset="100%" stop-color="#f1f5f9"/>
+    </linearGradient>
+  </defs>
+
+  <!-- Crisp Swiss-style light tile -->
+  <rect x="4" y="4" width="120" height="120" rx="28" fill="url(#c4-bg)"/>
+  <rect x="4.75" y="4.75" width="118.5" height="118.5" rx="27.25" fill="none" stroke="#cbd5e1" stroke-width="1.5"/>
+
+  <!-- Geometric C-shaped Citadel wall enclosing three stepped knowledge bars -->
+  <!-- Outer architectural C-bastion -->
+  <path d="M96 38 L96 28 L82 28 L82 34 L70 34 L70 28 L56 28 L56 34 L44 34 L44 28 L30 28 L30 100 L96 100 L96 86 L44 86 L44 46 L96 46 Z" fill="#0f172a"/>
+
+  <!-- Inner indexed knowledge shelves (like pages + battlements) -->
+  <rect x="54" y="54" width="38" height="9" rx="2.5" fill="#15803d"/>
+  <rect x="54" y="69" width="24" height="9" rx="2.5" fill="#334155"/>
+
+  <!-- Live sync status node -->
+  <circle cx="88" cy="73.5" r="5" fill="#22c55e"/>
+</svg>

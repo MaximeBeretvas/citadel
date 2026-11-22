@@ -1,0 +1,40 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" width="128" height="128" role="img" aria-label="Holocron — Emerald Knowledge Cube">
+  <defs>
+    <linearGradient id="h5-bg" x1="8" y1="6" x2="120" y2="122" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#111827"/>
+      <stop offset="100%" stop-color="#020617"/>
+    </linearGradient>
+    <radialGradient id="h5-core" cx="64" cy="64" r="24" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#4ade80" stop-opacity="0.9"/>
+      <stop offset="65%" stop-color="#15803d" stop-opacity="0.25"/>
+      <stop offset="100%" stop-color="#15803d" stop-opacity="0"/>
+    </radialGradient>
+  </defs>
+
+  <!-- Tile -->
+  <rect x="4" y="4" width="120" height="120" rx="28" fill="url(#h5-bg)"/>
+  <rect x="4.75" y="4.75" width="118.5" height="118.5" rx="27.25" fill="none" stroke="#334155" stroke-width="1.5"/>
+
+  <!-- Emerald core radiating between floating cube plates -->
+  <circle cx="64" cy="64" r="24" fill="url(#h5-core)"/>
+  <polygon points="64,46 79.6,55 79.6,73 64,82 48.4,73 48.4,55" fill="#22c55e"/>
+
+  <!-- Separated floating plates (offset outward by 3.5px along face normals for crisp seams) -->
+  <!-- Top plate -->
+  <polygon points="64,19 99.5,39.5 64,60 28.5,39.5" fill="#f8fafc"/>
+  <!-- Small emerald keystone diamond inset on top plate -->
+  <polygon points="64,33 74.4,39 64,45 53.6,39" fill="#15803d"/>
+
+  <!-- Left plate (stored document lines motif) -->
+  <polygon points="25.5,45 61,65.5 61,106.5 25.5,86" fill="#cbd5e1"/>
+  <g stroke="#0f172a" stroke-width="3.2" stroke-linecap="round">
+    <line x1="33" y1="60.5" x2="52" y2="71.5"/>
+    <line x1="33" y1="70.5" x2="47" y2="78.6"/>
+    <line x1="33" y1="80.5" x2="50" y2="90.3"/>
+  </g>
+
+  <!-- Right plate (query prompt chevron motif) -->
+  <polygon points="102.5,45 67,65.5 67,106.5 102.5,86" fill="#334155"/>
+  <path d="M77 73 L86 76 L77 88" fill="none" stroke="#4ade80" stroke-width="3.5" stroke-linecap="round" stroke-linejoin="round"/>
+  <line x1="87" y1="86.5" x2="94.5" y2="82.2" stroke="#f8fafc" stroke-width="3.5" stroke-linecap="round"/>
+</svg>

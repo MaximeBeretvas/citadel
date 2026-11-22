@@ -41,9 +41,20 @@ make clean                     # Stop and remove the container (preserves data v
 
 ## Native Installation (macOS / Linux)
 
+Requires a Rust toolchain ([`rustup`](https://rustup.rs/)); SQLite is bundled, so no system `sqlite3` library is needed.
+
 ```bash
-# Install the binary onto $PATH
-cargo install --path .
+# Install the binary from a local checkout onto ~/.cargo/bin
+cargo install --path . --locked
+
+# Optional: include headless Chromium support for JS-rendered sites
+cargo install --path . --locked --features chrome
+```
+
+Ensure `~/.cargo/bin` is on your `$PATH`, then verify and optionally register the background service:
+
+```bash
+citadel --version
 
 # Register and start the background scheduler & local folder watcher
 # (launchd on macOS, systemd --user on Linux)

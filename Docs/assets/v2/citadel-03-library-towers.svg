@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" width="128" height="128" role="img" aria-label="Citadel — Library Towers">
+  <title>Citadel — Library Towers</title>
+  <defs>
+    <linearGradient id="c3-bg" x1="0" y1="0" x2="128" y2="128" gradientUnits="userSpaceOnUse"><stop offset="0" stop-color="#ffffff"/><stop offset="1" stop-color="#f1f5f9"/></linearGradient>
+  </defs>
+  <rect x="4" y="4" width="120" height="120" rx="28" fill="url(#c3-bg)"/>
+  <rect x="4.75" y="4.75" width="118.5" height="118.5" rx="27.25" fill="none" stroke="#cbd5e1" stroke-width="1.5"/>
+  <!-- Three book spines rising as towers on one wall: a library you can defend -->
+  <path d="M30,42 H37 V50 H43 V42 H50 V102 H30 Z" fill="#334155"/>
+  <g stroke="#f8fafc" stroke-opacity="0.75" stroke-width="2.5"><line x1="30" y1="58" x2="50" y2="58"/><line x1="30" y1="92" x2="50" y2="92"/></g>
+  <path d="M54,26 H61 V34 H67 V26 H74 V102 H54 Z" fill="#15803d"/>
+  <g stroke="#f8fafc" stroke-opacity="0.75" stroke-width="2.5"><line x1="54" y1="42" x2="74" y2="42"/><line x1="54" y1="92" x2="74" y2="92"/></g>
+  <path d="M78,50 H85 V58 H91 V50 H98 V102 H78 Z" fill="#0f172a"/>
+  <g stroke="#f8fafc" stroke-opacity="0.75" stroke-width="2.5"><line x1="78" y1="66" x2="98" y2="66"/><line x1="78" y1="92" x2="98" y2="92"/></g>
+  <rect x="24" y="100" width="80" height="8" rx="3" fill="#0f172a"/>
+</svg>

@@ -1,0 +1,52 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" width="128" height="128" role="img" aria-label="Citadel — Fortress of Tomes">
+  <defs>
+    <linearGradient id="c2-bg" x1="8" y1="8" x2="120" y2="120" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#1c1917"/>
+      <stop offset="100%" stop-color="#0c0a09"/>
+    </linearGradient>
+    <linearGradient id="c2-gold" x1="32" y1="22" x2="96" y2="88" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#fde68a"/>
+      <stop offset="50%" stop-color="#d97706"/>
+      <stop offset="100%" stop-color="#92400e"/>
+    </linearGradient>
+    <linearGradient id="c2-page-l" x1="20" y1="78" x2="64" y2="104" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#fef3c7"/>
+      <stop offset="100%" stop-color="#d6d3d1"/>
+    </linearGradient>
+    <linearGradient id="c2-page-r" x1="64" y1="78" x2="108" y2="104" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#e7e5e4"/>
+      <stop offset="100%" stop-color="#a8a29e"/>
+    </linearGradient>
+  </defs>
+
+  <!-- Tile -->
+  <rect x="4" y="4" width="120" height="120" rx="28" fill="url(#c2-bg)"/>
+  <rect x="4.75" y="4.75" width="118.5" height="118.5" rx="27.25" fill="none" stroke="#d97706" stroke-opacity="0.35" stroke-width="1.5"/>
+
+  <!-- Fortress battlements rising from open tome -->
+  <!-- Left turret -->
+  <path d="M30 82 L30 44 L36 44 L36 49 L41 49 L41 44 L47 44 L47 80 Z" fill="url(#c2-gold)" opacity="0.82"/>
+  <!-- Right turret -->
+  <path d="M81 80 L81 44 L87 44 L87 49 L92 49 L92 44 L98 44 L98 82 Z" fill="url(#c2-gold)" opacity="0.7"/>
+  <!-- Center keep -->
+  <path d="M47 84 L47 28 L53 28 L53 34 L59 34 L59 28 L69 28 L69 34 L75 34 L75 28 L81 28 L81 84 Z" fill="url(#c2-gold)"/>
+
+  <!-- Keep windows & dark shadow reliefs -->
+  <path d="M60 54 L60 44 A4 4 0 0 1 68 44 L68 54 Z" fill="#1c1917"/>
+  <rect x="37" y="57" width="3.5" height="11" rx="1.75" fill="#1c1917"/>
+  <rect x="87.5" y="57" width="3.5" height="11" rx="1.75" fill="#1c1917"/>
+  <path d="M57 84 L57 68 A7 7 0 0 1 71 68 L71 84 Z" fill="#1c1917"/>
+
+  <!-- Open Book foundation -->
+  <path d="M20 77 C36 74 52 77 64 85 L64 104 C51 96 36 93 20 96 Z" fill="url(#c2-page-l)"/>
+  <path d="M108 77 C92 74 76 77 64 85 L64 104 C77 96 92 93 108 96 Z" fill="url(#c2-page-r)"/>
+  <!-- Page lines -->
+  <path d="M27 83 C39 81 49 83 58 88" fill="none" stroke="#78716c" stroke-width="1.8" stroke-linecap="round" opacity="0.65"/>
+  <path d="M27 89 C39 87 49 89 58 94" fill="none" stroke="#78716c" stroke-width="1.8" stroke-linecap="round" opacity="0.5"/>
+  <path d="M101 83 C89 81 79 83 70 88" fill="none" stroke="#57534e" stroke-width="1.8" stroke-linecap="round" opacity="0.65"/>
+  <path d="M101 89 C89 87 79 89 70 94" fill="none" stroke="#57534e" stroke-width="1.8" stroke-linecap="round" opacity="0.5"/>
+
+  <!-- Spine & Emerald bookmark ribbon -->
+  <line x1="64" y1="84" x2="64" y2="106" stroke="#44403c" stroke-width="2.5"/>
+  <path d="M60 100 L68 100 L68 114 L64 110 L60 114 Z" fill="#22c55e"/>
+</svg>

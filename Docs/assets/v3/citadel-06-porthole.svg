@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256" role="img" aria-label="Citadel — Porthole">
+  <title>Citadel — Porthole</title>
+  <!-- A lens frames a walled skyline under a rising beacon: looking into the citadel -->
+  <path fill="#0f172a" fill-rule="evenodd" d="M128,36 A92,92 0 1 0 128,220 A92,92 0 1 0 128,36 Z M128,60 A68,68 0 1 0 128,196 A68,68 0 1 0 128,60 Z"/>
+  <path fill="#0f172a" d="M58.9,140 H82 V118 H100 V140 H119 V118 H137 V140 H156 V118 H174 V140 H197.1 A70,70 0 0 1 58.9,140 Z"/>
+  <circle fill="#0f172a" cx="128" cy="94" r="12"/>
+</svg>
