@@ -335,14 +335,41 @@ pub async fn run_update<W: Write>(opts: UpdateOpts, out: &mut W) -> Result<()> {
         crate::daemon::daemon_status(&opts.config),
         Ok(crate::daemon::DaemonStatus::Running(_))
     ) {
-        let _ = crate::daemon::stop_daemon(&opts.config);
-        match crate::daemon::start_daemon_with_exe(&opts.config, false, &opts.current_exe) {
-            Ok(Some(pid)) => writeln!(out, "Restarted citadel daemon (pid {pid}).")?,
-            Ok(None) => {}
-            Err(err) => writeln!(out, "Warning: failed to restart daemon: {err}")?,
-        }
+        restart_daemon_after_update(
+            out,
+            || crate::daemon::stop_daemon(&opts.config),
+            || crate::daemon::start_daemon_with_exe(&opts.config, false, &opts.current_exe),
+        )?;
     }
 
+    Ok(())
+}
+
+/// Stop the running daemon and start it on the new binary, reporting the outcome to `out`.
+///
+/// If the old daemon does not stop, no start is attempted (it would only fail with
+/// "already running"); the user is told why and how to restart it by hand.
+fn restart_daemon_after_update<W: Write>(
+    out: &mut W,
+    stop: impl FnOnce() -> Result<Option<u32>>,
+    start: impl FnOnce() -> Result<Option<u32>>,
+) -> Result<()> {
+    if let Err(err) = stop() {
+        writeln!(
+            out,
+            "Warning: the daemon did not stop ({err}); it is still running the old version. \
+             Restart it manually with `citadel daemon stop && citadel daemon start`."
+        )?;
+        return Ok(());
+    }
+    match start() {
+        Ok(Some(pid)) => writeln!(out, "Restarted citadel daemon (pid {pid}).")?,
+        Ok(None) => {}
+        Err(err) => writeln!(
+            out,
+            "Warning: failed to restart daemon: {err}. Start it with `citadel daemon start`."
+        )?,
+    }
     Ok(())
 }
 
@@ -523,6 +550,43 @@ mod tests {
             .map(|e| e.expect("entry").file_name())
             .collect();
         assert_eq!(leftovers, vec![std::ffi::OsString::from("citadel")]);
+    }
+
+    #[test]
+    fn daemon_restart_skips_start_and_explains_when_stop_fails() {
+        let mut out = Vec::new();
+        let mut started = false;
+        restart_daemon_after_update(
+            &mut out,
+            || Err(VaultError::Other("did not exit within 5 seconds".into())),
+            || {
+                started = true;
+                Ok(Some(42))
+            },
+        )
+        .expect("restart reporting succeeds");
+        let text = String::from_utf8(out).expect("utf8");
+        assert!(
+            !started,
+            "must not try to start while the old daemon is still running"
+        );
+        assert!(text.contains("did not exit within 5 seconds"), "{text}");
+        assert!(
+            text.contains("citadel daemon stop && citadel daemon start"),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn daemon_restart_reports_new_pid_after_clean_stop() {
+        let mut out = Vec::new();
+        restart_daemon_after_update(&mut out, || Ok(Some(7)), || Ok(Some(42)))
+            .expect("restart reporting succeeds");
+        let text = String::from_utf8(out).expect("utf8");
+        assert!(
+            text.contains("Restarted citadel daemon (pid 42)."),
+            "{text}"
+        );
     }
 
     #[tokio::test]
