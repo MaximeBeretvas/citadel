@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256" role="img" aria-label="Citadel app icon, full-bleed (Apple touch / maskable)">
+  <title>Citadel app icon, full-bleed (Apple touch / maskable)</title>
+  <rect width="256" height="256" fill="#0f172a"/>
+  <g transform="translate(128,126) scale(0.74) translate(-128,-128)">
+    <path fill="#ffffff" fill-rule="evenodd" d="M128,36 A92,92 0 1 0 128,220 A92,92 0 1 0 128,36 Z M128,59 A69,69 0 1 0 128,197 A69,69 0 1 0 128,59 Z"/>
+    <path fill="#ffffff" d="M58.02,140 H80.5 V118.5 H99.5 V140 H118.5 V118.5 H137.5 V140 H156.5 V118.5 H175.5 V140 H197.98 A71,71 0 0 1 58.02,140 Z"/>
+    <path fill="#60a5fa" d="M128,77.5 A12.5,12.5 0 1 0 128,102.5 A12.5,12.5 0 1 0 128,77.5 Z"/>
+  </g>
+</svg>

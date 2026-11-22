@@ -1,0 +1,137 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Citadel Logo Kit</title>
+  <link rel="icon" href="web/favicon.svg" type="image/svg+xml">
+  <style>
+    :root { --bg: #f8fafc; --surface: #ffffff; --border: #e2e8f0; --text: #0f172a; --muted: #475569; }
+    [data-theme="dark"] { --bg: #020617; --surface: #0e1223; --border: #1e293b; --text: #f8fafc; --muted: #94a3b8; }
+    * { box-sizing: border-box; }
+    body { margin: 0; font-family: -apple-system, BlinkMacSystemFont, "IBM Plex Sans", "Segoe UI", sans-serif;
+      background: var(--bg); color: var(--text); padding: 32px 16px; line-height: 1.5; }
+    .wrap { max-width: 1180px; margin: 0 auto; }
+    header { display: flex; justify-content: space-between; align-items: center; gap: 16px; margin-bottom: 8px;
+      padding-bottom: 16px; border-bottom: 1px solid var(--border); }
+    h1 { margin: 0; font-size: 22px; font-weight: 700; letter-spacing: -0.02em; }
+    .sub { margin: 4px 0 0; font-size: 13px; color: var(--muted); }
+    .sub a { color: inherit; }
+    h2 { margin: 32px 0 12px; font-size: 14px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.08em; color: var(--muted); }
+    button { background: var(--surface); color: var(--text); border: 1px solid var(--border); border-radius: 8px;
+      padding: 8px 14px; font-size: 13px; font-weight: 600; cursor: pointer; flex-shrink: 0; }
+    .row { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 16px; }
+    .panel { border: 1px solid var(--border); border-radius: 14px; padding: 28px 20px 14px; display: flex; flex-direction: column;
+      align-items: center; justify-content: space-between; gap: 18px; min-height: 200px; }
+    .panel img { max-width: 100%; }
+    .light { background: #ffffff; } .dark { background: #0f172a; border-color: #1e293b; } .blue { background: #2563eb; border-color: #2563eb; }
+    .cap { align-self: stretch; display: flex; justify-content: space-between; gap: 8px; font-size: 12px; }
+    .light .cap, .light .cap code { color: #475569; } .dark .cap, .dark .cap code, .blue .cap, .blue .cap code { color: #cbd5e1; }
+    code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11px; }
+    .ladder { display: flex; align-items: flex-end; gap: 18px; flex-wrap: wrap; }
+    .ladder figure { margin: 0; text-align: center; font-size: 11px; color: #475569; }
+    .dark .ladder figure { color: #94a3b8; }
+    .swatches { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 12px; }
+    .sw { border-radius: 12px; overflow: hidden; border: 1px solid var(--border); background: var(--surface); }
+    .sw .chip { height: 72px; }
+    .sw div.t { padding: 10px 12px; font-size: 12px; }
+    .sw b { display: block; font-size: 13px; }
+    .icons { display: flex; flex-wrap: wrap; gap: 20px; align-items: flex-end; }
+    .icons figure { margin: 0; text-align: center; font-size: 11px; color: var(--muted); }
+    .links { display: flex; flex-wrap: wrap; gap: 10px; }
+    .links a { color: var(--text); text-decoration: none; border: 1px solid var(--border); background: var(--surface); border-radius: 8px; padding: 8px 12px; font-size: 13px; font-weight: 600; }
+  </style>
+</head>
+<body data-theme="dark">
+  <div class="wrap">
+    <header>
+      <div>
+        <h1>Citadel Logo Kit · Porthole</h1>
+        <p class="sub">A lens frames a walled skyline under a rising beacon. Usage rules in <a href="GUIDELINES.md">GUIDELINES.md</a>.</p>
+      </div>
+      <button id="toggle">Switch to Light Mode</button>
+    </header>
+
+    <h2>Primary lockups</h2>
+    <div class="row">
+      <div class="panel light"><img src="citadel-horizontal.svg" alt="Citadel horizontal lockup" style="height:96px"><div class="cap"><span>Horizontal · primary</span><code>citadel-horizontal.svg</code></div></div>
+      <div class="panel dark"><img src="citadel-horizontal-reversed.svg" alt="Citadel horizontal lockup reversed" style="height:96px"><div class="cap"><span>Reversed</span><code>citadel-horizontal-reversed.svg</code></div></div>
+    </div>
+    <div class="row" style="margin-top:16px">
+      <div class="panel light"><img src="citadel-stacked.svg" alt="Citadel stacked lockup" style="height:170px"><div class="cap"><span>Stacked</span><code>citadel-stacked.svg</code></div></div>
+      <div class="panel dark"><img src="citadel-stacked-reversed.svg" alt="Citadel stacked lockup reversed" style="height:170px"><div class="cap"><span>Stacked reversed</span><code>citadel-stacked-reversed.svg</code></div></div>
+      <div class="panel light"><img src="citadel-wordmark.svg" alt="Citadel wordmark" style="height:64px"><div class="cap"><span>Wordmark (custom outlines)</span><code>citadel-wordmark.svg</code></div></div>
+    </div>
+
+    <h2>Symbol · master and small-size cut</h2>
+    <div class="row">
+      <div class="panel light"><img src="citadel-symbol.svg" alt="" style="height:140px"><div class="cap"><span>Master · 40 px and up</span><code>citadel-symbol.svg</code></div></div>
+      <div class="panel light"><img src="citadel-symbol-small.svg" alt="" style="height:140px"><div class="cap"><span>Small cut · 32 px and below</span><code>citadel-symbol-small.svg</code></div></div>
+      <div class="panel dark"><img src="citadel-symbol-reversed.svg" alt="" style="height:140px"><div class="cap"><span>Reversed (thinned)</span><code>citadel-symbol-reversed.svg</code></div></div>
+      <div class="panel dark"><img src="citadel-symbol-small-reversed.svg" alt="" style="height:140px"><div class="cap"><span>Small cut reversed</span><code>citadel-symbol-small-reversed.svg</code></div></div>
+    </div>
+
+    <h2>Size ladder</h2>
+    <div class="row">
+      <div class="panel light"><div class="ladder">
+        <figure><img src="citadel-symbol.svg" alt="" width="96"><br>96 master</figure>
+        <figure><img src="citadel-symbol.svg" alt="" width="48"><br>48 master</figure>
+        <figure><img src="citadel-symbol-small.svg" alt="" width="32"><br>32 small</figure>
+        <figure><img src="citadel-symbol-small.svg" alt="" width="24"><br>24 small</figure>
+        <figure><img src="citadel-symbol-small.svg" alt="" width="16"><br>16 small</figure>
+      </div><div class="cap"><span>On light</span><span>switch to the small cut below 40 px</span></div></div>
+      <div class="panel dark"><div class="ladder">
+        <figure><img src="citadel-symbol-reversed.svg" alt="" width="96"><br>96 master</figure>
+        <figure><img src="citadel-symbol-reversed.svg" alt="" width="48"><br>48 master</figure>
+        <figure><img src="citadel-symbol-small-reversed.svg" alt="" width="32"><br>32 small</figure>
+        <figure><img src="citadel-symbol-small-reversed.svg" alt="" width="24"><br>24 small</figure>
+        <figure><img src="citadel-symbol-small-reversed.svg" alt="" width="16"><br>16 small</figure>
+      </div><div class="cap"><span>On dark</span><span>reversed files carry Beacon Light</span></div></div>
+    </div>
+
+    <h2>One-colour versions</h2>
+    <div class="row">
+      <div class="panel light"><img src="variants/citadel-horizontal-black.svg" alt="" style="height:72px"><div class="cap"><span>Black</span><code>variants/*-black.svg</code></div></div>
+      <div class="panel dark"><img src="variants/citadel-horizontal-white.svg" alt="" style="height:72px"><div class="cap"><span>White</span><code>variants/*-white.svg</code></div></div>
+      <div class="panel light"><img src="variants/citadel-horizontal-mono-2563eb.svg" alt="" style="height:72px"><div class="cap"><span>Beacon Blue</span><code>variants/*-mono-2563eb.svg</code></div></div>
+      <div class="panel blue"><img src="variants/citadel-horizontal-white.svg" alt="" style="height:72px"><div class="cap"><span>White on Beacon Blue</span><code>variants/*-white.svg</code></div></div>
+    </div>
+
+    <h2>Colour</h2>
+    <div class="swatches">
+      <div class="sw"><div class="chip" style="background:#0f172a"></div><div class="t"><b>Citadel Navy</b>#0F172A · RGB 15 23 42 · Pantone ≈ 5395 C<br>17.9:1 on white</div></div>
+      <div class="sw"><div class="chip" style="background:#2563eb"></div><div class="t"><b>Beacon Blue</b>#2563EB · RGB 37 99 235 · Pantone ≈ 2728 C<br>5.2:1 on white</div></div>
+      <div class="sw"><div class="chip" style="background:#60a5fa"></div><div class="t"><b>Beacon Light</b>#60A5FA · RGB 96 165 250 · Pantone ≈ 284 C<br>7.0:1 on Navy</div></div>
+      <div class="sw"><div class="chip" style="background:#ffffff;border-bottom:1px solid var(--border)"></div><div class="t"><b>White</b>#FFFFFF · reversed ring, wall, wordmark</div></div>
+    </div>
+
+    <h2>App and web icons</h2>
+    <div class="icons">
+      <figure><img src="citadel-app-icon.svg" alt="" width="128"><br>app icon</figure>
+      <figure><img src="web/apple-touch-icon.png" alt="" width="90"><br>apple-touch 180</figure>
+      <figure><img src="web/maskable-512.png" alt="" width="90" style="border-radius:50%"><br>maskable (circle crop)</figure>
+      <figure><img src="web/icon-192.png" alt="" width="64"><br>icon-192</figure>
+      <figure><img src="web/favicon-48.png" alt="" width="48"><br>favicon 48</figure>
+      <figure><img src="web/favicon-32.png" alt="" width="32"><br>favicon 32</figure>
+      <figure><img src="web/favicon-16.png" alt="" width="16"><br>favicon 16</figure>
+      <figure><img src="web/favicon.svg" alt="" width="32"><br>favicon.svg (adapts to dark mode)</figure>
+    </div>
+
+    <h2>More</h2>
+    <div class="links">
+      <a href="board/presentation.html">Presentation board</a>
+      <a href="GUIDELINES.md">Usage guidelines</a>
+      <a href="web/head-snippet.html">HTML head snippet</a>
+      <a href="build.py">build.py (geometry source)</a>
+    </div>
+  </div>
+  <script>
+    const btn = document.getElementById('toggle');
+    btn.addEventListener('click', () => {
+      const dark = document.body.dataset.theme === 'dark';
+      document.body.dataset.theme = dark ? 'light' : 'dark';
+      btn.textContent = dark ? 'Switch to Dark Mode' : 'Switch to Light Mode';
+    });
+  </script>
+</body>
+</html>

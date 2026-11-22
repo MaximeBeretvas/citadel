@@ -1,0 +1,42 @@
+{
+  "brand": "Citadel",
+  "tagline": "Your docs, fortified and always fresh",
+  "brief": "A local-first knowledge server for data and software engineers. It crawls documentation sites and Markdown folders, keeps them in sync in the background, and serves them to LLMs over MCP and a CLI. It should feel fortified, local, calm and precise.",
+  "adjectives": ["fortified", "local", "calm", "precise", "always fresh"],
+  "criteria": "Success: avoids shields, padlocks and three-tower castles; recognisable at 16 px; works in one colour; carries the blue beacon chosen earlier.",
+  "industry": "software",
+  "mockups": ["readme", "terminal", "app-icon", "favicon-tab", "website", "sticker"],
+  "nav": ["Docs", "MCP", "Download"],
+  "brand_color": "#2563eb",
+  "tile_color": "#0f172a",
+  "greyscale": false,
+  "final": true,
+  "designer": "Claude Opus 5.5",
+  "round": 2,
+  "concepts": [
+    {
+      "name": "Porthole",
+      "symbol": "../citadel-symbol.svg",
+      "lockup": "../citadel-horizontal.svg",
+      "symbol_on_tile": "../citadel-symbol-reversed.svg",
+      "symbol_on_dark": "../citadel-symbol-reversed.svg",
+      "lockup_on_dark": "../citadel-horizontal-reversed.svg",
+      "lockup_on_tile": "../citadel-horizontal-reversed.svg",
+      "stacked_on_tile": "../citadel-stacked-reversed.svg",
+      "stacked_on_dark": "../citadel-stacked-reversed.svg",
+      "idea": "A lens frames a walled skyline under a rising beacon: looking into your citadel of knowledge.",
+      "rationale": [
+        "Lens = search and query; wall = the local, fortified store; beacon = docs kept fresh",
+        "The only round emblem in a field of square dev-tool marks",
+        "One accent colour: the blue beacon carried over from the High Tower Beacon",
+        "Separate small-size cut keeps the beacon readable at 16 px"
+      ]
+    }
+  ],
+  "recommendation": "Porthole: final direction. Use the colour symbol on light, the reversed symbol on dark, and the small-size cut at 32 px and below.",
+  "next_steps": [
+    "Wire favicon.svg and the head snippet into the Citadel web UI",
+    "Decide whether the UI accent moves from green to the logo blue",
+    "Run a professional trademark search before public launch"
+  ]
+}
