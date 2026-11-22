@@ -1,4 +1,9 @@
-# Citadel
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="Docs/assets/logo/citadel-horizontal-reversed.svg" />
+    <img src="Docs/assets/logo/citadel-horizontal.svg" alt="Citadel" width="360" />
+  </picture>
+</p>
 
 Local knowledge vault and MCP server for web documentation sites and local Markdown folders. `citadel` crawls documentation sites, watches local Markdown directories, indexes content into SQLite + FTS5 with section splitting and unified diff history, and serves an offline embedded Web UI alongside a 2-tool MCP interface.
 

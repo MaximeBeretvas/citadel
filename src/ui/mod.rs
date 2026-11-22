@@ -749,6 +749,7 @@ mod tests {
             ("/index.html", "text/html"),
             ("/style.css", "text/css"),
             ("/app.js", "application/javascript"),
+            ("/favicon.svg", "image/svg+xml"),
         ];
 
         for (uri, expected_mime) in cases {
