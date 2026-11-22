@@ -27,3 +27,30 @@ fn ci_workflow_runs_the_checks_gate_on_prs() {
         "ci.yml must not grant write permissions"
     );
 }
+
+#[test]
+fn release_workflow_matches_update_asset_contract() {
+    let rel = read_repo_file(".github/workflows/release.yml");
+    for needle in [
+        "tags: ['v*']",
+        "aarch64-apple-darwin",
+        "x86_64-apple-darwin",
+        "x86_64-unknown-linux-gnu",
+        "aarch64-unknown-linux-gnu",
+        "ubuntu-22.04",
+        "ubuntu-22.04-arm",
+        "cargo build --release --locked --target",
+        "citadel-$GITHUB_REF_NAME-${{ matrix.target }}.tar.gz",
+        "-C target/${{ matrix.target }}/release citadel",
+        "sha256sum *.tar.gz > checksums.sha256",
+        "gh release create",
+        "contents: write",
+    ] {
+        assert!(rel.contains(needle), "release.yml must contain {needle:?}");
+    }
+    assert!(
+        rel.contains("GITHUB_REF_NAME") && rel.contains("cargo metadata"),
+        "release.yml must guard tag == v<Cargo.toml version>"
+    );
+    assert!(!rel.contains("windows"), "Windows is out of scope");
+}
