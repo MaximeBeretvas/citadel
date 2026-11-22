@@ -152,7 +152,11 @@ pub fn extract_binary_from_tar_gz(archive_bytes: &[u8], dest: &Path) -> Result<(
     ))
 }
 
-/// Atomically replace `current_bin` with `new_bin`, preserving executable permissions and rolling back on failure.
+/// Atomically replace `current_bin` with `new_bin`, preserving executable permissions.
+///
+/// `new_bin` must live on the same filesystem as `current_bin`. A single `rename` over
+/// the target is atomic on POSIX: there is never a moment without a binary at
+/// `current_bin`, and running processes keep the old inode.
 pub fn atomic_replace_binary(new_bin: &Path, current_bin: &Path) -> Result<()> {
     #[cfg(unix)]
     {
@@ -164,31 +168,7 @@ pub fn atomic_replace_binary(new_bin: &Path, current_bin: &Path) -> Result<()> {
         std::fs::set_permissions(new_bin, std::fs::Permissions::from_mode(exec_mode))?;
     }
 
-    let backup_path = current_bin.with_file_name(format!(
-        ".{}.bak.{}",
-        current_bin
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or("citadel"),
-        std::process::id()
-    ));
-
-    let had_current = current_bin.exists();
-    if had_current {
-        std::fs::rename(current_bin, &backup_path)?;
-    }
-
-    if let Err(err) = std::fs::rename(new_bin, current_bin) {
-        if had_current {
-            let _ = std::fs::rename(&backup_path, current_bin);
-        }
-        return Err(err.into());
-    }
-
-    if had_current {
-        let _ = std::fs::remove_file(&backup_path);
-    }
-
+    std::fs::rename(new_bin, current_bin)?;
     Ok(())
 }
 
@@ -327,10 +307,13 @@ pub async fn run_update<W: Write>(opts: UpdateOpts, out: &mut W) -> Result<()> {
 
     verify_sha256_manifest(&manifest, &archive_name, &archive_bytes)?;
 
-    let parent_dir = opts.current_exe.parent().ok_or_else(|| {
+    // Follow symlinks (Homebrew, `~/.local/bin`) so the real binary is replaced and the
+    // temp file lands on the same filesystem as it.
+    let install_path = std::fs::canonicalize(&opts.current_exe)?;
+    let parent_dir = install_path.parent().ok_or_else(|| {
         VaultError::Config(format!(
             "cannot determine parent directory for executable {}",
-            opts.current_exe.display()
+            install_path.display()
         ))
     })?;
     let temp_bin = parent_dir.join(format!(".citadel.update.{}.tmp", std::process::id()));
@@ -340,7 +323,7 @@ pub async fn run_update<W: Write>(opts: UpdateOpts, out: &mut W) -> Result<()> {
         return Err(err);
     }
 
-    if let Err(err) = atomic_replace_binary(&temp_bin, &opts.current_exe) {
+    if let Err(err) = atomic_replace_binary(&temp_bin, &install_path) {
         let _ = std::fs::remove_file(&temp_bin);
         return Err(err);
     }
@@ -471,6 +454,77 @@ mod tests {
         }
     }
 
+    #[test]
+    fn atomic_replace_does_not_depend_on_a_backup_rename() {
+        // The swap must be a single rename over the target, so there is never a moment
+        // without a binary at `current`. Occupy the old backup path to prove no
+        // rename-to-backup step is attempted.
+        let dir = tempdir().expect("tempdir");
+        let current = dir.path().join("citadel");
+        let replacement = dir.path().join("citadel.new");
+        std::fs::write(&current, b"old-binary").expect("write old");
+        std::fs::write(&replacement, b"new-binary").expect("write new");
+        let backup = dir
+            .path()
+            .join(format!(".citadel.bak.{}", std::process::id()));
+        std::fs::create_dir(&backup).expect("occupy backup path");
+        std::fs::write(backup.join("keep"), b"x").expect("make backup dir non-empty");
+
+        atomic_replace_binary(&replacement, &current).expect("swap must not need a backup");
+        assert_eq!(std::fs::read(&current).expect("read"), b"new-binary");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn update_through_symlink_replaces_target_and_keeps_symlink() {
+        let (addr, server) = spawn_mock_release_server().await;
+
+        let dir = tempdir().expect("tempdir");
+        let real_dir = dir.path().join("cellar");
+        let link_dir = dir.path().join("bin");
+        std::fs::create_dir_all(&real_dir).expect("mkdir real");
+        std::fs::create_dir_all(&link_dir).expect("mkdir link");
+        let real_bin = real_dir.join("citadel");
+        let link_bin = link_dir.join("citadel");
+        std::fs::write(&real_bin, b"old-v0.1.0-binary").expect("write old bin");
+        std::os::unix::fs::symlink(&real_bin, &link_bin).expect("symlink");
+
+        let mut out = Vec::new();
+        run_update(
+            UpdateOpts {
+                config: VaultConfig::new(dir.path().join("data")),
+                check_only: false,
+                yes: true,
+                current_version: "0.1.0".to_string(),
+                current_exe: link_bin.clone(),
+                releases_api_url: format!("http://{addr}/releases/latest"),
+                force_container: Some(false),
+                stdin_is_tty: Some(false),
+            },
+            &mut out,
+        )
+        .await
+        .expect("update through symlink should succeed");
+        server.abort();
+
+        assert!(
+            std::fs::symlink_metadata(&link_bin)
+                .expect("link metadata")
+                .file_type()
+                .is_symlink(),
+            "the PATH symlink must survive the update"
+        );
+        assert_eq!(
+            std::fs::read(&real_bin).expect("read real bin"),
+            b"upgraded-v0.2.0-binary"
+        );
+        let leftovers: Vec<_> = std::fs::read_dir(&link_dir)
+            .expect("read link dir")
+            .map(|e| e.expect("entry").file_name())
+            .collect();
+        assert_eq!(leftovers, vec![std::ffi::OsString::from("citadel")]);
+    }
+
     #[tokio::test]
     async fn container_mode_prints_guidance_without_mutating_binary() {
         let dir = tempdir().expect("tempdir");
@@ -509,8 +563,8 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn end_to_end_update_against_mock_release_server() {
+    /// Serve a fake `v0.2.0` release whose archive holds `upgraded-v0.2.0-binary`.
+    async fn spawn_mock_release_server() -> (std::net::SocketAddr, tokio::task::JoinHandle<()>) {
         let triple = target_triple().expect("supported test platform");
         let archive_name = format!("citadel-v0.2.0-{triple}.tar.gz");
         let archive_bytes = build_tar_gz(&[("citadel", b"upgraded-v0.2.0-binary")]);
@@ -564,6 +618,12 @@ mod tests {
         let server = tokio::spawn(async move {
             let _ = axum::serve(listener, app).await;
         });
+        (addr, server)
+    }
+
+    #[tokio::test]
+    async fn end_to_end_update_against_mock_release_server() {
+        let (addr, server) = spawn_mock_release_server().await;
 
         let dir = tempdir().expect("tempdir");
         let fake_bin = dir.path().join("citadel");
