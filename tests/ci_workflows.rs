@@ -32,7 +32,7 @@ fn ci_workflow_runs_the_checks_gate_on_prs() {
 fn release_workflow_matches_update_asset_contract() {
     let rel = read_repo_file(".github/workflows/release.yml");
     for needle in [
-        "tags: ['v*']",
+        "'v[0-9]+.[0-9]+.[0-9]+'",
         "aarch64-apple-darwin",
         "x86_64-apple-darwin",
         "x86_64-unknown-linux-gnu",
@@ -53,4 +53,21 @@ fn release_workflow_matches_update_asset_contract() {
         "release.yml must guard tag == v<Cargo.toml version>"
     );
     assert!(!rel.contains("windows"), "Windows is out of scope");
+    assert!(
+        !rel.contains("'v*'"),
+        "a pre-release tag like v1.0.0-rc.1 must not publish a Latest release"
+    );
+}
+
+#[test]
+fn readme_prebuilt_install_works_on_a_fresh_mac() {
+    let readme = read_repo_file("README.md");
+    assert!(
+        readme.contains("mkdir -p ~/.local/bin"),
+        "README must create ~/.local/bin before installing into it"
+    );
+    assert!(
+        readme.contains("sha256sum -c --ignore-missing checksums.sha256"),
+        "README must show the Linux checksum command"
+    );
 }

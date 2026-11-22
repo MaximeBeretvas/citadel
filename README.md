@@ -44,11 +44,12 @@ V=v0.2.0                  # release tag
 T=aarch64-apple-darwin    # your target, from the list above
 curl -LO https://github.com/mberetvas/citadel/releases/download/$V/citadel-$V-$T.tar.gz
 curl -LO https://github.com/mberetvas/citadel/releases/download/$V/checksums.sha256
-shasum -a 256 -c --ignore-missing checksums.sha256
+shasum -a 256 -c --ignore-missing checksums.sha256   # Linux: sha256sum -c --ignore-missing checksums.sha256
+mkdir -p ~/.local/bin
 tar xzf citadel-$V-$T.tar.gz && install -m 755 citadel ~/.local/bin/
 ```
 
-After that, `citadel update` keeps it current. On macOS, a binary downloaded through a **browser** is quarantined by Gatekeeper (the release is not notarized); clear it once with `xattr -d com.apple.quarantine citadel`. Downloads via `curl`, `cargo install`, and `citadel update` are not affected.
+Make sure `~/.local/bin` is on your `$PATH` (on macOS it is not by default: add `export PATH="$HOME/.local/bin:$PATH"` to `~/.zshrc`). After that, `citadel update` keeps it current. On macOS, a binary downloaded through a **browser** is quarantined by Gatekeeper (the release is not notarized); clear it once with `xattr -d com.apple.quarantine citadel`. Downloads via `curl`, `cargo install`, and `citadel update` are not affected.
 
 ### Windows
 

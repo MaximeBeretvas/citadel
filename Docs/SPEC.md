@@ -573,7 +573,7 @@ Uses Apple's native macOS OCI runtime (**`container`**, `https://github.com/appl
 - Both jobs, `checks (ubuntu-latest)` and `checks (macos-latest)`, are required status checks on `main`, so a red PR cannot be merged.
 
 ### Release (`.github/workflows/release.yml`)
-- Trigger: push of a `v*` tag.
+- Trigger: push of a plain `vX.Y.Z` tag (`v[0-9]+.[0-9]+.[0-9]+`). Pre-release tags such as `v1.0.0-rc.1` do not trigger it, because a published release becomes `releases/latest` and reaches every `citadel update`.
 - Guard: the tag must equal `v` + `Cargo.toml` `version`.
 - Build matrix (`cargo build --release --locked --target <target>`):
 
