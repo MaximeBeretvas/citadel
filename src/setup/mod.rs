@@ -213,8 +213,37 @@ pub fn apply_plan(plan: &SetupPlan, force: bool) -> Result<ApplyReport> {
         }
     }
 
-    let mut written_paths = Vec::with_capacity(plan.actions.len());
+    // Merge every MCP config in memory first: a file that cannot be parsed fails the
+    // run before anything is written, so setup never stops half-applied.
+    let mut merged_configs = Vec::with_capacity(plan.actions.len());
     for action in &plan.actions {
+        let merged = match &action.kind {
+            ActionKind::MergeJsonMcp { include_http_type } => {
+                let existing = read_optional_file(&action.path)?;
+                Some(
+                    merge_json_mcp_config(
+                        existing.as_deref(),
+                        &plan.transport,
+                        *include_http_type,
+                        force,
+                    )
+                    .map_err(|err| with_path_context(err, &action.path))?,
+                )
+            }
+            ActionKind::MergeTomlMcp => {
+                let existing = read_optional_file(&action.path)?;
+                Some(
+                    merge_toml_mcp_config(existing.as_deref(), &plan.transport, force)
+                        .map_err(|err| with_path_context(err, &action.path))?,
+                )
+            }
+            _ => None,
+        };
+        merged_configs.push(merged);
+    }
+
+    let mut written_paths = Vec::with_capacity(plan.actions.len());
+    for (action, merged) in plan.actions.iter().zip(merged_configs) {
         if let Some(parent) = action.path.parent() {
             std::fs::create_dir_all(parent)?;
         }
@@ -238,20 +267,10 @@ pub fn apply_plan(plan: &SetupPlan, force: bool) -> Result<ApplyReport> {
                 }
                 std::fs::write(&action.path, agy_plugin_manifest_json())?;
             }
-            ActionKind::MergeJsonMcp { include_http_type } => {
-                let existing = read_optional_file(&action.path)?;
-                let merged = merge_json_mcp_config(
-                    existing.as_deref(),
-                    &plan.transport,
-                    *include_http_type,
-                    force,
-                )?;
-                write_file_atomic(&action.path, &merged)?;
-            }
-            ActionKind::MergeTomlMcp => {
-                let existing = read_optional_file(&action.path)?;
-                let merged = merge_toml_mcp_config(existing.as_deref(), &plan.transport, force)?;
-                write_file_atomic(&action.path, &merged)?;
+            ActionKind::MergeJsonMcp { .. } | ActionKind::MergeTomlMcp => {
+                if let Some(merged) = &merged {
+                    write_file_atomic(&action.path, merged)?;
+                }
             }
         }
         written_paths.push(action.path.clone());
@@ -293,6 +312,13 @@ fn check_no_conflict(action: &PlannedAction) -> Result<()> {
             }
             Ok(())
         }
+    }
+}
+
+fn with_path_context(err: VaultError, path: &Path) -> VaultError {
+    match err {
+        VaultError::Validation(msg) => VaultError::Validation(format!("{}: {msg}", path.display())),
+        other => other,
     }
 }
 
@@ -524,6 +550,35 @@ mod tests {
             .map(|e| e.expect("entry").file_name())
             .collect();
         assert_eq!(leftovers, vec![std::ffi::OsString::from("claude.json")]);
+    }
+
+    #[test]
+    fn apply_plan_writes_nothing_when_a_later_config_cannot_be_merged() {
+        let cwd = tempdir().expect("cwd tempdir");
+        let home = tempdir().expect("home tempdir");
+        let codex_config = home.path().join(".codex/config.toml");
+        std::fs::create_dir_all(codex_config.parent().expect("parent")).expect("mkdir .codex");
+        std::fs::write(&codex_config, "[mcp_servers\nbroken = ").expect("seed broken toml");
+
+        let plan = build_plan(
+            cwd.path(),
+            Some(home.path()),
+            &[AgentKind::Claude, AgentKind::Codex],
+            SetupScope::Global,
+            SetupComponents::Both,
+            McpTransport::Stdio,
+        )
+        .expect("plan");
+        let err = apply_plan(&plan, false).expect_err("broken codex config must fail");
+        assert!(matches!(err, VaultError::Validation(_)));
+
+        assert!(!home.path().join(".claude.json").exists());
+        assert!(!home.path().join(".agents").exists());
+        assert!(!home.path().join(".claude").exists());
+        assert_eq!(
+            std::fs::read_to_string(&codex_config).expect("read codex"),
+            "[mcp_servers\nbroken = "
+        );
     }
 
     #[tokio::test]
