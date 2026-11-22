@@ -155,6 +155,17 @@ pub enum Commands {
 
     /// Interactive wizard (or flag-driven setup) to configure skill & MCP for AI agents.
     Setup(SetupArgs),
+
+    /// Check for or install the latest GitHub Release binary.
+    Update {
+        /// Check for available updates without downloading or modifying the binary.
+        #[arg(long)]
+        check: bool,
+
+        /// Skip confirmation prompt when installing an update.
+        #[arg(short = 'y', long)]
+        yes: bool,
+    },
 }
 
 /// CLI arguments for `citadel setup`.
@@ -270,6 +281,7 @@ pub fn run_cli_with_writer<W: Write>(cli: Cli, out: &mut W) -> anyhow::Result<()
     let should_check_update = !matches!(
         &cli.command,
         Commands::Mcp
+            | Commands::Update { .. }
             | Commands::Serve { .. }
             | Commands::Ui { .. }
             | Commands::Daemon { .. }
@@ -564,6 +576,20 @@ fn dispatch_command<W: Write>(
             for path in &report.written_paths {
                 writeln!(out, "Configured {}", path.display())?;
             }
+            Ok(())
+        }
+        Commands::Update { check, yes } => {
+            let current_exe = std::env::current_exe()?;
+            let opts = crate::update::UpdateOpts {
+                config,
+                check_only: check,
+                yes,
+                current_version: env!("CARGO_PKG_VERSION").to_string(),
+                current_exe,
+                releases_api_url: crate::update::check::DEFAULT_RELEASES_API_URL.to_string(),
+                force_container: None,
+            };
+            block_on(crate::update::run_update(opts, out))??;
             Ok(())
         }
     }
