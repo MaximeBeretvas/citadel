@@ -14,6 +14,12 @@ pub const DEFAULT_RELEASES_API_URL: &str =
 /// Cache TTL for `update-check.json`: 24 hours in seconds.
 pub const CACHE_TTL_SECS: i64 = 24 * 60 * 60;
 
+/// Minimum gap between two refresh attempts, successful or not (1 hour).
+pub const REFRESH_RETRY_SECS: i64 = 60 * 60;
+
+/// Clock skew tolerated before a future-dated timestamp is treated as invalid (5 minutes).
+const CLOCK_SKEW_SECS: i64 = 5 * 60;
+
 /// On-disk schema of `<CITADEL_HOME>/update-check.json`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct UpdateCheckCache {
@@ -130,6 +136,36 @@ pub fn write_cache_atomic(path: &Path, cache: &UpdateCheckCache) -> Result<()> {
     Ok(())
 }
 
+/// Decide whether a stale cache may start a refresh now, and record the attempt if so.
+///
+/// The attempt time is kept in a sibling `update-check.attempt` file, written before
+/// any network call. It rate-limits refreshes whether they succeed or fail (offline,
+/// GitHub rate limit) and acts as an in-flight guard for concurrent callers.
+pub fn claim_refresh_attempt(cache_path: &Path, now_secs: i64) -> bool {
+    static CLAIM_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _guard = CLAIM_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+    let marker = cache_path.with_extension("attempt");
+    let last_attempt = std::fs::read_to_string(&marker)
+        .ok()
+        .and_then(|raw| raw.trim().parse::<i64>().ok());
+    if let Some(last) = last_attempt {
+        let age = now_secs - last;
+        let recent = age < REFRESH_RETRY_SECS && age > -CLOCK_SKEW_SECS;
+        if recent {
+            return false;
+        }
+    }
+
+    if let Some(parent) = marker.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    // Refuse to refresh if the attempt cannot be recorded: without it every call would retry.
+    std::fs::write(&marker, format!("{now_secs}\n")).is_ok()
+}
+
 /// Fetch latest release metadata from `api_url` and write `update-check.json` atomically.
 pub async fn refresh_cache(api_url: &str, path: &Path) -> Result<UpdateCheckCache> {
     let client = reqwest::Client::builder()
@@ -210,7 +246,7 @@ pub fn maybe_print_cli_update_notice(config: &VaultConfig) {
         }
     }
 
-    if is_stale {
+    if is_stale && claim_refresh_attempt(&cache_path, current_unix_secs()) {
         if let Ok(exe) = std::env::current_exe() {
             spawn_detached_cli_refresh_with_url(&exe, &config.data_dir, DEFAULT_RELEASES_API_URL);
         }
@@ -313,6 +349,28 @@ mod tests {
         assert!(!is_newer_version("0.1.0", "v0.1.0"));
         assert!(!is_newer_version("0.1.0", "0.0.9"));
         assert!(!is_newer_version("0.1.0", "not-a-semver"));
+    }
+
+    #[test]
+    fn refresh_attempts_are_rate_limited_even_when_they_fail() {
+        let dir = tempdir().expect("tempdir");
+        let path = dir.path().join("update-check.json");
+        let t0: i64 = 1_767_225_600;
+
+        assert!(
+            claim_refresh_attempt(&path, t0),
+            "first stale read starts a refresh"
+        );
+        // The refresh failed (offline): no cache was written, so the cache is still stale.
+        assert!(read_cached_status(&path, "0.1.0", t0 + 60).1);
+        assert!(
+            !claim_refresh_attempt(&path, t0 + 60),
+            "a recent attempt must suppress another refresh"
+        );
+        assert!(!claim_refresh_attempt(&path, t0 + REFRESH_RETRY_SECS - 1));
+        assert!(claim_refresh_attempt(&path, t0 + REFRESH_RETRY_SECS));
+        // An attempt recorded in the future (clock was ahead) does not block forever.
+        assert!(claim_refresh_attempt(&path, t0));
     }
 
     #[test]
