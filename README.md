@@ -14,6 +14,19 @@ Local knowledge vault and MCP server for web documentation sites and local Markd
 - **Hardened 2-tool MCP server:** Exposes `query` (strictly read-only SQLite authorizer, 5s timeout, row/byte caps) and `manage` (Private-origin-guarded URL and canonicalized path validation) over Streamable HTTP (`/mcp`) or `stdio`.
 - **Self-contained runtime:** Single Rust binary with bundled SQLite and `rust-embed` offline Web UI (Sources, Knowledge Browser, Changes & Health, SQL Explorer).
 
+## Resource Usage
+
+Measured on an M1 Pro Mac with a real docs site (500 pages of dlthub docs):
+
+| | Memory | CPU |
+|---|---|---|
+| Daemon, idle | ~5 MB (empty vault), ~25–35 MB after Syncs | ~0.1 % |
+| Daemon, syncing 500 pages | ~45–60 MB median, up to ~120 MB peak, for about a minute | ~6–7 CPU-seconds per Sync |
+| `citadel mcp`, agent queries | under 8 MB | ~3 ms per query |
+| `citadel ui` | under 10 MB | negligible |
+
+Method, every scenario, and caveats: [Docs/resource-usage.md](Docs/resource-usage.md).
+
 ## Install (Recommended)
 
 Install the `citadel` binary straight from GitHub with Cargo. Requires a Rust toolchain ([`rustup`](https://rustup.rs/)); SQLite is bundled, so no system `sqlite3` library is needed.
