@@ -590,12 +590,12 @@ fn dispatch_command<W: Write>(
         Commands::Update { check, yes } => {
             let current_exe = std::env::current_exe()?;
             let opts = crate::update::UpdateOpts {
+                releases_api_url: config.update_api_url.clone(),
                 config,
                 check_only: check,
                 yes,
                 current_version: env!("CARGO_PKG_VERSION").to_string(),
                 current_exe,
-                releases_api_url: crate::update::check::DEFAULT_RELEASES_API_URL.to_string(),
                 force_container: None,
                 stdin_is_tty: None,
             };
@@ -604,9 +604,7 @@ fn dispatch_command<W: Write>(
         }
         Commands::UpdateCheckRefresh { api_url } => {
             if !config.no_update_check {
-                let url = api_url
-                    .as_deref()
-                    .unwrap_or(crate::update::check::DEFAULT_RELEASES_API_URL);
+                let url = api_url.as_deref().unwrap_or(&config.update_api_url);
                 let cache_path = config.update_check_path();
                 let _ = block_on(crate::update::check::refresh_cache(url, &cache_path));
             }

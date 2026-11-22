@@ -173,9 +173,12 @@ pub async fn health() -> Json<HealthResponse> {
 
 /// `GET /api/version`
 pub async fn get_version(State(state): State<UiState>) -> Json<UpdateStatus> {
-    let (status, refresh) = read_status_and_claim_refresh(&state.config);
+    let (status, refresh) = read_status_and_claim_refresh(&state.config, (state.clock)());
     if refresh {
-        spawn_background_refresh(state.config.update_check_path());
+        spawn_background_refresh(
+            state.config.update_check_path(),
+            state.config.update_api_url.clone(),
+        );
     }
     Json(status)
 }

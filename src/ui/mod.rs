@@ -29,24 +29,34 @@ struct UiAssets;
 #[derive(Debug, Clone)]
 pub struct UiState {
     pub config: VaultConfig,
+    /// Current Unix time in seconds; injectable so tests control cache freshness.
+    pub clock: fn() -> i64,
+}
+
+impl UiState {
+    /// State using the real system clock.
+    pub fn new(config: VaultConfig) -> Self {
+        Self {
+            config,
+            clock: crate::update::check::current_unix_secs,
+        }
+    }
 }
 
 /// Build the Axum router for the local Web UI REST API and embedded static assets.
 pub fn build_router(config: VaultConfig) -> Router {
-    build_ui_routes(config).layer(middleware::from_fn(origin_host_guard))
+    build_ui_routes(UiState::new(config)).layer(middleware::from_fn(origin_host_guard))
 }
 
 /// Build the unified `citadel serve` router combining the embedded Web UI (`/`),
 /// REST API (`/api/*`), and MCP Streamable HTTP endpoint (`/mcp`).
 pub fn build_serve_router(config: VaultConfig) -> Router {
-    build_ui_routes(config.clone())
+    build_ui_routes(UiState::new(config.clone()))
         .merge(crate::mcp::http::mcp_router(config))
         .layer(middleware::from_fn(origin_host_guard))
 }
 
-fn build_ui_routes(config: VaultConfig) -> Router {
-    let state = UiState { config };
-
+fn build_ui_routes(state: UiState) -> Router {
     Router::new()
         .route("/api/health", get(api::health))
         .route("/api/version", get(api::get_version))
@@ -955,13 +965,38 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::FORBIDDEN);
     }
 
-    #[tokio::test]
-    async fn get_version_returns_current_version_when_cache_missing() {
-        let vault_dir = tempdir().expect("vault tempdir");
-        let mut config = VaultConfig::new(vault_dir.path());
-        config.no_update_check = true;
-        let app = build_router(config);
+    /// Fixed test clock: 2026-01-01T00:00:00Z.
+    const NOW: i64 = 1_767_225_600;
 
+    /// Unroutable release URL: a test that forgets to mock GitHub can never reach it.
+    const NO_NETWORK_URL: &str = "http://127.0.0.1:9/never";
+
+    fn version_config(vault_dir: &std::path::Path) -> VaultConfig {
+        let mut config = VaultConfig::new(vault_dir);
+        config.update_api_url = NO_NETWORK_URL.to_string();
+        config
+    }
+
+    fn version_router(config: VaultConfig) -> Router {
+        build_ui_routes(UiState {
+            config,
+            clock: || NOW,
+        })
+    }
+
+    fn seed_cache(config: &VaultConfig, checked_at: i64, latest_version: &str) {
+        let cache = crate::update::check::UpdateCheckCache {
+            checked_at: crate::update::check::format_iso8601_utc(checked_at),
+            latest_version: latest_version.to_string(),
+            release_url: format!(
+                "https://github.com/mberetvas/citadel/releases/tag/{latest_version}"
+            ),
+        };
+        crate::update::check::write_cache_atomic(&config.update_check_path(), &cache)
+            .expect("seed update-check.json");
+    }
+
+    async fn get_version_json(app: Router) -> Value {
         let resp = app
             .oneshot(
                 Request::builder()
@@ -973,7 +1008,16 @@ mod tests {
             .await
             .expect("response");
         assert_eq!(resp.status(), StatusCode::OK);
-        let body = read_json_body(resp).await;
+        read_json_body(resp).await
+    }
+
+    #[tokio::test]
+    async fn get_version_returns_current_version_when_cache_missing() {
+        let vault_dir = tempdir().expect("vault tempdir");
+        let mut config = version_config(vault_dir.path());
+        config.no_update_check = true;
+
+        let body = get_version_json(version_router(config)).await;
         assert_eq!(body["current_version"], env!("CARGO_PKG_VERSION"));
         assert_eq!(body["update_available"], false);
         assert!(body["latest_version"].is_null());
@@ -982,26 +1026,10 @@ mod tests {
     #[tokio::test]
     async fn get_version_reports_update_available_when_cache_has_newer_semver() {
         let vault_dir = tempdir().expect("vault tempdir");
-        let config = VaultConfig::new(vault_dir.path());
-        std::fs::write(
-            config.update_check_path(),
-            r#"{"checked_at":"2099-01-01T00:00:00Z","latest_version":"v99.0.0","release_url":"https://github.com/mberetvas/citadel/releases/tag/v99.0.0"}"#,
-        )
-        .expect("seed update-check.json");
+        let config = version_config(vault_dir.path());
+        seed_cache(&config, NOW - 60, "v99.0.0");
 
-        let app = build_router(config);
-        let resp = app
-            .oneshot(
-                Request::builder()
-                    .method(Method::GET)
-                    .uri("/api/version")
-                    .body(Body::empty())
-                    .expect("GET /api/version"),
-            )
-            .await
-            .expect("response");
-        assert_eq!(resp.status(), StatusCode::OK);
-        let body = read_json_body(resp).await;
+        let body = get_version_json(version_router(config.clone())).await;
         assert_eq!(body["current_version"], env!("CARGO_PKG_VERSION"));
         assert_eq!(body["update_available"], true);
         assert_eq!(body["latest_version"], "99.0.0");
@@ -1009,36 +1037,75 @@ mod tests {
             body["release_url"],
             "https://github.com/mberetvas/citadel/releases/tag/v99.0.0"
         );
+        assert!(
+            !config
+                .update_check_path()
+                .with_extension("attempt")
+                .exists(),
+            "a fresh cache must not claim a refresh"
+        );
     }
 
     #[tokio::test]
     async fn get_version_reports_up_to_date_when_cache_matches_current() {
         let vault_dir = tempdir().expect("vault tempdir");
-        let config = VaultConfig::new(vault_dir.path());
+        let config = version_config(vault_dir.path());
         let current = env!("CARGO_PKG_VERSION");
-        std::fs::write(
-            config.update_check_path(),
-            format!(
-                r#"{{"checked_at":"2099-01-01T00:00:00Z","latest_version":"v{current}","release_url":"https://github.com/mberetvas/citadel/releases/tag/v{current}"}}"#
-            ),
-        )
-        .expect("seed update-check.json");
+        seed_cache(&config, NOW - 60, &format!("v{current}"));
 
-        let app = build_router(config);
-        let resp = app
-            .oneshot(
-                Request::builder()
-                    .method(Method::GET)
-                    .uri("/api/version")
-                    .body(Body::empty())
-                    .expect("GET /api/version"),
-            )
-            .await
-            .expect("response");
-        assert_eq!(resp.status(), StatusCode::OK);
-        let body = read_json_body(resp).await;
+        let body = get_version_json(version_router(config)).await;
         assert_eq!(body["current_version"], current);
         assert_eq!(body["latest_version"], current);
         assert_eq!(body["update_available"], false);
+    }
+
+    #[tokio::test]
+    async fn get_version_refreshes_stale_cache_from_configured_url() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind mock github server");
+        let addr = listener.local_addr().expect("local addr");
+        let github = Router::new().route(
+            "/releases/latest",
+            get(|| async {
+                Json(json!({
+                    "tag_name": "v42.0.0",
+                    "html_url": "https://github.com/mberetvas/citadel/releases/tag/v42.0.0"
+                }))
+            }),
+        );
+        let server = tokio::spawn(async move {
+            let _ = axum::serve(listener, github).await;
+        });
+
+        let vault_dir = tempdir().expect("vault tempdir");
+        let mut config = version_config(vault_dir.path());
+        config.update_api_url = format!("http://{addr}/releases/latest");
+        seed_cache(
+            &config,
+            NOW - crate::update::check::CACHE_TTL_SECS - 1,
+            "v0.0.1",
+        );
+
+        let body = get_version_json(version_router(config.clone())).await;
+        assert_eq!(
+            body["latest_version"], "0.0.1",
+            "stale data is served while refreshing"
+        );
+
+        let mut refreshed = None;
+        for _ in 0..50 {
+            let raw = std::fs::read_to_string(config.update_check_path()).unwrap_or_default();
+            if raw.contains("42.0.0") {
+                refreshed = Some(raw);
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        server.abort();
+        assert!(
+            refreshed.is_some(),
+            "stale cache must be refreshed from the configured release URL"
+        );
     }
 }

@@ -10,6 +10,8 @@ pub struct VaultConfig {
     pub allow_private_origins: bool,
     /// Disable automatic background update checks (`CITADEL_NO_UPDATE_CHECK`).
     pub no_update_check: bool,
+    /// GitHub Releases API endpoint used by update checks and `citadel update`.
+    pub update_api_url: String,
 }
 
 /// Environment variable that allows Private origins when set to `1` or `true`.
@@ -25,6 +27,7 @@ impl VaultConfig {
             data_dir: data_dir.into(),
             allow_private_origins: false,
             no_update_check: false,
+            update_api_url: crate::update::check::DEFAULT_RELEASES_API_URL.to_string(),
         }
     }
 

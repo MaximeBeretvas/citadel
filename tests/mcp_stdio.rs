@@ -10,11 +10,13 @@ fn stdio_binary_emits_only_valid_jsonrpc_frames_with_debug_logs() {
     let bin = env!("CARGO_BIN_EXE_citadel");
 
     // Seed a newer cached version to prove `citadel mcp` never emits update notices.
-    std::fs::write(
-        vault_dir.path().join("update-check.json"),
-        r#"{"checked_at":"2099-01-01T00:00:00Z","latest_version":"99.0.0","release_url":"https://github.com/mberetvas/citadel/releases/tag/v99.0.0"}"#,
-    )
-    .expect("seed update-check.json");
+    // A fresh cache (checked now) so nothing would refresh even if `mcp` did check.
+    let cache = citadel::update::check::UpdateCheckCache::now(
+        "99.0.0".to_string(),
+        "https://github.com/mberetvas/citadel/releases/tag/v99.0.0".to_string(),
+    );
+    citadel::update::check::write_cache_atomic(&vault_dir.path().join("update-check.json"), &cache)
+        .expect("seed update-check.json");
 
     let mut child = Command::new(bin)
         .arg("mcp")

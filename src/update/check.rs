@@ -210,9 +210,9 @@ pub async fn refresh_cache(api_url: &str, path: &Path) -> Result<UpdateCheckCach
 }
 
 /// Spawn a detached, non-blocking refresh on the current tokio runtime that swallows all errors.
-pub fn spawn_background_refresh(path: PathBuf) {
+pub fn spawn_background_refresh(path: PathBuf, api_url: String) {
     tokio::spawn(async move {
-        let _ = refresh_cache(DEFAULT_RELEASES_API_URL, &path).await;
+        let _ = refresh_cache(&api_url, &path).await;
     });
 }
 
@@ -220,9 +220,8 @@ pub fn spawn_background_refresh(path: PathBuf) {
 ///
 /// Returns `true` only when the cache is stale, update checks are enabled, and this
 /// caller won the rate-limited refresh claim.
-pub fn read_status_and_claim_refresh(config: &VaultConfig) -> (UpdateStatus, bool) {
+pub fn read_status_and_claim_refresh(config: &VaultConfig, now: i64) -> (UpdateStatus, bool) {
     let cache_path = config.update_check_path();
-    let now = current_unix_secs();
     let (status, is_stale) = read_cached_status(&cache_path, env!("CARGO_PKG_VERSION"), now);
     let refresh = is_stale && !config.no_update_check && claim_refresh_attempt(&cache_path, now);
     (status, refresh)
@@ -248,7 +247,7 @@ pub fn maybe_print_cli_update_notice(config: &VaultConfig) {
         return;
     }
 
-    let (status, refresh) = read_status_and_claim_refresh(config);
+    let (status, refresh) = read_status_and_claim_refresh(config, current_unix_secs());
 
     if status.update_available {
         if let Some(latest) = status.latest_version {
@@ -258,7 +257,7 @@ pub fn maybe_print_cli_update_notice(config: &VaultConfig) {
 
     if refresh {
         if let Ok(exe) = std::env::current_exe() {
-            spawn_detached_cli_refresh_with_url(&exe, &config.data_dir, DEFAULT_RELEASES_API_URL);
+            spawn_detached_cli_refresh_with_url(&exe, &config.data_dir, &config.update_api_url);
         }
     }
 }
