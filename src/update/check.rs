@@ -94,8 +94,11 @@ pub fn read_cached_status(
         return fallback();
     }
 
-    let is_stale = parse_iso8601_utc(&cache.checked_at)
-        .is_none_or(|checked| now_secs.saturating_sub(checked) >= CACHE_TTL_SECS);
+    // A timestamp from the future (written under a wrong clock) is stale, not fresh forever.
+    let is_stale = parse_iso8601_utc(&cache.checked_at).is_none_or(|checked| {
+        let age = now_secs.saturating_sub(checked);
+        !(-CLOCK_SKEW_SECS..CACHE_TTL_SECS).contains(&age)
+    });
     let update_available = is_newer_version(&current, &latest);
 
     (
@@ -118,10 +121,12 @@ pub fn write_cache_atomic(path: &Path, cache: &UpdateCheckCache) -> Result<()> {
     let payload = serde_json::to_string_pretty(cache)
         .map_err(|err| VaultError::Other(format!("failed to serialize update cache: {err}")))?;
 
+    // pid + per-process counter: two refreshes in one process never share a temp file.
+    static TEMP_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let tmp_name = format!(
         ".update-check.{}.{}.tmp",
         std::process::id(),
-        current_unix_secs()
+        TEMP_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
     );
     let tmp_path = path
         .parent()
@@ -371,6 +376,48 @@ mod tests {
         assert!(claim_refresh_attempt(&path, t0 + REFRESH_RETRY_SECS));
         // An attempt recorded in the future (clock was ahead) does not block forever.
         assert!(claim_refresh_attempt(&path, t0));
+    }
+
+    #[test]
+    fn future_dated_cache_is_stale() {
+        let dir = tempdir().expect("tempdir");
+        let path = dir.path().join("update-check.json");
+        let cache = UpdateCheckCache {
+            checked_at: "2030-01-01T00:00:00Z".to_string(),
+            latest_version: "0.2.0".to_string(),
+            release_url: "https://github.com/mberetvas/citadel/releases/tag/v0.2.0".to_string(),
+        };
+        std::fs::write(&path, serde_json::to_string(&cache).expect("serialize")).expect("write");
+        // 2026-01-01T00:00:00Z: the cache claims to come from 4 years in the future.
+        let (_, is_stale) = read_cached_status(&path, "0.1.0", 1_767_225_600);
+        assert!(
+            is_stale,
+            "a cache written under a wrong clock must not stay fresh"
+        );
+    }
+
+    #[test]
+    fn concurrent_cache_writes_in_the_same_second_do_not_collide() {
+        let dir = tempdir().expect("tempdir");
+        let path = dir.path().join("update-check.json");
+        let handles: Vec<_> = (0..16)
+            .map(|i| {
+                let path = path.clone();
+                std::thread::spawn(move || {
+                    let cache = UpdateCheckCache {
+                        checked_at: "2026-01-01T00:00:00Z".to_string(),
+                        latest_version: format!("0.{i}.0"),
+                        release_url: "https://example.invalid/r".to_string(),
+                    };
+                    write_cache_atomic(&path, &cache)
+                })
+            })
+            .collect();
+        for handle in handles {
+            handle.join().expect("join").expect("every write succeeds");
+        }
+        let raw = std::fs::read_to_string(&path).expect("read");
+        serde_json::from_str::<UpdateCheckCache>(&raw).expect("final cache is valid JSON");
     }
 
     #[test]
