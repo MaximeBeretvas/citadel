@@ -10,6 +10,7 @@ pub mod setup;
 pub mod skill;
 pub mod sources;
 pub mod ui;
+pub mod update;
 
 use std::io::IsTerminal;
 

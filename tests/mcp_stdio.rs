@@ -9,6 +9,13 @@ fn stdio_binary_emits_only_valid_jsonrpc_frames_with_debug_logs() {
     let vault_dir = tempdir().expect("vault tempdir");
     let bin = env!("CARGO_BIN_EXE_citadel");
 
+    // Seed a newer cached version to prove `citadel mcp` never emits update notices.
+    std::fs::write(
+        vault_dir.path().join("update-check.json"),
+        r#"{"checked_at":"2099-01-01T00:00:00Z","latest_version":"99.0.0","release_url":"https://github.com/mberetvas/citadel/releases/tag/v99.0.0"}"#,
+    )
+    .expect("seed update-check.json");
+
     let mut child = Command::new(bin)
         .arg("mcp")
         .env("CITADEL_HOME", vault_dir.path())
@@ -47,6 +54,10 @@ fn stdio_binary_emits_only_valid_jsonrpc_frames_with_debug_logs() {
     assert!(
         !stderr.trim().is_empty(),
         "expected RUST_LOG=debug output on stderr"
+    );
+    assert!(
+        !stderr.contains("Update available"),
+        "citadel mcp must never emit update notices on stderr: {stderr}"
     );
 
     let lines: Vec<&str> = stdout.lines().filter(|l| !l.trim().is_empty()).collect();

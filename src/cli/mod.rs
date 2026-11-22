@@ -267,7 +267,33 @@ pub fn run_cli_with_writer<W: Write>(cli: Cli, out: &mut W) -> anyhow::Result<()
     let config = VaultConfig::resolve(cli.data_dir)?;
     tracing::debug!(data_dir = %config.data_dir.display(), "resolved vault config");
 
-    match cli.command {
+    let should_check_update = !matches!(
+        &cli.command,
+        Commands::Mcp
+            | Commands::Serve { .. }
+            | Commands::Ui { .. }
+            | Commands::Daemon { .. }
+            | Commands::List { json: true }
+            | Commands::Query {
+                format: QueryFormat::Json,
+                ..
+            }
+    );
+
+    let result = dispatch_command(cli.command, &config, out);
+    if result.is_ok() && should_check_update {
+        crate::update::check::maybe_print_cli_update_notice(&config);
+    }
+    result
+}
+
+fn dispatch_command<W: Write>(
+    command: Commands,
+    config: &VaultConfig,
+    out: &mut W,
+) -> anyhow::Result<()> {
+    let config = config.clone();
+    match command {
         Commands::Add {
             origin,
             name,
