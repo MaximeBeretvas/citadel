@@ -1,7 +1,7 @@
 use std::io::{BufRead, IsTerminal, Write};
 use std::path::PathBuf;
 
-use clap::{Parser, Subcommand, ValueEnum};
+use clap::{Args, Parser, Subcommand, ValueEnum};
 use serde_json::Value;
 
 pub use crate::skill::SkillTarget;
@@ -9,6 +9,7 @@ pub use crate::skill::SkillTarget;
 use crate::config::VaultConfig;
 use crate::db::{execute_readonly_query, QueryResult};
 use crate::ingest::{self, parse_duration_secs, SourceDetail, SourceSummary, SyncSummary};
+use crate::setup::agents::{AgentKind, McpTransport, SetupComponents, SetupScope};
 use crate::sources::{AddSourceParams, Removal, SourceLifecycle, SourceSyncResult, SyncOutcome};
 
 /// Local knowledge vault & MCP server for documentation sites and Markdown folders.
@@ -151,6 +152,47 @@ pub enum Commands {
         #[command(subcommand)]
         command: SkillCommands,
     },
+
+    /// Interactive wizard (or flag-driven setup) to configure skill & MCP for AI agents.
+    Setup(SetupArgs),
+}
+
+/// CLI arguments for `citadel setup`.
+#[derive(Debug, Clone, Args)]
+pub struct SetupArgs {
+    /// Target agent(s) to configure (repeatable).
+    #[arg(long = "agent", value_enum)]
+    pub agents: Vec<AgentKind>,
+
+    /// Installation scope (local folder or global user home).
+    #[arg(long, value_enum)]
+    pub scope: Option<SetupScope>,
+
+    /// MCP transport mode.
+    #[arg(long, value_enum)]
+    pub transport: Option<TransportArg>,
+
+    /// HTTP MCP endpoint URL (used when transport is `http`).
+    #[arg(long, default_value = crate::setup::DEFAULT_HTTP_MCP_URL)]
+    pub url: String,
+
+    /// Which components to install/configure.
+    #[arg(long, value_enum, default_value_t = SetupComponents::Both)]
+    pub only: SetupComponents,
+
+    /// Overwrite existing Citadel skill files, symlinks, or MCP entries.
+    #[arg(long)]
+    pub force: bool,
+
+    /// Run non-interactively without prompting for confirmation.
+    #[arg(long, short = 'y')]
+    pub yes: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum TransportArg {
+    Stdio,
+    Http,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -448,6 +490,56 @@ pub fn run_cli_with_writer<W: Write>(cli: Cli, out: &mut W) -> anyhow::Result<()
                 Ok(())
             }
         },
+        Commands::Setup(args) => {
+            let cwd = std::env::current_dir()?;
+            let home = directories::BaseDirs::new().map(|d| d.home_dir().to_path_buf());
+            let is_interactive = !args.yes
+                && args.agents.is_empty()
+                && args.scope.is_none()
+                && std::io::stdin().is_terminal()
+                && std::io::stderr().is_terminal();
+
+            if is_interactive {
+                block_on(crate::setup::run_interactive_wizard(
+                    &cwd,
+                    home.as_deref(),
+                    &args.url,
+                ))??;
+                return Ok(());
+            }
+
+            if args.agents.is_empty() {
+                anyhow::bail!(
+                    "specify at least one --agent <claude|agy|codex> (or run `citadel setup` in an interactive terminal)"
+                );
+            }
+            let scope = args.scope.ok_or_else(|| {
+                anyhow::anyhow!(
+                    "specify --scope <local|global> when running `citadel setup` non-interactively"
+                )
+            })?;
+            let transport = args.transport.map(|t| match t {
+                TransportArg::Stdio => McpTransport::Stdio,
+                TransportArg::Http => McpTransport::Http(args.url.clone()),
+            });
+
+            let report = block_on(crate::setup::run_non_interactive(
+                crate::setup::NonInteractiveSetupOpts {
+                    cwd,
+                    home,
+                    agents: args.agents,
+                    scope,
+                    components: args.only,
+                    transport,
+                    probe_url: args.url,
+                    force: args.force,
+                },
+            ))??;
+            for path in &report.written_paths {
+                writeln!(out, "Configured {}", path.display())?;
+            }
+            Ok(())
+        }
     }
 }
 
@@ -794,6 +886,36 @@ mod tests {
             matches!(vault_err, crate::error::VaultError::Validation(_)),
             "{vault_err:?}"
         );
+    }
+
+    #[test]
+    fn parses_setup_subcommand_flags() {
+        let cli = Cli::try_parse_from([
+            "citadel",
+            "setup",
+            "--agent",
+            "claude",
+            "--agent",
+            "agy",
+            "--scope",
+            "local",
+            "--transport",
+            "stdio",
+            "--yes",
+        ])
+        .expect("setup flags should parse");
+
+        match cli.command {
+            Commands::Setup(args) => {
+                assert_eq!(args.agents, vec![AgentKind::Claude, AgentKind::Agy]);
+                assert_eq!(args.scope, Some(SetupScope::Local));
+                assert_eq!(args.transport, Some(TransportArg::Stdio));
+                assert_eq!(args.only, SetupComponents::Both);
+                assert!(!args.force);
+                assert!(args.yes);
+            }
+            other => panic!("expected Setup command, got {other:?}"),
+        }
     }
 
     #[test]
