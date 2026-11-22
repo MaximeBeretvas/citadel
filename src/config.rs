@@ -8,10 +8,17 @@ pub struct VaultConfig {
     pub data_dir: PathBuf,
     /// Allow Sources whose Origin is a Private origin (`CITADEL_ALLOW_PRIVATE_ORIGINS`).
     pub allow_private_origins: bool,
+    /// Disable automatic background update checks (`CITADEL_NO_UPDATE_CHECK`).
+    pub no_update_check: bool,
+    /// GitHub Releases API endpoint used by update checks and `citadel update`.
+    pub update_api_url: String,
 }
 
 /// Environment variable that allows Private origins when set to `1` or `true`.
 pub const ALLOW_PRIVATE_ORIGINS_ENV: &str = "CITADEL_ALLOW_PRIVATE_ORIGINS";
+
+/// Environment variable that disables automatic update checks when set to `1` or `true`.
+pub const NO_UPDATE_CHECK_ENV: &str = "CITADEL_NO_UPDATE_CHECK";
 
 impl VaultConfig {
     /// Construct a configuration pointing directly at `data_dir`.
@@ -19,6 +26,8 @@ impl VaultConfig {
         Self {
             data_dir: data_dir.into(),
             allow_private_origins: false,
+            no_update_check: false,
+            update_api_url: crate::update::check::DEFAULT_RELEASES_API_URL.to_string(),
         }
     }
 
@@ -34,6 +43,7 @@ impl VaultConfig {
         let mut config = Self::resolve_with_env(explicit, env_val.as_deref())?;
         config.allow_private_origins =
             parse_flag(std::env::var(ALLOW_PRIVATE_ORIGINS_ENV).ok().as_deref());
+        config.no_update_check = parse_flag(std::env::var(NO_UPDATE_CHECK_ENV).ok().as_deref());
         Ok(config)
     }
 
@@ -73,6 +83,11 @@ impl VaultConfig {
         self.data_dir.join("daemon.log")
     }
 
+    /// Path to the cached release update check file (`update-check.json`).
+    pub fn update_check_path(&self) -> PathBuf {
+        self.data_dir.join("update-check.json")
+    }
+
     /// Create the data directory if it does not already exist.
     pub fn ensure_data_dir(&self) -> Result<()> {
         std::fs::create_dir_all(&self.data_dir)?;
@@ -81,7 +96,7 @@ impl VaultConfig {
 }
 
 /// Parse a boolean environment flag: `1` or `true` (any case) enables it.
-fn parse_flag(raw: Option<&str>) -> bool {
+pub(crate) fn parse_flag(raw: Option<&str>) -> bool {
     raw.map(str::trim)
         .is_some_and(|v| v == "1" || v.eq_ignore_ascii_case("true"))
 }
@@ -89,6 +104,20 @@ fn parse_flag(raw: Option<&str>) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parses_no_update_check_env_and_derives_cache_path() {
+        let cfg = VaultConfig::new("/var/lib/citadel");
+        assert!(!cfg.no_update_check);
+        assert_eq!(
+            cfg.update_check_path(),
+            PathBuf::from("/var/lib/citadel/update-check.json")
+        );
+        assert_eq!(NO_UPDATE_CHECK_ENV, "CITADEL_NO_UPDATE_CHECK");
+        assert!(parse_flag(Some("1")));
+        assert!(parse_flag(Some("true")));
+        assert!(!parse_flag(Some("0")));
+    }
 
     #[test]
     fn parses_allow_private_origins_flag() {

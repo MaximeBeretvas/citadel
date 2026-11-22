@@ -1,7 +1,7 @@
 use std::io::{BufRead, IsTerminal, Write};
 use std::path::PathBuf;
 
-use clap::{Parser, Subcommand, ValueEnum};
+use clap::{Args, Parser, Subcommand, ValueEnum};
 use serde_json::Value;
 
 pub use crate::skill::SkillTarget;
@@ -9,6 +9,7 @@ pub use crate::skill::SkillTarget;
 use crate::config::VaultConfig;
 use crate::db::{execute_readonly_query, QueryResult};
 use crate::ingest::{self, parse_duration_secs, SourceDetail, SourceSummary, SyncSummary};
+use crate::setup::agents::{AgentKind, McpTransport, SetupComponents, SetupScope};
 use crate::sources::{AddSourceParams, Removal, SourceLifecycle, SourceSyncResult, SyncOutcome};
 
 /// Local knowledge vault & MCP server for documentation sites and Markdown folders.
@@ -151,6 +152,65 @@ pub enum Commands {
         #[command(subcommand)]
         command: SkillCommands,
     },
+
+    /// Interactive wizard (or flag-driven setup) to configure skill & MCP for AI agents.
+    Setup(SetupArgs),
+
+    /// Check for or install the latest GitHub Release binary.
+    Update {
+        /// Check for available updates without downloading or modifying the binary.
+        #[arg(long)]
+        check: bool,
+
+        /// Skip confirmation prompt when installing an update.
+        #[arg(short = 'y', long)]
+        yes: bool,
+    },
+
+    /// Internal detached helper to refresh `update-check.json` after short-lived CLI commands.
+    #[command(name = "__update-check-refresh", hide = true)]
+    UpdateCheckRefresh {
+        #[arg(long, hide = true)]
+        api_url: Option<String>,
+    },
+}
+
+/// CLI arguments for `citadel setup`.
+#[derive(Debug, Clone, Args)]
+pub struct SetupArgs {
+    /// Target agent(s) to configure (repeatable).
+    #[arg(long = "agent", value_enum)]
+    pub agents: Vec<AgentKind>,
+
+    /// Installation scope (local folder or global user home).
+    #[arg(long, value_enum)]
+    pub scope: Option<SetupScope>,
+
+    /// MCP transport mode.
+    #[arg(long, value_enum)]
+    pub transport: Option<TransportArg>,
+
+    /// HTTP MCP endpoint URL (used when transport is `http`).
+    #[arg(long, default_value = crate::setup::DEFAULT_HTTP_MCP_URL)]
+    pub url: String,
+
+    /// Which components to install/configure (default: both).
+    #[arg(long, value_enum)]
+    pub only: Option<SetupComponents>,
+
+    /// Overwrite existing Citadel skill files, symlinks, or MCP entries.
+    #[arg(long)]
+    pub force: bool,
+
+    /// Run non-interactively without prompting for confirmation.
+    #[arg(long, short = 'y')]
+    pub yes: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum TransportArg {
+    Stdio,
+    Http,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -225,7 +285,35 @@ pub fn run_cli_with_writer<W: Write>(cli: Cli, out: &mut W) -> anyhow::Result<()
     let config = VaultConfig::resolve(cli.data_dir)?;
     tracing::debug!(data_dir = %config.data_dir.display(), "resolved vault config");
 
-    match cli.command {
+    let should_check_update = !matches!(
+        &cli.command,
+        Commands::Mcp
+            | Commands::Update { .. }
+            | Commands::UpdateCheckRefresh { .. }
+            | Commands::Serve { .. }
+            | Commands::Ui { .. }
+            | Commands::Daemon { .. }
+            | Commands::List { json: true }
+            | Commands::Query {
+                format: QueryFormat::Json,
+                ..
+            }
+    );
+
+    let result = dispatch_command(cli.command, &config, out);
+    if result.is_ok() && should_check_update {
+        crate::update::check::maybe_print_cli_update_notice(&config);
+    }
+    result
+}
+
+fn dispatch_command<W: Write>(
+    command: Commands,
+    config: &VaultConfig,
+    out: &mut W,
+) -> anyhow::Result<()> {
+    let config = config.clone();
+    match command {
         Commands::Add {
             origin,
             name,
@@ -448,6 +536,116 @@ pub fn run_cli_with_writer<W: Write>(cli: Cli, out: &mut W) -> anyhow::Result<()
                 Ok(())
             }
         },
+        Commands::Setup(args) => {
+            let cwd = std::env::current_dir()?;
+            let home = directories::BaseDirs::new().map(|d| d.home_dir().to_path_buf());
+            let mode = setup_mode(
+                &args,
+                std::io::stdin().is_terminal(),
+                std::io::stderr().is_terminal(),
+            );
+
+            if mode == SetupMode::Wizard {
+                block_on(crate::setup::run_interactive_wizard(
+                    &cwd,
+                    home.as_deref(),
+                    &args.url,
+                ))??;
+                return Ok(());
+            }
+
+            let skipped = mode.skip_reason();
+            if args.agents.is_empty() {
+                anyhow::bail!(
+                    "{skipped}: add --agent <claude|agy|codex> and --scope <local|global>, or run `citadel setup` with no flags in a terminal for the wizard"
+                );
+            }
+            let scope = args.scope.ok_or_else(|| {
+                anyhow::anyhow!(
+                    "{skipped}: add --scope <local|global>, or run `citadel setup` with no flags in a terminal for the wizard"
+                )
+            })?;
+            let transport = args.transport.map(|t| match t {
+                TransportArg::Stdio => McpTransport::Stdio,
+                TransportArg::Http => McpTransport::Http(args.url.clone()),
+            });
+
+            let report = block_on(crate::setup::run_non_interactive(
+                crate::setup::NonInteractiveSetupOpts {
+                    cwd,
+                    home,
+                    agents: args.agents,
+                    scope,
+                    components: args.only.unwrap_or(SetupComponents::Both),
+                    transport,
+                    probe_url: args.url,
+                    force: args.force,
+                },
+            ))??;
+            for path in &report.written_paths {
+                writeln!(out, "Configured {}", path.display())?;
+            }
+            Ok(())
+        }
+        Commands::Update { check, yes } => {
+            let current_exe = std::env::current_exe()?;
+            let opts = crate::update::UpdateOpts {
+                releases_api_url: config.update_api_url.clone(),
+                config,
+                check_only: check,
+                yes,
+                current_version: env!("CARGO_PKG_VERSION").to_string(),
+                current_exe,
+                force_container: None,
+                stdin_is_tty: None,
+            };
+            block_on(crate::update::run_update(opts, out))??;
+            Ok(())
+        }
+        Commands::UpdateCheckRefresh { api_url } => {
+            if !config.no_update_check {
+                let url = api_url.as_deref().unwrap_or(&config.update_api_url);
+                let cache_path = config.update_check_path();
+                let _ = block_on(crate::update::check::refresh_cache(url, &cache_path));
+            }
+            Ok(())
+        }
+    }
+}
+
+/// How `citadel setup` runs, and why the wizard was skipped when it was.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SetupMode {
+    Wizard,
+    FlagsGiven,
+    NoTerminal,
+}
+
+impl SetupMode {
+    fn skip_reason(self) -> &'static str {
+        match self {
+            Self::Wizard => "the wizard was not run",
+            Self::FlagsGiven => "setup flags were given, so the wizard is skipped",
+            Self::NoTerminal => "no terminal is attached, so the wizard is skipped",
+        }
+    }
+}
+
+/// Open the `citadel setup` wizard only in a terminal and only when no setup choice was
+/// given as a flag; otherwise the wizard would silently replace the user's flags.
+fn setup_mode(args: &SetupArgs, stdin_is_tty: bool, stderr_is_tty: bool) -> SetupMode {
+    let has_explicit_choice = args.yes
+        || args.force
+        || !args.agents.is_empty()
+        || args.scope.is_some()
+        || args.transport.is_some()
+        || args.only.is_some();
+    if has_explicit_choice {
+        SetupMode::FlagsGiven
+    } else if stdin_is_tty && stderr_is_tty {
+        SetupMode::Wizard
+    } else {
+        SetupMode::NoTerminal
     }
 }
 
@@ -794,6 +992,65 @@ mod tests {
             matches!(vault_err, crate::error::VaultError::Validation(_)),
             "{vault_err:?}"
         );
+    }
+
+    #[test]
+    fn parses_setup_subcommand_flags() {
+        let cli = Cli::try_parse_from([
+            "citadel",
+            "setup",
+            "--agent",
+            "claude",
+            "--agent",
+            "agy",
+            "--scope",
+            "local",
+            "--transport",
+            "stdio",
+            "--yes",
+        ])
+        .expect("setup flags should parse");
+
+        match cli.command {
+            Commands::Setup(args) => {
+                assert_eq!(args.agents, vec![AgentKind::Claude, AgentKind::Agy]);
+                assert_eq!(args.scope, Some(SetupScope::Local));
+                assert_eq!(args.transport, Some(TransportArg::Stdio));
+                assert_eq!(args.only, None);
+                assert!(!args.force);
+                assert!(args.yes);
+            }
+            other => panic!("expected Setup command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn setup_opens_wizard_only_without_explicit_flags_in_a_terminal() {
+        let parse = |extra: &[&str]| {
+            let mut argv = vec!["citadel", "setup"];
+            argv.extend_from_slice(extra);
+            match Cli::try_parse_from(argv).expect("parse").command {
+                Commands::Setup(args) => args,
+                other => panic!("expected Setup command, got {other:?}"),
+            }
+        };
+
+        assert_eq!(setup_mode(&parse(&[]), true, true), SetupMode::Wizard);
+        assert_eq!(setup_mode(&parse(&[]), false, true), SetupMode::NoTerminal);
+        for flags in [
+            &["--only", "mcp"][..],
+            &["--transport", "http"][..],
+            &["--force"][..],
+            &["--yes"][..],
+            &["--agent", "claude"][..],
+            &["--scope", "global"][..],
+        ] {
+            assert_eq!(
+                setup_mode(&parse(flags), true, true),
+                SetupMode::FlagsGiven,
+                "{flags:?} must not be silently replaced by wizard answers"
+            );
+        }
     }
 
     #[test]

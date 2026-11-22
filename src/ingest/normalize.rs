@@ -169,8 +169,8 @@ pub fn extract_title(raw_or_normalized_md: &str, fallback_stem: &str) -> String 
 }
 
 /// Compute lowercase hexadecimal SHA-256 digest of `input`.
-pub fn sha256_hex(input: &str) -> String {
-    let digest = Sha256::digest(input.as_bytes());
+pub fn sha256_hex(input: impl AsRef<[u8]>) -> String {
+    let digest = Sha256::digest(input.as_ref());
     let mut hex = String::with_capacity(64);
     for byte in digest {
         let _ = write!(hex, "{byte:02x}");

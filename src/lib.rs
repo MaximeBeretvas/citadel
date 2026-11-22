@@ -3,12 +3,15 @@ pub mod config;
 pub mod daemon;
 pub mod db;
 pub mod error;
+pub(crate) mod fsutil;
 pub mod ingest;
 pub mod mcp;
 pub mod serve;
+pub mod setup;
 pub mod skill;
 pub mod sources;
 pub mod ui;
+pub mod update;
 
 use std::io::IsTerminal;
 

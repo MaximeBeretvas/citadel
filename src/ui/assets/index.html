@@ -57,6 +57,18 @@
         </nav>
 
         <div class="topbar-actions">
+          <div id="update-badge-wrap" class="update-badge-wrap" hidden>
+            <button type="button" id="update-badge-btn" class="update-badge" aria-expanded="false" aria-controls="update-popover">
+              <span class="update-dot" aria-hidden="true"></span>
+              <span id="update-badge-label">Update available</span>
+            </button>
+            <div id="update-popover" class="update-popover" role="dialog" aria-label="Citadel update instructions" hidden>
+              <p class="update-popover-title">New Citadel release available</p>
+              <p class="update-popover-body">Run <code>citadel update</code> in your terminal to upgrade.</p>
+              <a id="update-release-link" class="update-release-link" target="_blank" rel="noopener noreferrer" hidden>View release notes &rarr;</a>
+            </div>
+          </div>
+
           <button type="button" id="theme-toggle" class="btn btn-ghost btn-sm" aria-label="Toggle color theme">
             <svg class="nav-icon" viewBox="0 0 24 24" width="15" height="15" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
               <circle cx="12" cy="12" r="4"></circle>

@@ -162,13 +162,17 @@ pub fn start_daemon(config: &VaultConfig, foreground: bool) -> Result<Option<u32
         return Ok(None);
     }
 
+    start_daemon_with_exe(config, &std::env::current_exe()?)
+}
+
+/// Spawn the detached daemon from an explicit executable path (avoids Linux `/proc/self/exe` `(deleted)` paths after self-update).
+pub fn start_daemon_with_exe(config: &VaultConfig, exe: &Path) -> Result<Option<u32>> {
     if let DaemonStatus::Running(pid) = daemon_status(config)? {
         return Err(VaultError::AlreadyRunning(format!(
             "daemon is already running (pid {pid})"
         )));
     }
 
-    let exe = std::env::current_exe()?;
     let log_file = OpenOptions::new()
         .create(true)
         .append(true)
@@ -837,6 +841,19 @@ mod tests {
         assert!(due.is_empty(), "retried before its interval: {due:?}");
         let due_later = select_due_web_sources_at(&conn, now_epoch + 3_000).expect("due later");
         assert_eq!(due_later.len(), 1);
+    }
+
+    #[test]
+    fn start_daemon_with_exe_spawns_explicit_executable_path() {
+        let vault_dir = tempdir().expect("vault tempdir");
+        let config = VaultConfig::new(vault_dir.path());
+        let missing_exe = vault_dir.path().join("nonexistent-citadel-bin");
+        let err = start_daemon_with_exe(&config, &missing_exe)
+            .expect_err("nonexistent explicit exe must fail with io NotFound");
+        assert!(
+            matches!(err, VaultError::Io(ref io_err) if io_err.kind() == std::io::ErrorKind::NotFound),
+            "expected NotFound Io error from explicit exe path, got: {err}"
+        );
     }
 
     #[test]

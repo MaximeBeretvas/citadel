@@ -249,6 +249,85 @@ h3 {
   padding: 1px 7px;
 }
 
+.topbar-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  flex-shrink: 0;
+}
+
+.update-badge-wrap {
+  position: relative;
+}
+
+.update-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+  border-radius: 999px;
+  border: 1px solid var(--info);
+  background: var(--info-bg);
+  color: var(--info);
+  font-family: var(--font-sans);
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  line-height: 1.2;
+}
+
+.update-badge:hover {
+  filter: brightness(1.06);
+}
+
+.update-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 999px;
+  background: currentColor;
+}
+
+.update-popover {
+  position: absolute;
+  right: 0;
+  top: calc(100% + 8px);
+  width: 260px;
+  padding: var(--space-3);
+  border-radius: var(--radius-md);
+  border: 1px solid var(--border);
+  background: var(--surface);
+  box-shadow: var(--shadow-md);
+  z-index: 40;
+}
+
+.update-popover-title {
+  margin: 0 0 4px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.update-popover-body {
+  margin: 0 0 8px;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.update-popover-body code {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  padding: 1px 5px;
+  border-radius: 4px;
+  background: var(--surface-subtle);
+  color: var(--text);
+}
+
+.update-release-link {
+  display: inline-block;
+  font-size: 12px;
+  font-weight: 500;
+}
+
 .nav-tabs {
   display: flex;
   align-items: center;
@@ -319,8 +398,9 @@ h3 {
   max-width: 100%;
 }
 
-.view[hidden] {
-  display: none;
+/* `hidden` must win over component display rules (e.g. .update-release-link). */
+[hidden] {
+  display: none !important;
 }
 
 .view-header {

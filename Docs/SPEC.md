@@ -435,13 +435,13 @@ The embedded static router `SKILL.md` (`src/skill/SKILL.md`) documents the SQLit
 4. **Safety:** Refuses to overwrite an existing `SKILL.md` unless `--force` is passed.
 
 ### Interactive Setup Wizard (`citadel setup`)
-Running `citadel setup` in an interactive TTY launches a guided `cliclack` wizard; passing flags (`--agent`, `--scope`, `--yes`) runs non-interactively for scripts/CI.
+Running `citadel setup` in an interactive TTY launches a guided `cliclack` wizard; passing any setup flag (`--agent`, `--scope`, `--transport`, `--only`, `--force`, `--yes`) runs non-interactively for scripts/CI.
 
 #### Wizard Flow
 1. **Select target agent(s)** (multi-select): **Claude Code (`claude`)**, **Antigravity (`agy`)**, **Codex (`codex`)**.
 2. **Select scope**: **Local** (current working directory) or **Global** (user home config).
 3. **Select components**: **Skill + MCP** (default), Skill only, or MCP only.
-4. **Confirm MCP transport** (when MCP is selected): auto-detects whether a `citadel serve` HTTP endpoint (`http://127.0.0.1:4317/mcp`) is reachable and defaults accordingly (`http` if reachable, otherwise `stdio` using `citadel mcp`); user can switch between `stdio` and `http` (or override via `--transport` / `--url`).
+4. **Confirm MCP transport** (when MCP is selected): auto-detects whether a `citadel serve` HTTP endpoint (`http://127.0.0.1:4317/mcp`) answers a JSON-RPC `ping` POST and defaults accordingly (`http` if it does, otherwise `stdio` using `citadel mcp`); user can switch between `stdio` and `http` (or override via `--transport` / `--url`).
 5. **Preview & confirm**: Prints the exact list of files to create/update (flagging any existing `citadel` entries) before writing.
 
 #### Per-Agent Target Paths & Config Formats
@@ -468,9 +468,9 @@ Running `citadel setup` in an interactive TTY launches a guided `cliclack` wizar
 - Published on GitHub Releases as versioned tarballs (`citadel-v<semver>-<target>.tar.gz` for `aarch64-apple-darwin`, `x86_64-apple-darwin`, `aarch64-unknown-linux-gnu`, `x86_64-unknown-linux-gnu`) alongside a `checksums.sha256` manifest.
 
 #### `citadel update` Execution
-1. **Container detection:** If running inside an OCI container (`/.dockerenv`, `/run/.containerenv`, or `CITADEL_CONTAINER=1`), do **not** mutate the container binary; instead print the current/latest version and exact Apple `container` pull/recreate commands.
+1. **Container detection:** If running inside an OCI container (`/.dockerenv`, `/run/.containerenv`, or `CITADEL_CONTAINER=1`; Apple `container` creates neither marker file, so `make run` and the documented `container run` command set `CITADEL_CONTAINER=1`), do **not** mutate the container binary. Instead print the current and latest version (a short live check, falling back to `update-check.json`) and, unless already up to date, the exact steps to check out the release source (`git fetch --tags && git checkout vX.Y.Z`), rebuild the image and recreate the container with Apple `container` (or `make build && make run`).
 2. **Version check:** Query the GitHub Releases latest endpoint and compare with `env!("CARGO_PKG_VERSION")` using `semver`. With `--check`, print status and exit without modifying the binary.
-3. **Atomic native upgrade:** Download the platform tarball and `checksums.sha256` into a temp file in the executable's directory, verify the SHA-256 digest before extracting, atomically replace the running binary (preserving permissions and rolling back on failure), and if a native daemon is running (`daemon.pid`), restart it cleanly.
+3. **Atomic native upgrade:** Download the platform tarball and `checksums.sha256` into a temp file in the executable's directory, verify the SHA-256 digest before extracting, atomically replace the running binary (preserving permissions and rolling back on failure), and if a native daemon is running (`daemon.pid`), restart it cleanly: leave a daemon its service manager already relaunched alone, and report one still finishing a Sync (it exits on its own) instead of restarting it.
 
 #### Automatic Update Awareness (`update-check.json`)
 - Stored at `<CITADEL_HOME>/update-check.json` with `{ "checked_at": "<ISO-8601>", "latest_version": "<semver>", "release_url": "<url>" }` and a **24-hour TTL**.
@@ -527,6 +527,7 @@ Uses Apple's native macOS OCI runtime (**`container`**, `https://github.com/appl
   container run -d --name citadel \
     -p 127.0.0.1:4317:4317 \
     -e CITADEL_HOME=/data \
+    -e CITADEL_CONTAINER=1 \
     -v citadel-data:/data \
     -v /Users/maxime/Dev/books/markdown:/sources/books:ro \
     citadel:latest
