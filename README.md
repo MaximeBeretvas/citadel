@@ -14,7 +14,28 @@ Local knowledge vault and MCP server for web documentation sites and local Markd
 - **Hardened 2-tool MCP server:** Exposes `query` (strictly read-only SQLite authorizer, 5s timeout, row/byte caps) and `manage` (Private-origin-guarded URL and canonicalized path validation) over Streamable HTTP (`/mcp`) or `stdio`.
 - **Self-contained runtime:** Single Rust binary with bundled SQLite and `rust-embed` offline Web UI (Sources, Knowledge Browser, Changes & Health, SQL Explorer).
 
-## Quickstart (Apple `container` — Default)
+## Install (Recommended)
+
+Install the `citadel` binary straight from GitHub with Cargo. Requires a Rust toolchain ([`rustup`](https://rustup.rs/)); SQLite is bundled, so no system `sqlite3` library is needed.
+
+```bash
+cargo install --git https://github.com/mberetvas/citadel --locked
+
+# Optional: include headless Chromium support for JS-rendered sites
+cargo install --git https://github.com/mberetvas/citadel --locked --features chrome
+```
+
+This builds the `main` branch; add `--tag <tag>` or `--branch <name>` to pin another ref, and re-run with `--force` to upgrade. Ensure `~/.cargo/bin` is on your `$PATH`, then verify and optionally register the background service:
+
+```bash
+citadel --version
+
+# Register and start the background scheduler & local folder watcher
+# (launchd on macOS, systemd --user on Linux)
+citadel daemon install
+```
+
+## Alternative: Apple `container`
 
 Uses Apple's native macOS OCI runtime ([`apple/container`](https://github.com/apple/container))—no Docker Desktop required.
 
@@ -44,26 +65,15 @@ make stop                      # Stop the running container
 make clean                     # Stop and remove the container (preserves data volume)
 ```
 
-## Native Installation (macOS / Linux)
+## Alternative: Install from a Local Checkout
 
-Requires a Rust toolchain ([`rustup`](https://rustup.rs/)); SQLite is bundled, so no system `sqlite3` library is needed.
+For development, install from a cloned repository instead:
 
 ```bash
-# Install the binary from a local checkout onto ~/.cargo/bin
 cargo install --path . --locked
 
 # Optional: include headless Chromium support for JS-rendered sites
 cargo install --path . --locked --features chrome
-```
-
-Ensure `~/.cargo/bin` is on your `$PATH`, then verify and optionally register the background service:
-
-```bash
-citadel --version
-
-# Register and start the background scheduler & local folder watcher
-# (launchd on macOS, systemd --user on Linux)
-citadel daemon install
 ```
 
 ## MCP Client Configuration

@@ -25,6 +25,7 @@ run:
 		-p 127.0.0.1:$(PORT):4317 \
 		$(if $(DNS),--dns $(DNS),) \
 		-e CITADEL_HOME=/data \
+		-e CITADEL_CONTAINER=1 \
 		-v $(VOLUME):/data \
 		$(if $(BOOKS_DIR),-v $(BOOKS_DIR):/sources/books:ro,) \
 		$(IMAGE)

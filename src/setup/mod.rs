@@ -5,7 +5,9 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use crate::error::{Result, VaultError};
-use crate::fsutil::{create_dir_symlink, remove_existing_path, write_file_atomic};
+use crate::fsutil::{
+    create_dir_symlink, remove_existing_path, resolves_to_same_dir, write_file_atomic,
+};
 use crate::setup::agents::{
     build_plan, ActionKind, AgentKind, McpTransport, PlannedAction, SetupComponents, SetupPlan,
     SetupScope,
@@ -29,20 +31,50 @@ pub struct NonInteractiveSetupOpts {
     pub force: bool,
 }
 
-/// Probe `probe_url` with a short timeout; returns `Http(probe_url)` if reachable, else `Stdio`.
+/// Probe `probe_url` with a short timeout; returns `Http(probe_url)` if it answers MCP, else `Stdio`.
+///
+/// The probe is a JSON-RPC `ping` POST, the same kind of request the agent will send: a GET
+/// can succeed where every MCP POST is refused (e.g. `serve` returns 403 for a non-loopback
+/// `Host`).
 pub async fn detect_default_transport(probe_url: &str) -> McpTransport {
-    let client = match reqwest::Client::builder()
+    if answers_mcp_ping(probe_url).await {
+        McpTransport::Http(probe_url.to_string())
+    } else {
+        McpTransport::Stdio
+    }
+}
+
+async fn answers_mcp_ping(probe_url: &str) -> bool {
+    let Ok(client) = reqwest::Client::builder()
         .timeout(Duration::from_millis(500))
         .build()
-    {
-        Ok(c) => c,
-        Err(_) => return McpTransport::Stdio,
+    else {
+        return false;
     };
-
-    match client.get(probe_url).send().await {
-        Ok(resp) if resp.status().is_success() => McpTransport::Http(probe_url.to_string()),
-        _ => McpTransport::Stdio,
+    let ping = r#"{"jsonrpc":"2.0","id":"citadel-setup-probe","method":"ping"}"#;
+    let Ok(resp) = client
+        .post(probe_url)
+        .header(reqwest::header::CONTENT_TYPE, "application/json")
+        .header(
+            reqwest::header::ACCEPT,
+            "application/json, text/event-stream",
+        )
+        .body(ping)
+        .send()
+        .await
+    else {
+        return false;
+    };
+    if !resp.status().is_success() {
+        return false;
     }
+    let Ok(body) = resp.text().await else {
+        return false;
+    };
+    serde_json::from_str::<serde_json::Value>(&body).is_ok_and(|reply| {
+        reply.get("jsonrpc").and_then(|v| v.as_str()) == Some("2.0")
+            && reply.get("result").is_some()
+    })
 }
 
 /// Run `citadel setup` non-interactively using explicit options.
@@ -254,10 +286,14 @@ pub fn apply_plan(plan: &SetupPlan, force: bool) -> Result<ApplyReport> {
                 std::fs::write(&action.path, ROUTER_SKILL_MD)?;
             }
             ActionKind::CreateSkillSymlink { target } => {
-                if force {
-                    remove_existing_path(&action.path)?;
+                // The agent's skills dir may itself link to the shared one, so this path
+                // already reaches the skill: replacing it would delete the skill instead.
+                if !resolves_to_same_dir(&action.path, target) {
+                    if force {
+                        remove_existing_path(&action.path)?;
+                    }
+                    create_dir_symlink(target, &action.path)?;
                 }
-                create_dir_symlink(target, &action.path)?;
             }
             ActionKind::WriteAgyPluginManifest => {
                 if force {
@@ -447,6 +483,61 @@ mod tests {
         assert_eq!(leftovers, vec![std::ffi::OsString::from("claude.json")]);
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn global_setup_keeps_the_skill_when_the_agent_skills_dir_links_to_the_shared_dir() {
+        let cwd = tempdir().expect("cwd tempdir");
+        let home = tempdir().expect("home tempdir");
+        // A common way to share skills between agents: ~/.claude/skills -> ~/.agents/skills.
+        let shared = home.path().join(".agents/skills");
+        std::fs::create_dir_all(&shared).expect("mkdir shared skills");
+        std::fs::create_dir_all(home.path().join(".claude")).expect("mkdir .claude");
+        std::os::unix::fs::symlink(&shared, home.path().join(".claude/skills"))
+            .expect("link agent skills dir");
+
+        let plan = || {
+            build_plan(
+                cwd.path(),
+                Some(home.path()),
+                &[AgentKind::Claude],
+                SetupScope::Global,
+                SetupComponents::Both,
+                McpTransport::Stdio,
+            )
+            .expect("plan")
+        };
+        let canonical = shared.join("citadel");
+        let assert_skill_intact = || {
+            assert!(
+                std::fs::symlink_metadata(&canonical)
+                    .expect("canonical skill dir")
+                    .file_type()
+                    .is_dir(),
+                "the canonical skill dir must stay a real directory"
+            );
+            assert_eq!(
+                std::fs::read_to_string(canonical.join("SKILL.md")).expect("read SKILL.md"),
+                ROUTER_SKILL_MD
+            );
+            assert_eq!(
+                std::fs::read_to_string(home.path().join(".claude/skills/citadel/SKILL.md"))
+                    .expect("read SKILL.md through the agent dir"),
+                ROUTER_SKILL_MD
+            );
+        };
+
+        apply_plan(&plan(), false).expect("first run must not stop half-applied");
+        assert_skill_intact();
+        assert!(
+            home.path().join(".claude.json").is_file(),
+            "the MCP config must be merged"
+        );
+
+        // A forced re-run (or the wizard's overwrite confirmation) must not delete the skill.
+        apply_plan(&plan(), true).expect("forced re-run");
+        assert_skill_intact();
+    }
+
     #[test]
     fn apply_plan_writes_nothing_when_a_later_config_cannot_be_merged() {
         let cwd = tempdir().expect("cwd tempdir");
@@ -476,24 +567,33 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn detect_transport_returns_http_when_endpoint_reachable_and_stdio_when_closed() {
+    /// Serve `app` on an ephemeral loopback port.
+    async fn spawn_router(
+        app: axum::Router,
+    ) -> (std::net::SocketAddr, tokio::task::JoinHandle<()>) {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
             .expect("bind ephemeral listener");
         let addr = listener.local_addr().expect("local addr");
-        let app = axum::Router::new().route(
-            "/mcp",
-            axum::routing::get(|| async { axum::http::StatusCode::OK }),
-        );
         let server = tokio::spawn(async move {
             let _ = axum::serve(listener, app).await;
         });
+        (addr, server)
+    }
+
+    #[tokio::test]
+    async fn detect_transport_returns_http_when_endpoint_reachable_and_stdio_when_closed() {
+        let vault = tempdir().expect("vault tempdir");
+        let (addr, server) = spawn_router(crate::ui::build_serve_router(
+            crate::config::VaultConfig::new(vault.path()),
+        ))
+        .await;
 
         let live_url = format!("http://{addr}/mcp");
         assert_eq!(
             detect_default_transport(&live_url).await,
-            McpTransport::Http(live_url)
+            McpTransport::Http(live_url),
+            "`citadel serve` answers the probe"
         );
         server.abort();
 
@@ -513,21 +613,46 @@ mod tests {
 
     #[tokio::test]
     async fn detect_transport_returns_stdio_on_404_response() {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-            .await
-            .expect("bind ephemeral listener");
-        let addr = listener.local_addr().expect("local addr");
-        let app = axum::Router::new().route(
+        let (addr, server) = spawn_router(axum::Router::new().route(
             "/mcp",
-            axum::routing::get(|| async { axum::http::StatusCode::NOT_FOUND }),
-        );
-        let server = tokio::spawn(async move {
-            let _ = axum::serve(listener, app).await;
-        });
+            axum::routing::any(|| async { axum::http::StatusCode::NOT_FOUND }),
+        ))
+        .await;
 
         let ui_only_url = format!("http://{addr}/mcp");
         assert_eq!(
             detect_default_transport(&ui_only_url).await,
+            McpTransport::Stdio
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn detect_transport_returns_stdio_when_the_endpoint_refuses_mcp_requests() {
+        // Like `citadel serve` behind a LAN address: GET answers, every MCP POST gets 403.
+        let (addr, server) = spawn_router(
+            axum::Router::new().route(
+                "/mcp",
+                axum::routing::get(|| async { axum::Json(serde_json::json!({"name": "citadel"})) })
+                    .post(|| async { axum::http::StatusCode::FORBIDDEN }),
+            ),
+        )
+        .await;
+        let refusing_url = format!("http://{addr}/mcp");
+        assert_eq!(
+            detect_default_transport(&refusing_url).await,
+            McpTransport::Stdio
+        );
+        server.abort();
+
+        // Any web server that answers 200 without speaking JSON-RPC.
+        let (addr, server) = spawn_router(axum::Router::new().fallback(|| async {
+            axum::response::Html("<html><body>not an MCP server</body></html>")
+        }))
+        .await;
+        let html_url = format!("http://{addr}/mcp");
+        assert_eq!(
+            detect_default_transport(&html_url).await,
             McpTransport::Stdio
         );
         server.abort();

@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use clap::ValueEnum;
 
 use crate::error::{Result, VaultError};
-use crate::fsutil::{create_dir_symlink, remove_existing_path};
+use crate::fsutil::{create_dir_symlink, remove_existing_path, resolves_to_same_dir};
 
 const SKILL_DIR_NAME: &str = "citadel";
 const SKILL_FILE_NAME: &str = "SKILL.md";
@@ -113,10 +113,14 @@ pub fn install_skill_with_dirs(
         if let Some(parent) = link_path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        if force {
-            remove_existing_path(&link_path)?;
+        // The agent's skills dir may itself link to the shared one, so this path already
+        // reaches the skill: replacing it would delete the skill instead.
+        if !resolves_to_same_dir(&link_path, &canonical_dir) {
+            if force {
+                remove_existing_path(&link_path)?;
+            }
+            create_dir_symlink(&canonical_dir, &link_path)?;
         }
-        create_dir_symlink(&canonical_dir, &link_path)?;
         symlinks.push(link_path);
     }
 
@@ -177,6 +181,54 @@ mod tests {
     #[cfg(windows)]
     fn create_test_symlink(target: &Path, link: &Path) {
         std::os::windows::fs::symlink_dir(target, link).expect("create test symlink");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn global_install_keeps_the_skill_when_claude_skills_dir_links_to_the_shared_dir() {
+        let cwd = tempdir().expect("cwd tempdir");
+        let home = tempdir().expect("home tempdir");
+        let shared = home.path().join(".agents").join("skills");
+        std::fs::create_dir_all(&shared).expect("mkdir shared skills");
+        std::fs::create_dir_all(home.path().join(".claude")).expect("mkdir .claude");
+        create_test_symlink(&shared, &home.path().join(".claude").join("skills"));
+
+        let canonical = shared.join(SKILL_DIR_NAME);
+        let assert_skill_intact = || {
+            assert!(
+                std::fs::symlink_metadata(&canonical)
+                    .expect("canonical skill dir")
+                    .file_type()
+                    .is_dir(),
+                "the canonical skill dir must stay a real directory"
+            );
+            assert_eq!(
+                std::fs::read_to_string(canonical.join(SKILL_FILE_NAME)).expect("read SKILL.md"),
+                ROUTER_SKILL_MD
+            );
+        };
+
+        install_skill_with_dirs(
+            cwd.path(),
+            Some(home.path()),
+            None,
+            true,
+            SkillTarget::Claude,
+            false,
+        )
+        .expect("first install must not fail with EEXIST");
+        assert_skill_intact();
+
+        install_skill_with_dirs(
+            cwd.path(),
+            Some(home.path()),
+            None,
+            true,
+            SkillTarget::Claude,
+            true,
+        )
+        .expect("forced reinstall");
+        assert_skill_intact();
     }
 
     #[test]

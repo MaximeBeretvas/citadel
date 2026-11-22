@@ -98,6 +98,8 @@ pub fn normalize_version_str(raw: &str) -> &str {
 }
 
 /// Return `true` if `latest` is strictly newer than `current` according to SemVer (stripping leading `v`).
+///
+/// Uses SemVer precedence, which ignores build metadata: `0.3.0+build1` is not newer than `0.3.0`.
 pub fn is_newer_version(current: &str, latest: &str) -> bool {
     let Ok(cur) = semver::Version::parse(normalize_version_str(current)) else {
         return false;
@@ -105,7 +107,7 @@ pub fn is_newer_version(current: &str, latest: &str) -> bool {
     let Ok(lat) = semver::Version::parse(normalize_version_str(latest)) else {
         return false;
     };
-    lat > cur
+    lat.cmp_precedence(&cur) == std::cmp::Ordering::Greater
 }
 
 /// Read `<CITADEL_HOME>/update-check.json` synchronously (0 ms network cost) and evaluate TTL.
@@ -358,6 +360,14 @@ mod tests {
         assert!(!is_newer_version("0.1.0", "v0.1.0"));
         assert!(!is_newer_version("0.1.0", "0.0.9"));
         assert!(!is_newer_version("0.1.0", "not-a-semver"));
+    }
+
+    #[test]
+    fn build_metadata_does_not_make_a_release_newer() {
+        // SemVer precedence ignores build metadata: the same version must never look newer.
+        assert!(!is_newer_version("0.3.0", "v0.3.0+build1"));
+        assert!(!is_newer_version("0.3.0+build1", "0.3.0+build2"));
+        assert!(is_newer_version("0.3.0+build9", "0.3.1"));
     }
 
     #[test]

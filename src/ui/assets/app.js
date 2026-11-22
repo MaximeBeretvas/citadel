@@ -428,7 +428,13 @@
       input.placeholder = "docs.example.com/guide (include scheme)";
     }
     document.querySelectorAll("#add-source-dialog .web-only-field").forEach((node) => {
-      node.hidden = state.addSourceKind === "local";
+      const hide = state.addSourceKind === "local";
+      node.hidden = hide;
+      // A hidden control must not take part in form validation: the browser cannot show
+      // an error on a field it does not render, so the submit would silently do nothing.
+      node.querySelectorAll("input, select, textarea").forEach((input) => {
+        input.disabled = hide;
+      });
     });
   }
 

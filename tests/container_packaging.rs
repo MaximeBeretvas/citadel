@@ -138,6 +138,8 @@ fn makefile_uses_strictly_apple_container_cli() {
         "container run -d",
         "127.0.0.1:$(PORT):4317",
         "/sources/books:ro",
+        // Apple `container` creates no /.dockerenv, so `citadel update` relies on this.
+        "-e CITADEL_CONTAINER=1",
         "container stop",
         "container logs",
         "container exec",

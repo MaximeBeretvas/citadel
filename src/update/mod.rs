@@ -7,6 +7,7 @@ use std::time::Duration;
 use flate2::read::GzDecoder;
 
 use crate::config::VaultConfig;
+use crate::daemon::DaemonStatus;
 use crate::error::{Result, VaultError};
 use crate::ingest::normalize::sha256_hex;
 use crate::update::check::{
@@ -37,13 +38,25 @@ pub fn is_running_in_container() -> bool {
 
 /// Map the compile-time target OS and architecture to the GitHub Release target triple.
 pub fn target_triple() -> Result<&'static str> {
-    match (std::env::consts::OS, std::env::consts::ARCH) {
-        ("macos", "aarch64") => Ok("aarch64-apple-darwin"),
-        ("macos", "x86_64") => Ok("x86_64-apple-darwin"),
-        ("linux", "aarch64") => Ok("aarch64-unknown-linux-gnu"),
-        ("linux", "x86_64") => Ok("x86_64-unknown-linux-gnu"),
-        (os, arch) => Err(VaultError::Validation(format!(
-            "unsupported platform for prebuilt self-update: {os}/{arch}"
+    release_target_triple(
+        std::env::consts::OS,
+        std::env::consts::ARCH,
+        cfg!(target_env = "musl"),
+    )
+}
+
+/// Release target triple for a build on `os`/`arch` (`musl` when built for the musl libc).
+///
+/// Linux releases are glibc builds, so a musl build has no tarball it can run.
+fn release_target_triple(os: &str, arch: &str, musl: bool) -> Result<&'static str> {
+    match (os, arch, musl) {
+        ("macos", "aarch64", _) => Ok("aarch64-apple-darwin"),
+        ("macos", "x86_64", _) => Ok("x86_64-apple-darwin"),
+        ("linux", "aarch64", false) => Ok("aarch64-unknown-linux-gnu"),
+        ("linux", "x86_64", false) => Ok("x86_64-unknown-linux-gnu"),
+        (os, arch, musl) => Err(VaultError::Validation(format!(
+            "unsupported platform for prebuilt self-update: {os}/{arch}{}",
+            if musl { " (musl)" } else { "" }
         ))),
     }
 }
@@ -152,40 +165,44 @@ pub fn atomic_replace_binary(new_bin: &Path, current_bin: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Warning to show before replacing a binary built with Cargo features that release binaries lack.
+fn feature_loss_warning(built_with_chrome: bool) -> Option<&'static str> {
+    built_with_chrome.then_some(
+        "this citadel was built with the `chrome` feature, but release binaries are not: \
+         after the update, Sources added with --render-js fall back to a static HTTP crawl. \
+         To keep JavaScript rendering, reinstall from source with \
+         `cargo install --path . --locked --features chrome` instead.",
+    )
+}
+
+/// Time allowed to open a connection for an update request.
+const UPDATE_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Longest pause between received bytes before an update request counts as stalled.
+const UPDATE_READ_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// HTTP client for `citadel update` requests.
+///
+/// Uses a connect timeout and a read (inactivity) timeout rather than a total deadline:
+/// the release tarball is several MB, and a slow but steady link must still finish.
+fn update_http_client(user_agent: &str, read_timeout: Duration) -> Result<reqwest::Client> {
+    Ok(reqwest::Client::builder()
+        .connect_timeout(UPDATE_CONNECT_TIMEOUT)
+        .read_timeout(read_timeout)
+        .user_agent(user_agent)
+        .build()?)
+}
+
 /// Execute `citadel update`.
 pub async fn run_update<W: Write>(opts: UpdateOpts, out: &mut W) -> Result<()> {
     let current = normalize_version_str(&opts.current_version).to_string();
     let in_container = opts.force_container.unwrap_or_else(is_running_in_container);
 
     if in_container {
-        let (cached, _) = read_cached_status(
-            &opts.config.update_check_path(),
-            &current,
-            current_unix_secs(),
-        );
-        writeln!(out, "Running inside a container (citadel v{current}).")?;
-        if let Some(latest) = cached.latest_version {
-            if cached.update_available {
-                writeln!(out, "Latest known release: v{latest}")?;
-            }
-        }
-        writeln!(
-            out,
-            "Self-updating in place is disabled inside containers. Rebuild and recreate with Apple `container`:"
-        )?;
-        writeln!(out, "  container build --pull -t citadel:latest .")?;
-        writeln!(out, "  container stop citadel && container rm citadel")?;
-        writeln!(
-            out,
-            "  container run -d --name citadel -p 127.0.0.1:4317:4317 -e CITADEL_HOME=/data -v citadel-data:/data citadel:latest"
-        )?;
-        return Ok(());
+        return print_container_upgrade_guidance(&opts, &current, out).await;
     }
 
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(30))
-        .user_agent(format!("citadel/{current}"))
-        .build()?;
+    let client = update_http_client(&format!("citadel/{current}"), UPDATE_READ_TIMEOUT)?;
 
     let (release, latest) = fetch_release(&client, &opts.releases_api_url).await?;
     let _ = write_cache_atomic(
@@ -205,6 +222,10 @@ pub async fn run_update<W: Write>(opts: UpdateOpts, out: &mut W) -> Result<()> {
             release.html_url
         )?;
         return Ok(());
+    }
+
+    if let Some(warning) = feature_loss_warning(cfg!(feature = "chrome")) {
+        writeln!(out, "Warning: {warning}")?;
     }
 
     let is_tty = opts
@@ -294,13 +315,12 @@ pub async fn run_update<W: Write>(opts: UpdateOpts, out: &mut W) -> Result<()> {
     writeln!(out, "Updated citadel from v{current} to v{latest}.")?;
 
     // Restart running native daemon if active.
-    if matches!(
-        crate::daemon::daemon_status(&opts.config),
-        Ok(crate::daemon::DaemonStatus::Running(_))
-    ) {
+    if let Ok(DaemonStatus::Running(old_pid)) = crate::daemon::daemon_status(&opts.config) {
         restart_daemon_after_update(
             out,
+            old_pid,
             || crate::daemon::stop_daemon(&opts.config),
+            || daemon_status_after_grace(&opts.config, DAEMON_RELAUNCH_GRACE),
             || crate::daemon::start_daemon_with_exe(&opts.config, &opts.current_exe),
         )?;
     }
@@ -308,29 +328,168 @@ pub async fn run_update<W: Write>(opts: UpdateOpts, out: &mut W) -> Result<()> {
     Ok(())
 }
 
-/// Stop the running daemon and start it on the new binary, reporting the outcome to `out`.
+/// How long container mode waits for the release server (container DNS is often unreliable)
+/// before falling back to the cached release.
+const CONTAINER_RELEASE_CHECK_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// The newest release known inside a container.
+struct KnownRelease {
+    /// SemVer version, without the leading `v`.
+    version: String,
+    /// Git tag to check out to build this release.
+    tag: String,
+    /// Comes from a live check or a fresh cache, not from a stale cache.
+    confirmed: bool,
+}
+
+/// Latest release for container mode: a short live check, else the cached one.
+async fn latest_release_for_container(opts: &UpdateOpts, current: &str) -> Option<KnownRelease> {
+    let live_check = async {
+        let client = update_http_client(&format!("citadel/{current}"), UPDATE_READ_TIMEOUT)?;
+        fetch_release(&client, &opts.releases_api_url).await
+    };
+    if let Ok(Ok((release, latest))) =
+        tokio::time::timeout(CONTAINER_RELEASE_CHECK_TIMEOUT, live_check).await
+    {
+        let _ = write_cache_atomic(
+            &opts.config.update_check_path(),
+            &UpdateCheckCache::now(latest.clone(), release.html_url),
+        );
+        return Some(KnownRelease {
+            version: latest,
+            tag: release.tag_name.trim().to_string(),
+            confirmed: true,
+        });
+    }
+
+    let (cached, is_stale) = read_cached_status(
+        &opts.config.update_check_path(),
+        current,
+        current_unix_secs(),
+    );
+    cached.latest_version.map(|version| KnownRelease {
+        tag: format!("v{version}"),
+        version,
+        confirmed: !is_stale,
+    })
+}
+
+/// Container mode never replaces the binary: report the latest release and how to rebuild
+/// the image from its source and recreate the container.
+async fn print_container_upgrade_guidance<W: Write>(
+    opts: &UpdateOpts,
+    current: &str,
+    out: &mut W,
+) -> Result<()> {
+    writeln!(out, "Running inside a container (citadel v{current}).")?;
+    let known = latest_release_for_container(opts, current).await;
+    let newer = known
+        .as_ref()
+        .filter(|release| is_newer_version(current, &release.version));
+    match &known {
+        Some(release) if release.confirmed && newer.is_none() => {
+            writeln!(out, "citadel v{current} is already up to date")?;
+            return Ok(());
+        }
+        Some(release) if release.confirmed => {
+            writeln!(out, "Latest release: v{}", release.version)?;
+        }
+        Some(release) => writeln!(
+            out,
+            "Latest known release: v{} (could not check for a newer one)",
+            release.version
+        )?,
+        None => writeln!(
+            out,
+            "Latest release: unknown (could not check the release server)"
+        )?,
+    }
+    let checkout_tag = newer.map_or("<latest release tag>", |release| release.tag.as_str());
+
+    writeln!(
+        out,
+        "Self-updating in place is disabled inside containers. To upgrade, check out the release \
+         in your Citadel source checkout on the host, then rebuild and recreate the container \
+         with Apple `container`:"
+    )?;
+    writeln!(out, "  git fetch --tags && git checkout {checkout_tag}")?;
+    writeln!(out, "  container build --pull -t citadel:latest .")?;
+    writeln!(out, "  container stop citadel && container rm citadel")?;
+    writeln!(
+        out,
+        "  container run -d --name citadel -p 127.0.0.1:4317:4317 -e CITADEL_HOME=/data \
+         -e CITADEL_CONTAINER=1 -v citadel-data:/data citadel:latest"
+    )?;
+    writeln!(
+        out,
+        "Add any other options the container was started with (such as `--dns 1.1.1.1` or \
+         `-v <folder>:/sources/books:ro`), or replace the `container` commands with \
+         `make build && make run`, passing the same FEATURES and BOOKS_DIR."
+    )?;
+    Ok(())
+}
+
+/// How long a stopped daemon is given to be relaunched by its service manager (launchd's
+/// `KeepAlive`) before `citadel update` starts the new binary itself.
+const DAEMON_RELAUNCH_GRACE: Duration = Duration::from_secs(1);
+
+/// The daemon status as soon as a daemon holds the lock, or once `grace` has passed.
+fn daemon_status_after_grace(config: &VaultConfig, grace: Duration) -> Result<DaemonStatus> {
+    let deadline = std::time::Instant::now() + grace;
+    loop {
+        let status = crate::daemon::daemon_status(config)?;
+        if matches!(status, DaemonStatus::Running(_)) || std::time::Instant::now() >= deadline {
+            return Ok(status);
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
+/// Stop the running daemon (`old_pid`) and start it on the new binary, reporting the outcome to `out`.
 ///
-/// If the old daemon does not stop, no start is attempted (it would only fail with
-/// "already running"); the user is told why and how to restart it by hand.
+/// Who holds the daemon lock after the stop decides the next step. Nobody: start the new
+/// binary. Another pid: a service manager already relaunched the daemon, and a second one
+/// would only fight it for the lock. Still `old_pid`: the old daemon has not exited (a
+/// SIGTERMed daemon first finishes its in-flight Syncs), so nothing restarts it and the user
+/// is told how to start it once it has stopped.
 fn restart_daemon_after_update<W: Write>(
     out: &mut W,
+    old_pid: u32,
     stop: impl FnOnce() -> Result<Option<u32>>,
+    status_after_stop: impl FnOnce() -> Result<DaemonStatus>,
     start: impl FnOnce() -> Result<Option<u32>>,
 ) -> Result<()> {
-    if let Err(err) = stop() {
-        writeln!(
+    let stop_error = stop().err();
+    match status_after_stop() {
+        Ok(DaemonStatus::Running(pid)) if pid == old_pid => {
+            let reason = stop_error
+                .map(|err| format!(" ({err})"))
+                .unwrap_or_default();
+            writeln!(
+                out,
+                "Warning: the daemon has not stopped yet{reason}, so it was not restarted and \
+                 still runs the old version. A daemon finishing a Sync exits once the Sync is \
+                 done: when `citadel daemon status` reports it stopped, run \
+                 `citadel daemon start` (if it keeps running, run `citadel daemon stop` first)."
+            )?;
+        }
+        Ok(DaemonStatus::Running(pid)) => writeln!(
             out,
-            "Warning: the daemon did not stop ({err}); it is still running the old version. \
-             Restart it manually with `citadel daemon stop && citadel daemon start`."
-        )?;
-        return Ok(());
-    }
-    match start() {
-        Ok(Some(pid)) => writeln!(out, "Restarted citadel daemon (pid {pid}).")?,
-        Ok(None) => {}
+            "The daemon is already running again (pid {pid}), most likely relaunched by its \
+             service manager, so no second one was started."
+        )?,
+        Ok(DaemonStatus::Stopped | DaemonStatus::Stale) => match start() {
+            Ok(Some(pid)) => writeln!(out, "Restarted citadel daemon (pid {pid}).")?,
+            Ok(None) => {}
+            Err(err) => writeln!(
+                out,
+                "Warning: failed to restart daemon: {err}. Start it with `citadel daemon start`."
+            )?,
+        },
         Err(err) => writeln!(
             out,
-            "Warning: failed to restart daemon: {err}. Start it with `citadel daemon start`."
+            "Warning: could not check whether the daemon stopped ({err}), so it was not \
+             restarted. Run `citadel daemon status`, then `citadel daemon start` if it is stopped."
         )?,
     }
     Ok(())
@@ -358,6 +517,73 @@ mod tests {
         }
         let encoder = builder.into_inner().expect("finish tar");
         encoder.finish().expect("finish gzip")
+    }
+
+    /// Serve one HTTP response whose body arrives in `chunks`, each sent after `gap`.
+    async fn spawn_trickle_server(chunks: Vec<&'static [u8]>, gap: Duration) -> String {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind trickle server");
+        let addr = listener.local_addr().expect("local addr");
+        tokio::spawn(async move {
+            let (mut sock, _) = listener.accept().await.expect("accept");
+            let mut request = [0u8; 4096];
+            let _ = sock.read(&mut request).await;
+            let len: usize = chunks.iter().map(|chunk| chunk.len()).sum();
+            let head =
+                format!("HTTP/1.1 200 OK\r\nContent-Length: {len}\r\nConnection: close\r\n\r\n");
+            sock.write_all(head.as_bytes()).await.expect("write head");
+            for chunk in chunks {
+                tokio::time::sleep(gap).await;
+                sock.write_all(chunk).await.expect("write chunk");
+            }
+        });
+        format!("http://{addr}/citadel.tar.gz")
+    }
+
+    #[tokio::test]
+    async fn update_client_lets_a_slow_but_steady_download_finish() {
+        // Every pause (300 ms) is under the 500 ms timeout, but the whole body takes about
+        // 900 ms: a total deadline would abort a download that keeps making progress.
+        let url = spawn_trickle_server(vec![b"ab", b"cd", b"ef"], Duration::from_millis(300)).await;
+        let client =
+            update_http_client("citadel-test", Duration::from_millis(500)).expect("build client");
+        let body = client
+            .get(&url)
+            .send()
+            .await
+            .expect("send")
+            .bytes()
+            .await
+            .expect("a slow download that keeps making progress must finish");
+        assert_eq!(&body[..], b"abcdef");
+    }
+
+    #[test]
+    fn updating_a_chrome_build_warns_that_js_rendering_is_lost() {
+        assert_eq!(feature_loss_warning(false), None);
+        let warning = feature_loss_warning(true).expect("a chrome build must be warned");
+        assert!(warning.contains("--render-js"), "{warning}");
+        assert!(warning.contains("--features chrome"), "{warning}");
+    }
+
+    #[test]
+    fn musl_builds_have_no_release_tarball() {
+        assert_eq!(
+            release_target_triple("linux", "x86_64", false).expect("gnu x86_64"),
+            "x86_64-unknown-linux-gnu"
+        );
+        assert_eq!(
+            release_target_triple("macos", "aarch64", false).expect("apple silicon"),
+            "aarch64-apple-darwin"
+        );
+        // Releases only ship glibc Linux binaries, which do not run on a musl host.
+        for arch in ["x86_64", "aarch64"] {
+            let err = release_target_triple("linux", arch, true)
+                .expect_err("a musl build must not download the glibc tarball");
+            assert!(matches!(err, VaultError::Validation(_)), "{err}");
+        }
     }
 
     #[test]
@@ -508,13 +734,18 @@ mod tests {
         assert_eq!(leftovers, vec![std::ffi::OsString::from("citadel")]);
     }
 
+    const STOP_TIMEOUT: &str =
+        "sent SIGTERM to daemon (pid 7), but it did not exit within 5 seconds";
+
     #[test]
-    fn daemon_restart_skips_start_and_explains_when_stop_fails() {
+    fn daemon_restart_explains_a_daemon_still_finishing_a_sync() {
         let mut out = Vec::new();
         let mut started = false;
         restart_daemon_after_update(
             &mut out,
-            || Err(VaultError::Other("did not exit within 5 seconds".into())),
+            7,
+            || Err(VaultError::Other(STOP_TIMEOUT.into())),
+            || Ok(DaemonStatus::Running(7)),
             || {
                 started = true;
                 Ok(Some(42))
@@ -526,23 +757,100 @@ mod tests {
             !started,
             "must not try to start while the old daemon is still running"
         );
-        assert!(text.contains("did not exit within 5 seconds"), "{text}");
+        assert!(text.contains(STOP_TIMEOUT), "{text}");
+        assert!(text.contains("has not stopped yet"), "{text}");
         assert!(
-            text.contains("citadel daemon stop && citadel daemon start"),
+            text.contains("`citadel daemon status`") && text.contains("`citadel daemon start`"),
             "{text}"
+        );
+        assert!(
+            !text.contains("citadel daemon stop && citadel daemon start"),
+            "a second stop times out the same way while the Sync runs: {text}"
         );
     }
 
     #[test]
-    fn daemon_restart_reports_new_pid_after_clean_stop() {
-        let mut out = Vec::new();
-        restart_daemon_after_update(&mut out, || Ok(Some(7)), || Ok(Some(42)))
+    fn daemon_restart_leaves_a_daemon_relaunched_by_its_service_manager_alone() {
+        // launchd (`KeepAlive`) relaunches the job as soon as the old daemon exits, whether or
+        // not the stop poll saw the gap in between.
+        for stop_result in [Ok(Some(7)), Err(VaultError::Other(STOP_TIMEOUT.into()))] {
+            let mut out = Vec::new();
+            let mut started = false;
+            restart_daemon_after_update(
+                &mut out,
+                7,
+                move || stop_result,
+                || Ok(DaemonStatus::Running(99)),
+                || {
+                    started = true;
+                    Ok(Some(42))
+                },
+            )
             .expect("restart reporting succeeds");
-        let text = String::from_utf8(out).expect("utf8");
+            let text = String::from_utf8(out).expect("utf8");
+            assert!(
+                !started,
+                "a second daemon would fight the relaunched one for the lock"
+            );
+            assert!(text.contains("already running again (pid 99)"), "{text}");
+            assert!(!text.contains("Warning"), "{text}");
+        }
+    }
+
+    #[test]
+    fn daemon_restart_starts_the_new_binary_once_the_old_daemon_is_gone() {
+        // A clean stop, and a stop that timed out just before the daemon exited.
+        for (stop_result, status) in [
+            (Ok(Some(7)), DaemonStatus::Stopped),
+            (
+                Err(VaultError::Other(STOP_TIMEOUT.into())),
+                DaemonStatus::Stale,
+            ),
+        ] {
+            let mut out = Vec::new();
+            restart_daemon_after_update(
+                &mut out,
+                7,
+                move || stop_result,
+                move || Ok(status),
+                || Ok(Some(42)),
+            )
+            .expect("restart reporting succeeds");
+            let text = String::from_utf8(out).expect("utf8");
+            assert_eq!(text, "Restarted citadel daemon (pid 42).\n");
+        }
+    }
+
+    #[test]
+    fn status_after_grace_sees_a_daemon_relaunched_during_the_grace_period() {
+        let dir = tempdir().expect("tempdir");
+        let config = VaultConfig::new(dir.path());
+        let pid_path = config.pid_path();
+        let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+        let relauncher = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(150));
+            // Retry in case a status probe holds the lock for an instant.
+            let mut lock = None;
+            for _ in 0..50 {
+                if let Ok(acquired) = crate::daemon::PidLock::acquire(&pid_path) {
+                    lock = Some(acquired);
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            assert!(lock.is_some(), "relaunched daemon takes the lock");
+            let _ = release_rx.recv();
+        });
+
+        let polling_since = std::time::Instant::now();
+        let status = daemon_status_after_grace(&config, Duration::from_secs(10)).expect("status");
+        assert_eq!(status, DaemonStatus::Running(std::process::id()));
         assert!(
-            text.contains("Restarted citadel daemon (pid 42)."),
-            "{text}"
+            polling_since.elapsed() < Duration::from_secs(5),
+            "returns as soon as the relaunched daemon holds the lock"
         );
+        release_tx.send(()).expect("release the lock");
+        relauncher.join().expect("relauncher thread");
     }
 
     #[tokio::test]
@@ -581,6 +889,120 @@ mod tests {
             std::fs::read(&fake_bin).expect("read fake bin"),
             b"container-binary"
         );
+    }
+
+    /// Serve only the release JSON for `tag` at `/releases/latest`.
+    async fn spawn_release_json_server(
+        tag: &'static str,
+    ) -> (std::net::SocketAddr, tokio::task::JoinHandle<()>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind listener");
+        let addr = listener.local_addr().expect("local addr");
+        let app = axum::Router::new().route(
+            "/releases/latest",
+            axum::routing::get(move || async move {
+                axum::Json(serde_json::json!({
+                    "tag_name": tag,
+                    "html_url": format!("https://github.com/mberetvas/citadel/releases/tag/{tag}"),
+                    "assets": []
+                }))
+            }),
+        );
+        let server = tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        (addr, server)
+    }
+
+    /// Run `citadel update --yes` for v0.1.0 in container mode and return what it printed,
+    /// checking that the binary was left untouched.
+    async fn container_update_output(data_dir: &Path, api_url: &str) -> String {
+        let fake_bin = data_dir.join("citadel");
+        std::fs::write(&fake_bin, b"container-binary").expect("write fake bin");
+        let mut out = Vec::new();
+        run_update(
+            UpdateOpts {
+                config: VaultConfig::new(data_dir),
+                check_only: false,
+                yes: true,
+                current_version: "0.1.0".to_string(),
+                current_exe: fake_bin.clone(),
+                releases_api_url: api_url.to_string(),
+                force_container: Some(true),
+                stdin_is_tty: Some(false),
+            },
+            &mut out,
+        )
+        .await
+        .expect("container mode should exit cleanly");
+        assert_eq!(
+            std::fs::read(&fake_bin).expect("read fake bin"),
+            b"container-binary"
+        );
+        String::from_utf8(out).expect("utf-8 output")
+    }
+
+    #[tokio::test]
+    async fn container_mode_names_the_release_to_build() {
+        let (addr, server) = spawn_release_json_server("v0.2.0").await;
+        let dir = tempdir().expect("tempdir");
+        let text =
+            container_update_output(dir.path(), &format!("http://{addr}/releases/latest")).await;
+        server.abort();
+
+        assert!(text.contains("Latest release: v0.2.0"), "{text}");
+        assert!(
+            text.contains("git fetch --tags && git checkout v0.2.0"),
+            "the image must be rebuilt from the release source: {text}"
+        );
+        assert!(text.contains("-e CITADEL_CONTAINER=1"), "{text}");
+        assert!(text.contains("make build && make run"), "{text}");
+    }
+
+    #[tokio::test]
+    async fn container_mode_says_up_to_date_without_rebuild_steps() {
+        let (addr, server) = spawn_release_json_server("v0.1.0").await;
+        let dir = tempdir().expect("tempdir");
+        let text =
+            container_update_output(dir.path(), &format!("http://{addr}/releases/latest")).await;
+        server.abort();
+
+        assert!(
+            text.contains("citadel v0.1.0 is already up to date"),
+            "{text}"
+        );
+        assert!(!text.contains("container build"), "{text}");
+    }
+
+    #[tokio::test]
+    async fn container_mode_falls_back_to_a_fresh_cache_when_offline() {
+        let dir = tempdir().expect("tempdir");
+        write_cache_atomic(
+            &VaultConfig::new(dir.path()).update_check_path(),
+            &UpdateCheckCache::now("0.2.0".into(), "https://example.invalid/v0.2.0".into()),
+        )
+        .expect("seed fresh cache");
+        let text = container_update_output(dir.path(), "http://127.0.0.1:9/unused").await;
+
+        assert!(text.contains("v0.2.0"), "{text}");
+        assert!(text.contains("git checkout v0.2.0"), "{text}");
+    }
+
+    #[tokio::test]
+    async fn container_mode_does_not_claim_up_to_date_from_a_stale_cache() {
+        let dir = tempdir().expect("tempdir");
+        let stale = UpdateCheckCache {
+            checked_at: "2000-01-01T00:00:00Z".into(),
+            latest_version: "0.1.0".into(),
+            release_url: "https://example.invalid/v0.1.0".into(),
+        };
+        write_cache_atomic(&VaultConfig::new(dir.path()).update_check_path(), &stale)
+            .expect("seed stale cache");
+        let text = container_update_output(dir.path(), "http://127.0.0.1:9/unused").await;
+
+        assert!(!text.contains("already up to date"), "{text}");
+        assert!(text.contains("container build"), "{text}");
     }
 
     /// Serve a fake `v0.2.0` release whose archive holds `upgraded-v0.2.0-binary`.
