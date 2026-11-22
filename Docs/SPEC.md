@@ -435,7 +435,7 @@ The embedded static router `SKILL.md` (`src/skill/SKILL.md`) documents the SQLit
 4. **Safety:** Refuses to overwrite an existing `SKILL.md` unless `--force` is passed.
 
 ### Interactive Setup Wizard (`citadel setup`)
-Running `citadel setup` in an interactive TTY launches a guided `cliclack` wizard; passing flags (`--agent`, `--scope`, `--yes`) runs non-interactively for scripts/CI.
+Running `citadel setup` in an interactive TTY launches a guided `cliclack` wizard; passing any setup flag (`--agent`, `--scope`, `--transport`, `--only`, `--force`, `--yes`) runs non-interactively for scripts/CI.
 
 #### Wizard Flow
 1. **Select target agent(s)** (multi-select): **Claude Code (`claude`)**, **Antigravity (`agy`)**, **Codex (`codex`)**.

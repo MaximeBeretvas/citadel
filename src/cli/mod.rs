@@ -194,9 +194,9 @@ pub struct SetupArgs {
     #[arg(long, default_value = crate::setup::DEFAULT_HTTP_MCP_URL)]
     pub url: String,
 
-    /// Which components to install/configure.
-    #[arg(long, value_enum, default_value_t = SetupComponents::Both)]
-    pub only: SetupComponents,
+    /// Which components to install/configure (default: both).
+    #[arg(long, value_enum)]
+    pub only: Option<SetupComponents>,
 
     /// Overwrite existing Citadel skill files, symlinks, or MCP entries.
     #[arg(long)]
@@ -539,11 +539,11 @@ fn dispatch_command<W: Write>(
         Commands::Setup(args) => {
             let cwd = std::env::current_dir()?;
             let home = directories::BaseDirs::new().map(|d| d.home_dir().to_path_buf());
-            let is_interactive = !args.yes
-                && args.agents.is_empty()
-                && args.scope.is_none()
-                && std::io::stdin().is_terminal()
-                && std::io::stderr().is_terminal();
+            let is_interactive = setup_wants_wizard(
+                &args,
+                std::io::stdin().is_terminal(),
+                std::io::stderr().is_terminal(),
+            );
 
             if is_interactive {
                 block_on(crate::setup::run_interactive_wizard(
@@ -575,7 +575,7 @@ fn dispatch_command<W: Write>(
                     home,
                     agents: args.agents,
                     scope,
-                    components: args.only,
+                    components: args.only.unwrap_or(SetupComponents::Both),
                     transport,
                     probe_url: args.url,
                     force: args.force,
@@ -612,6 +612,18 @@ fn dispatch_command<W: Write>(
             Ok(())
         }
     }
+}
+
+/// Open the `citadel setup` wizard only in a terminal and only when no setup choice was
+/// given as a flag; otherwise the wizard would silently replace the user's flags.
+fn setup_wants_wizard(args: &SetupArgs, stdin_is_tty: bool, stderr_is_tty: bool) -> bool {
+    let has_explicit_choice = args.yes
+        || args.force
+        || !args.agents.is_empty()
+        || args.scope.is_some()
+        || args.transport.is_some()
+        || args.only.is_some();
+    !has_explicit_choice && stdin_is_tty && stderr_is_tty
 }
 
 fn write_sync_summary<W: Write>(out: &mut W, sum: &SyncSummary) -> std::io::Result<()> {
@@ -981,11 +993,39 @@ mod tests {
                 assert_eq!(args.agents, vec![AgentKind::Claude, AgentKind::Agy]);
                 assert_eq!(args.scope, Some(SetupScope::Local));
                 assert_eq!(args.transport, Some(TransportArg::Stdio));
-                assert_eq!(args.only, SetupComponents::Both);
+                assert_eq!(args.only, None);
                 assert!(!args.force);
                 assert!(args.yes);
             }
             other => panic!("expected Setup command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn setup_opens_wizard_only_without_explicit_flags_in_a_terminal() {
+        let parse = |extra: &[&str]| {
+            let mut argv = vec!["citadel", "setup"];
+            argv.extend_from_slice(extra);
+            match Cli::try_parse_from(argv).expect("parse").command {
+                Commands::Setup(args) => args,
+                other => panic!("expected Setup command, got {other:?}"),
+            }
+        };
+
+        assert!(setup_wants_wizard(&parse(&[]), true, true));
+        assert!(!setup_wants_wizard(&parse(&[]), false, true));
+        for flags in [
+            &["--only", "mcp"][..],
+            &["--transport", "http"][..],
+            &["--force"][..],
+            &["--yes"][..],
+            &["--agent", "claude"][..],
+            &["--scope", "global"][..],
+        ] {
+            assert!(
+                !setup_wants_wizard(&parse(flags), true, true),
+                "{flags:?} must not be silently replaced by wizard answers"
+            );
         }
     }
 
