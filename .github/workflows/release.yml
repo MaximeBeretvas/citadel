@@ -1,0 +1,57 @@
+name: Release
+
+on:
+  push:
+    # Plain vX.Y.Z only: a pre-release tag (v1.0.0-rc.1) would become Latest and reach every `citadel update`.
+    tags: ['v[0-9]+.[0-9]+.[0-9]+']
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - { target: aarch64-apple-darwin, os: macos-latest }
+          # Cross-compiled on the Apple Silicon runner; GitHub's Intel macOS runners are being retired.
+          - { target: x86_64-apple-darwin, os: macos-latest }
+          # Ubuntu 22.04 keeps the glibc floor at 2.35 so the binary runs on older distros.
+          - { target: x86_64-unknown-linux-gnu, os: ubuntu-22.04 }
+          - { target: aarch64-unknown-linux-gnu, os: ubuntu-22.04-arm }
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - name: Tag must match Cargo.toml version
+        run: |
+          v=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[0].version')
+          if [ "v$v" != "$GITHUB_REF_NAME" ]; then
+            echo "::error::tag $GITHUB_REF_NAME does not match Cargo.toml version v$v"
+            exit 1
+          fi
+      - run: cargo build --release --locked --target ${{ matrix.target }}
+      # `citadel update` expects citadel-vX.Y.Z-<target>.tar.gz with the binary at the archive root.
+      - run: tar czf "citadel-$GITHUB_REF_NAME-${{ matrix.target }}.tar.gz" -C target/${{ matrix.target }}/release citadel
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.target }}
+          path: '*.tar.gz'
+          if-no-files-found: error
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          merge-multiple: true
+      - run: sha256sum *.tar.gz > checksums.sha256
+      - run: gh release create "$GITHUB_REF_NAME" *.tar.gz checksums.sha256 --generate-notes --repo "$GITHUB_REPOSITORY"
+        env:
+          GH_TOKEN: ${{ github.token }}
