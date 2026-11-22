@@ -9,7 +9,7 @@
 ## 1. Architecture Overview
 
 **Citadel** is built as a **single native Rust binary** (`citadel`) backed by a local **SQLite (WAL mode) + FTS5** database.
-- **Default deployment (Apple `container`):** Runs `citadel serve` inside a minimal OCI Linux container managed by Apple's **`container`** CLI (`https://github.com/apple/container`, built from `Containerfile`/`Dockerfile`), combining the background scheduler/watcher, embedded Web UI (`/`), REST API (`/api/*`), and MCP Streamable HTTP endpoint (`/mcp`) in one low-resource process (~15–25 MB RAM).
+- **Default deployment (Apple `container`):** Runs `citadel serve` inside a minimal OCI Linux container managed by Apple's **`container`** CLI (`https://github.com/apple/container`, built from `Containerfile`/`Dockerfile`), combining the background scheduler/watcher, embedded Web UI (`/`), REST API (`/api/*`), and MCP Streamable HTTP endpoint (`/mcp`) in one low-resource process (`serve` and the container are not yet measured; the native macOS `daemon` uses ~5 MB idle with an empty vault, ~25–35 MB idle after Syncs, and up to ~120 MB briefly during a 500-page Sync; see [resource-usage.md](./resource-usage.md)).
 - **Native installation (macOS/Linux):** Install the same binary locally; `cli`, `mcp` (`stdio`), `ui`, and `daemon` share `vault.db` directly in WAL mode so `mcp` and `cli` work even when the daemon is stopped.
 
 ```mermaid
@@ -561,7 +561,7 @@ Uses Apple's native macOS OCI runtime (**`container`**, `https://github.com/appl
 | **Unit tests** | Frontmatter/noise stripping & SHA-256 stability; `pulldown-cmark` H1–H3 section splitting & breadcrumbs; unified diff generation; `skill install` path resolution & symlinks; `setup` JSON/TOML MCP config merging, Antigravity local plugin scaffolding, and `--force` overwrite guards; `update` semver comparison, `update-check.json` 24h TTL, and SHA-256 verification. |
 | **SQLite safety tests** | Verify MCP `query` rejects `INSERT`, `UPDATE`, `DELETE`, `DROP`, `ATTACH`, `PRAGMA`, multi-statements, and enforces timeout + row/byte caps. |
 | **Integration tests** | Local `wiremock`/Axum fixture site crawled via `spider` -> stored -> modified -> re-crawled (verifying `pages_updated`, `page_revisions`, and `stale` marking on removed URL); temp Markdown folder sync; end-to-end `citadel mcp` `stdio` JSON-RPC round-trip (verifying zero update-notice pollution on `stdout`); mock GitHub Release download/verify/swap test for `citadel update`. |
-| **Resource budget check** | Verify idle `citadel daemon` RSS stays under ~25 MB on a 1,000-page vault. |
+| **Resource budget check** | Verify idle `citadel daemon` RSS stays under ~25 MB on a 1,000-page vault. Last measurement and method: [resource-usage.md](./resource-usage.md) (reached ~25 MB RSS only ~10 min after a Sync). |
 
 ---
 
