@@ -9,7 +9,7 @@ use crate::db::open_rw_db;
 use crate::error::{Result, VaultError};
 use crate::ui::build_serve_router;
 
-/// Default bind address for `web-vault serve`.
+/// Default bind address for `citadel serve`.
 pub const DEFAULT_SERVE_BIND: &str = "0.0.0.0:4317";
 
 /// Bind a TCP listener on `bind_addr` and return both the listener and its resolved local address.
@@ -72,7 +72,7 @@ pub async fn run_serve(
         bind = %actual_addr,
         ui = %format!("http://{actual_addr}/"),
         mcp = %format!("http://{actual_addr}/mcp"),
-        "web-vault serve listening"
+        "citadel serve listening"
     );
     run_serve_with_listener(config, listener, cancel).await
 }
@@ -84,7 +84,7 @@ pub async fn run_serve_until_signal(config: VaultConfig, bind_addr: &str) -> Res
 
     let signal_task = tokio::spawn(async move {
         daemon::wait_for_shutdown_signal().await;
-        tracing::info!("shutdown signal received; stopping web-vault serve");
+        tracing::info!("shutdown signal received; stopping citadel serve");
         signal_cancel.cancel();
     });
 

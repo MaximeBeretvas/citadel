@@ -4,11 +4,11 @@ use crate::config::VaultConfig;
 use crate::error::{Result, VaultError};
 
 /// macOS `launchd` LaunchAgent label.
-pub const LAUNCHD_LABEL: &str = "com.webvault.daemon";
+pub const LAUNCHD_LABEL: &str = "com.citadel.daemon";
 /// Linux `systemd --user` service unit filename.
-pub const SYSTEMD_SERVICE_NAME: &str = "web-vault.service";
+pub const SYSTEMD_SERVICE_NAME: &str = "citadel.service";
 
-/// Generate an Apple `launchd` XML plist running `web-vault daemon start --foreground`.
+/// Generate an Apple `launchd` XML plist running `citadel daemon start --foreground`.
 pub fn generate_launchd_plist(bin_path: &Path, data_dir: &Path) -> String {
     let bin_escaped = xml_escape(&bin_path.to_string_lossy());
     let data_dir_escaped = xml_escape(&data_dir.to_string_lossy());
@@ -30,7 +30,7 @@ pub fn generate_launchd_plist(bin_path: &Path, data_dir: &Path) -> String {
     </array>
     <key>EnvironmentVariables</key>
     <dict>
-        <key>WEB_VAULT_HOME</key>
+        <key>CITADEL_HOME</key>
         <string>{data_dir_escaped}</string>
     </dict>
     <key>KeepAlive</key>
@@ -47,7 +47,7 @@ pub fn generate_launchd_plist(bin_path: &Path, data_dir: &Path) -> String {
     )
 }
 
-/// Generate a Linux `systemd --user` `.service` unit running `web-vault daemon start --foreground`.
+/// Generate a Linux `systemd --user` `.service` unit running `citadel daemon start --foreground`.
 pub fn generate_systemd_unit(bin_path: &Path, data_dir: &Path) -> String {
     let bin_str = bin_path.to_string_lossy();
     let exec_bin = if bin_str.contains(char::is_whitespace) || bin_str.contains('"') {
@@ -59,13 +59,13 @@ pub fn generate_systemd_unit(bin_path: &Path, data_dir: &Path) -> String {
 
     format!(
         "[Unit]\n\
-         Description=web-vault background sync daemon\n\
+         Description=citadel background sync daemon\n\
          After=network-online.target\n\
          \n\
          [Service]\n\
          Type=simple\n\
          ExecStart={exec_bin} daemon start --foreground\n\
-         Environment=\"WEB_VAULT_HOME={env_dir}\"\n\
+         Environment=\"CITADEL_HOME={env_dir}\"\n\
          Restart=on-failure\n\
          RestartSec=5\n\
          \n\
@@ -245,18 +245,18 @@ mod tests {
 
     #[test]
     fn generates_valid_launchd_plist_and_systemd_unit() {
-        let bin = Path::new("/usr/local/bin/web-vault");
-        let data_dir = Path::new("/Users/alice/Library/Application Support/web-vault");
+        let bin = Path::new("/usr/local/bin/citadel");
+        let data_dir = Path::new("/Users/alice/Library/Application Support/citadel");
 
         let plist = generate_launchd_plist(bin, data_dir);
         assert!(plist.starts_with("<?xml version=\"1.0\" encoding=\"UTF-8\"?>"));
         assert!(plist.contains("<plist version=\"1.0\">"));
         assert!(plist.contains(&format!("<string>{LAUNCHD_LABEL}</string>")));
-        assert!(plist.contains("<string>/usr/local/bin/web-vault</string>"));
+        assert!(plist.contains("<string>/usr/local/bin/citadel</string>"));
         assert!(plist.contains("<string>daemon</string>"));
         assert!(plist.contains("<string>start</string>"));
         assert!(plist.contains("<string>--foreground</string>"));
-        assert!(plist.contains("<key>WEB_VAULT_HOME</key>"));
+        assert!(plist.contains("<key>CITADEL_HOME</key>"));
         assert!(plist.contains(&format!("<string>{}</string>", data_dir.display())));
         assert!(plist.contains("<key>KeepAlive</key>\n    <true/>"));
         assert!(plist.contains("<key>RunAtLoad</key>\n    <true/>"));
@@ -265,8 +265,8 @@ mod tests {
         let unit = generate_systemd_unit(bin, data_dir);
         assert!(unit.contains("[Unit]"));
         assert!(unit.contains("[Service]"));
-        assert!(unit.contains("ExecStart=/usr/local/bin/web-vault daemon start --foreground"));
-        assert!(unit.contains("WEB_VAULT_HOME=/Users/alice/Library/Application Support/web-vault"));
+        assert!(unit.contains("ExecStart=/usr/local/bin/citadel daemon start --foreground"));
+        assert!(unit.contains("CITADEL_HOME=/Users/alice/Library/Application Support/citadel"));
         assert!(unit.contains("Restart=on-failure"));
         assert!(unit.contains("[Install]"));
         assert!(unit.contains("WantedBy=default.target"));
@@ -274,11 +274,11 @@ mod tests {
 
     #[test]
     fn launchd_plist_escapes_xml_special_characters() {
-        let bin = Path::new("/opt/a&b/<vault>/web-vault");
+        let bin = Path::new("/opt/a&b/<vault>/citadel");
         let data_dir = Path::new("/tmp/data&'dir\"");
 
         let plist = generate_launchd_plist(bin, data_dir);
-        assert!(plist.contains("/opt/a&amp;b/&lt;vault&gt;/web-vault"));
+        assert!(plist.contains("/opt/a&amp;b/&lt;vault&gt;/citadel"));
         assert!(plist.contains("/tmp/data&amp;&apos;dir&quot;"));
     }
 }

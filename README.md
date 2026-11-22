@@ -1,6 +1,6 @@
-# web-vault
+# Citadel
 
-Local knowledge vault and MCP server for web documentation sites and local Markdown folders. `web-vault` crawls documentation sites, watches local Markdown directories, indexes content into SQLite + FTS5 with section splitting and unified diff history, and serves an offline embedded Web UI alongside a 2-tool MCP interface.
+Local knowledge vault and MCP server for web documentation sites and local Markdown folders. `citadel` crawls documentation sites, watches local Markdown directories, indexes content into SQLite + FTS5 with section splitting and unified diff history, and serves an offline embedded Web UI alongside a 2-tool MCP interface.
 
 ## Key Features
 
@@ -47,51 +47,51 @@ cargo install --path .
 
 # Register and start the background scheduler & local folder watcher
 # (launchd on macOS, systemd --user on Linux)
-web-vault daemon install
+citadel daemon install
 ```
 
 ## MCP Client Configuration
 
-`web-vault` exposes two MCP tools:
+`citadel` exposes two MCP tools:
 
 - **`query`**: Execute a single read-only SQLite/FTS5 `SELECT` statement against the vault (`v_sources`, `pages`, `sections`, `pages_fts`, `sections_fts`, `v_recent_changes`) with `SQLITE_OPEN_READ_ONLY`, `PRAGMA query_only = ON`, authorizer allowlist, 5-second timeout, and row/byte caps.
-- **`manage`**: Register, inspect, sync, or remove sources (`add`, `list`, `show`, `sync`, `rm`) with directory canonicalization on local paths. Every entry point (CLI, UI, MCP) refuses Private origins (loopback, private network, link-local, `localhost`); set `WEB_VAULT_ALLOW_PRIVATE_ORIGINS=1` to index intranet or `localhost` docs.
+- **`manage`**: Register, inspect, sync, or remove sources (`add`, `list`, `show`, `sync`, `rm`) with directory canonicalization on local paths. Every entry point (CLI, UI, MCP) refuses Private origins (loopback, private network, link-local, `localhost`); set `CITADEL_ALLOW_PRIVATE_ORIGINS=1` to index intranet or `localhost` docs.
 
-### Streamable HTTP (Recommended with `web-vault serve` or Apple `container`)
+### Streamable HTTP (Recommended with `citadel serve` or Apple `container`)
 
 Point Claude, Antigravity, or any Streamable HTTP MCP client to:
 
 ```json
 {
   "mcpServers": {
-    "web-vault": {
+    "citadel": {
       "url": "http://127.0.0.1:4317/mcp"
     }
   }
 }
 ```
 
-### Native `stdio` (`web-vault mcp`)
+### Native `stdio` (`citadel mcp`)
 
 ```json
 {
   "mcpServers": {
-    "web-vault": {
-      "command": "web-vault",
+    "citadel": {
+      "command": "citadel",
       "args": ["mcp"]
     }
   }
 }
 ```
 
-### Apple `container` `stdio` (`container exec -i web-vault web-vault mcp`)
+### Apple `container` `stdio` (`container exec -i citadel citadel mcp`)
 
 ```json
 {
   "mcpServers": {
-    "web-vault": {
+    "citadel": {
       "command": "container",
-      "args": ["exec", "-i", "web-vault", "web-vault", "mcp"]
+      "args": ["exec", "-i", "citadel", "citadel", "mcp"]
     }
   }
 }
@@ -102,27 +102,27 @@ Point Claude, Antigravity, or any Streamable HTTP MCP client to:
 Install the embedded `SKILL.md` router so coding agents know the vault schema, FTS5 recipes, and `query`/`manage` workflows:
 
 ```bash
-# Install into the current repository (.agents/skills/web-vault/SKILL.md)
-web-vault skill install
+# Install into the current repository (.agents/skills/citadel/SKILL.md)
+citadel skill install
 
 # Install globally for user agent skill directories (Claude, Antigravity, Codex, etc.)
-web-vault skill install --global
+citadel skill install --global
 
 # Install into a custom skills parent directory
-web-vault skill install --path /path/to/skills
+citadel skill install --path /path/to/skills
 ```
 
 ## Core CLI Commands
 
 | Command | Description |
 |---|---|
-| `web-vault add <URL_OR_PATH> [--name SLUG]` | Register and sync a documentation URL or local Markdown directory. |
-| `web-vault list [--json]` | List configured sources, page counts, and health status. |
-| `web-vault show <NAME>` | Inspect source details, recent sync runs, and stale/error pages. |
-| `web-vault sync [NAME \| --all] [--prune]` | Manually sync one or all sources (optionally pruning stale pages). |
-| `web-vault rm <NAME> [--yes]` | Remove a source and cascade-delete its indexed pages. |
-| `web-vault query "<SQL>" [--limit N] [--format table\|json\|csv]` | Run a read-only SQLite/FTS5 query against the vault. |
-| `web-vault ui [--port 4317] [--no-open]` | Launch the embedded local Web UI server on `127.0.0.1`. |
-| `web-vault serve [--bind 0.0.0.0:4317]` | Run the all-in-one server (daemon + Web UI + MCP Streamable HTTP on `/mcp`). |
-| `web-vault daemon <start\|stop\|status\|install\|uninstall>` | Manage the background scheduler/watcher and OS service registration. |
-| `web-vault skill install [--global \| --path DIR]` | Install the embedded agent router `SKILL.md`. |
+| `citadel add <URL_OR_PATH> [--name SLUG]` | Register and sync a documentation URL or local Markdown directory. |
+| `citadel list [--json]` | List configured sources, page counts, and health status. |
+| `citadel show <NAME>` | Inspect source details, recent sync runs, and stale/error pages. |
+| `citadel sync [NAME \| --all] [--prune]` | Manually sync one or all sources (optionally pruning stale pages). |
+| `citadel rm <NAME> [--yes]` | Remove a source and cascade-delete its indexed pages. |
+| `citadel query "<SQL>" [--limit N] [--format table\|json\|csv]` | Run a read-only SQLite/FTS5 query against the vault. |
+| `citadel ui [--port 4317] [--no-open]` | Launch the embedded local Web UI server on `127.0.0.1`. |
+| `citadel serve [--bind 0.0.0.0:4317]` | Run the all-in-one server (daemon + Web UI + MCP Streamable HTTP on `/mcp`). |
+| `citadel daemon <start\|stop\|status\|install\|uninstall>` | Manage the background scheduler/watcher and OS service registration. |
+| `citadel skill install [--global \| --path DIR]` | Install the embedded agent router `SKILL.md`. |

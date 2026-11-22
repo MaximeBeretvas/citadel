@@ -17,7 +17,7 @@ use crate::config::VaultConfig;
 use crate::db::open_rw_db;
 use crate::error::{Result, VaultError};
 
-/// Default localhost port for `web-vault ui`.
+/// Default localhost port for `citadel ui`.
 pub const DEFAULT_UI_PORT: u16 = 4317;
 
 /// Compile-time embedded offline Web UI assets (`index.html`, `style.css`, `app.js`).
@@ -36,7 +36,7 @@ pub fn build_router(config: VaultConfig) -> Router {
     build_ui_routes(config).layer(middleware::from_fn(origin_host_guard))
 }
 
-/// Build the unified `web-vault serve` router combining the embedded Web UI (`/`),
+/// Build the unified `citadel serve` router combining the embedded Web UI (`/`),
 /// REST API (`/api/*`), and MCP Streamable HTTP endpoint (`/mcp`).
 pub fn build_serve_router(config: VaultConfig) -> Router {
     build_ui_routes(config.clone())
@@ -118,7 +118,7 @@ pub async fn run_ui_server(config: VaultConfig, port: Option<u16>, no_open: bool
     let actual_port = listener.local_addr()?.port();
     let url = format!("http://127.0.0.1:{actual_port}");
 
-    println!("web-vault UI listening on {url}");
+    println!("citadel UI listening on {url}");
     tracing::info!(%url, "started local web UI server");
 
     if !no_open {
@@ -331,7 +331,7 @@ mod tests {
 
         std::fs::write(
             docs_dir.path().join("guide.md"),
-            "# Vault Guide\n\n## Intro\n\nWelcome to web-vault local search.\n\n## Details\n\nFTS5 indexes sections.\n",
+            "# Vault Guide\n\n## Intro\n\nWelcome to citadel local search.\n\n## Details\n\nFTS5 indexes sections.\n",
         )
         .expect("write guide.md");
 
@@ -463,7 +463,7 @@ mod tests {
         // Modify file and sync to produce a revision diff
         std::fs::write(
             docs_dir.path().join("guide.md"),
-            "# Vault Guide\n\n## Intro\n\nWelcome to web-vault local search.\n\n## Details\n\nFTS5 indexes sections and diffs.\n",
+            "# Vault Guide\n\n## Intro\n\nWelcome to citadel local search.\n\n## Details\n\nFTS5 indexes sections and diffs.\n",
         )
         .expect("update guide.md");
         crate::sources::SourceLifecycle::new(config.clone())

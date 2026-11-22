@@ -26,7 +26,7 @@ const DEFAULT_CONCURRENCY: usize = 4;
 const DEFAULT_CRAWL_DELAY_MS: u64 = 100;
 const SEED_FETCH_TIMEOUT_SECS: u64 = 10;
 const MAX_CHILD_SITEMAPS: usize = 10;
-const NO_CHROME_WARNING: &str = "render_js is enabled, but web-vault was built without `--features chrome`; fell back to static HTTP crawl";
+const NO_CHROME_WARNING: &str = "render_js is enabled, but citadel was built without `--features chrome`; fell back to static HTTP crawl";
 
 const STATIC_ASSET_EXTENSIONS: &[&str] = &[
     "png", "jpg", "jpeg", "gif", "webp", "svg", "ico", "bmp", "tiff", "avif", "css", "js", "mjs",
@@ -364,7 +364,7 @@ fn configure_website(seed: &Url, scope: &WebScope, max_pages: u32, max_depth: u3
         .with_redirect_policy(redirect_policy)
         .with_whitelist_url(Some(scope.whitelist_regexes()))
         .with_blacklist_url(Some(scope.blacklist_regexes()))
-        .with_user_agent(Some("web-vault/0.1"));
+        .with_user_agent(Some("citadel/0.1"));
 
     website
 }
@@ -656,7 +656,7 @@ fn build_seed_http_client(origin: &Url) -> std::result::Result<reqwest::Client, 
 
     reqwest::Client::builder()
         .timeout(Duration::from_secs(SEED_FETCH_TIMEOUT_SECS))
-        .user_agent("web-vault/0.1")
+        .user_agent("citadel/0.1")
         .redirect(policy)
         .build()
 }

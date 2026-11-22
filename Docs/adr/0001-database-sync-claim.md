@@ -1,6 +1,6 @@
 # Sync claims live in the database, not in process memory
 
-The CLI, `web-vault mcp` (stdio) and `serve`/`daemon` run as separate processes against one vault, so an in-memory lock (the scheduler's old in-flight set) cannot stop two of them syncing the same Source at once. A Sync claim is therefore a row in a dedicated `sync_claims` table (primary key `source_id`, holder `pid`, holder `instance_token`, `claimed_at`): inserting the row takes the claim, deleting it releases it. Each process generates a random instance token at startup. A claim may be taken over when its holder pid is not running, when the pid is our own but the token is not ours (a previous run of this process reused the pid), or when it is older than a hard age limit.
+The CLI, `citadel mcp` (stdio) and `serve`/`daemon` run as separate processes against one vault, so an in-memory lock (the scheduler's old in-flight set) cannot stop two of them syncing the same Source at once. A Sync claim is therefore a row in a dedicated `sync_claims` table (primary key `source_id`, holder `pid`, holder `instance_token`, `claimed_at`): inserting the row takes the claim, deleting it releases it. Each process generates a random instance token at startup. A claim may be taken over when its holder pid is not running, when the pid is our own but the token is not ours (a previous run of this process reused the pid), or when it is older than a hard age limit.
 
 ## Considered Options
 

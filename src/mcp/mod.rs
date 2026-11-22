@@ -187,7 +187,7 @@ pub fn run_stdio_with_io<R: BufRead, W: Write>(
     Ok(())
 }
 
-/// Run the `web-vault mcp` `stdio` server reading `stdin` and emitting JSON-RPC frames strictly to `stdout`.
+/// Run the `citadel mcp` `stdio` server reading `stdin` and emitting JSON-RPC frames strictly to `stdout`.
 pub fn run_stdio_server(config: &VaultConfig) -> Result<()> {
     let stdin = std::io::stdin();
     let stdout = std::io::stdout();
@@ -222,7 +222,7 @@ fn handle_initialize(req_id: Value, params: &Value) -> Value {
                 "tools": {}
             },
             "serverInfo": {
-                "name": "web-vault",
+                "name": "citadel",
                 "version": env!("CARGO_PKG_VERSION")
             }
         }),
@@ -553,7 +553,7 @@ mod tests {
         assert_eq!(init_resp["jsonrpc"], "2.0");
         assert_eq!(init_resp["id"], 1);
         assert_eq!(init_resp["result"]["protocolVersion"], "2024-11-05");
-        assert_eq!(init_resp["result"]["serverInfo"]["name"], "web-vault");
+        assert_eq!(init_resp["result"]["serverInfo"]["name"], "citadel");
         assert!(init_resp["result"]["capabilities"]["tools"].is_object());
 
         let notif_resp = handle_jsonrpc_value(

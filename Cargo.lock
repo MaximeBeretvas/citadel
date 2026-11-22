@@ -466,6 +466,40 @@ dependencies = [
 ]
 
 [[package]]
+name = "citadel"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "axum",
+ "clap",
+ "directories",
+ "glob",
+ "http-body-util",
+ "mime_guess",
+ "notify",
+ "notify-debouncer-mini",
+ "open",
+ "pulldown-cmark",
+ "reqwest 0.12.28",
+ "rusqlite",
+ "rust-embed",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "similar",
+ "spider",
+ "spider_transformations",
+ "tempfile",
+ "thiserror 2.0.21",
+ "tokio",
+ "tokio-util",
+ "tower",
+ "tracing",
+ "tracing-subscriber",
+ "url",
+]
+
+[[package]]
 name = "clap"
 version = "4.6.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4064,40 +4098,6 @@ checksum = "5a6580f308b1fad9207618087a65c04e7a10bc77e02c8e84e9b00dd4b12fa0bb"
 dependencies = [
  "js-sys",
  "wasm-bindgen",
-]
-
-[[package]]
-name = "web-vault"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "axum",
- "clap",
- "directories",
- "glob",
- "http-body-util",
- "mime_guess",
- "notify",
- "notify-debouncer-mini",
- "open",
- "pulldown-cmark",
- "reqwest 0.12.28",
- "rusqlite",
- "rust-embed",
- "serde",
- "serde_json",
- "sha2 0.10.9",
- "similar",
- "spider",
- "spider_transformations",
- "tempfile",
- "thiserror 2.0.21",
- "tokio",
- "tokio-util",
- "tower",
- "tracing",
- "tracing-subscriber",
- "url",
 ]
 
 [[package]]

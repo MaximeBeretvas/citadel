@@ -1,4 +1,4 @@
-# web-vault
+# Citadel
 
 A local vault that ingests documentation websites and Markdown folders into a searchable store that agents and people can query.
 

@@ -4,10 +4,10 @@ use clap::ValueEnum;
 
 use crate::error::{Result, VaultError};
 
-const SKILL_DIR_NAME: &str = "web-vault";
+const SKILL_DIR_NAME: &str = "citadel";
 const SKILL_FILE_NAME: &str = "SKILL.md";
 
-/// Embedded static router skill explaining how LLMs should query and manage `web-vault`.
+/// Embedded static router skill explaining how LLMs should query and manage `citadel`.
 pub const ROUTER_SKILL_MD: &str = include_str!("SKILL.md");
 
 /// Target agent skill directories when installing globally (`--global`).
@@ -212,7 +212,7 @@ mod tests {
             install_skill_with_dirs(cwd.path(), None, None, false, SkillTarget::All, false)
                 .expect("default install should succeed");
 
-        let expected = cwd.path().join(".agents/skills/web-vault/SKILL.md");
+        let expected = cwd.path().join(".agents/skills/citadel/SKILL.md");
         assert_eq!(report.canonical_path, expected);
         assert!(report.symlinks.is_empty());
         assert_eq!(
@@ -237,7 +237,7 @@ mod tests {
         )
         .expect("custom path install should succeed");
 
-        let expected = target_parent.join("web-vault/SKILL.md");
+        let expected = target_parent.join("citadel/SKILL.md");
         assert_eq!(report.canonical_path, expected);
         assert!(report.symlinks.is_empty());
         assert_eq!(
@@ -261,9 +261,9 @@ mod tests {
         )
         .expect("global install should succeed");
 
-        let canonical_dir = home.path().join(".agents/skills/web-vault");
+        let canonical_dir = home.path().join(".agents/skills/citadel");
         let canonical_file = canonical_dir.join("SKILL.md");
-        let claude_link = home.path().join(".claude/skills/web-vault");
+        let claude_link = home.path().join(".claude/skills/citadel");
 
         assert_eq!(report.canonical_path, canonical_file);
         assert_eq!(report.symlinks, vec![claude_link.clone()]);
@@ -317,7 +317,7 @@ mod tests {
         let other_target = tempdir().expect("other target tempdir");
         let claude_skills = home.path().join(".claude/skills");
         std::fs::create_dir_all(&claude_skills).expect("create .claude/skills");
-        let claude_link = claude_skills.join("web-vault");
+        let claude_link = claude_skills.join("citadel");
         create_test_symlink(other_target.path(), &claude_link);
 
         let link_err = install_skill_with_dirs(
@@ -338,10 +338,7 @@ mod tests {
             other_target.path()
         );
         assert!(
-            !home
-                .path()
-                .join(".agents/skills/web-vault/SKILL.md")
-                .exists(),
+            !home.path().join(".agents/skills/citadel/SKILL.md").exists(),
             "failed pre-check should not partially write canonical SKILL.md"
         );
 
@@ -354,7 +351,7 @@ mod tests {
             true,
         )
         .expect("--force should replace existing symlink");
-        let expected_canonical_dir = home.path().join(".agents/skills/web-vault");
+        let expected_canonical_dir = home.path().join(".agents/skills/citadel");
         assert_eq!(
             link_forced.canonical_path,
             expected_canonical_dir.join("SKILL.md")
@@ -415,9 +412,9 @@ mod tests {
         assert_eq!(
             all_report.symlinks,
             vec![
-                home.path().join(".claude/skills/web-vault"),
-                home.path().join(".copilot/skills/web-vault"),
-                home.path().join(".config/opencode/skills/web-vault"),
+                home.path().join(".claude/skills/citadel"),
+                home.path().join(".copilot/skills/citadel"),
+                home.path().join(".config/opencode/skills/citadel"),
             ]
         );
         for link in &all_report.symlinks {

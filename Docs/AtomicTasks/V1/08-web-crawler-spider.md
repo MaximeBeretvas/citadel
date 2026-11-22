@@ -21,7 +21,7 @@ Implement `src/ingest/web.rs` using **`spider` + `spider_transformations`** (MIT
 ## Acceptance Criteria
 - Respects `max_pages`, `max_depth`, `include_patterns`, `exclude_patterns`, `respect_robots_txt(true)`, and bounded concurrency (default 4, 100 ms delay).
 - Never silently deletes pages that disappear or fail on re-crawl (`stale` / `error` status).
-- Works with both `web-vault add <url>` CLI and MCP `manage(action="add", origin="<url>")` (keeping SSRF guard active for MCP, with test hook for local fixture server).
+- Works with both `citadel add <url>` CLI and MCP `manage(action="add", origin="<url>")` (keeping SSRF guard active for MCP, with test hook for local fixture server).
 
 ## Checks Gate
 ```bash

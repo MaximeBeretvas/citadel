@@ -1,6 +1,6 @@
 use thiserror::Error;
 
-/// Shared library error type for `web-vault`.
+/// Shared library error type for `citadel`.
 #[derive(Debug, Error)]
 pub enum VaultError {
     #[error("configuration error: {0}")]

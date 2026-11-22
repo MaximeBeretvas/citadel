@@ -1,4 +1,4 @@
-# Atomic Tasks — V2: Source lifecycle module (`web-vault`)
+# Atomic Tasks — V2: Source lifecycle module (`citadel`)
 
 > **Stage:** `HumanAudit -> Telemetry -> iterate -> [AtomicTasks (V2)] -> LLMCode`
 > **Context:** [CONTEXT.md](../../../CONTEXT.md) | [ADR-0001](../../adr/0001-database-sync-claim.md) | [Docs/SPEC.md](../../SPEC.md) | [AGENTS.md](../../../AGENTS.md)
@@ -18,7 +18,7 @@ V2 deepens this into one **Source lifecycle module** (`src/sources/`) that every
 
 - **Interface:** async-only `SourceLifecycle` with `add`, `update`, `remove`, `sync`, `sync_all`, and `claim` → `ClaimedSync::run`. `sync` returns `SyncOutcome::{Synced, AlreadySyncing}`. `remove` returns `Removal::{Removed, AlreadySyncing}`. `sync_all` returns one result per Source.
 - **Out of scope:** reads (`list_sources`, `show_source`) are left for a later read-model task.
-- **Origin policy:** the Private-origin check runs inside the module, on `add` and at the start of every Sync. `WEB_VAULT_ALLOW_PRIVATE_ORIGINS=1` (exposed as a `VaultConfig` field) allows Private origins. The crawler's redirect check is kept. DNS-resolution checks are out of scope.
+- **Origin policy:** the Private-origin check runs inside the module, on `add` and at the start of every Sync. `CITADEL_ALLOW_PRIVATE_ORIGINS=1` (exposed as a `VaultConfig` field) allows Private origins. The crawler's redirect check is kept. DNS-resolution checks are out of scope.
 - **Sync claim ([ADR-0001](../../adr/0001-database-sync-claim.md)):**
   - Storage: a `sync_claims(source_id PK, pid, instance_token, claimed_at)` table.
   - Takeover: a claim may be taken over when its holder pid is dead, when the pid is ours but the per-process token is not (pid reuse, e.g. pid 1 in the container), or when the claim is older than a hard age limit.
@@ -33,7 +33,7 @@ V2 deepens this into one **Source lifecycle module** (`src/sources/`) that every
 
 - **DNS-based Private origins:** the Private-origin rule checks the URL host text only. A public name that resolves to a private address (e.g. `169.254.169.254.nip.io`) passes on `add`, on Sync and in the redirect guard, as do NAT64 (`64:ff9b::/96`) and 6to4 (`2002::/16`) literals embedding private IPv4. Fix: resolve the host, check every resolved IP, pin it in the HTTP client, and add the embedded-IPv4 checks.
 - **Sync claims across pid namespaces:** see [ADR-0001](../../adr/0001-database-sync-claim.md) consequences.
-- **Upgrading vaults with private-origin Sources:** the generated launchd/systemd units and `make run` do not pass `WEB_VAULT_ALLOW_PRIVATE_ORIGINS` through; such Sources fail every Sync (once per refresh interval) until the daemon sees the flag.
+- **Upgrading vaults with private-origin Sources:** the generated launchd/systemd units and `make run` do not pass `CITADEL_ALLOW_PRIVATE_ORIGINS` through; such Sources fail every Sync (once per refresh interval) until the daemon sees the flag.
 
 ## Dependency DAG
 

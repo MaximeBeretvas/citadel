@@ -1,11 +1,11 @@
 ---
-name: web-vault
-description: Query and manage local documentation and Markdown books/notes in web-vault via its query and manage MCP tools. Use when grounding answers in external library or framework docs, searching indexed local Markdown folders, checking available vault sources or recent doc changes and staleness, or adding, syncing, updating, and removing documentation sources.
+name: citadel
+description: Query and manage local documentation and Markdown books/notes in Citadel via its query and manage MCP tools. Use when grounding answers in external library or framework docs, searching indexed local Markdown folders, checking available vault sources or recent doc changes and staleness, or adding, syncing, updating, and removing documentation sources.
 ---
 
-# web-vault Grounding Skill
+# Citadel Grounding Skill
 
-Prefer verified content from the local `web-vault` MCP server (`query` and `manage` tools) over memory whenever external docs or indexed local Markdown books/notes are relevant.
+Prefer verified content from the local `citadel` MCP server (`query` and `manage` tools) over memory whenever external docs or indexed local Markdown books/notes are relevant.
 
 ## SQLite Schema Summary
 

@@ -44,20 +44,20 @@ fn dockerfile_meets_multi_stage_non_root_spec() {
         "Dockerfile must clean apt lists"
     );
     assert!(
-        df.contains("webvault"),
-        "Dockerfile must create non-root webvault user"
+        df.contains("citadel"),
+        "Dockerfile must create non-root citadel user"
     );
     assert!(
-        df.contains("USER webvault"),
-        "Dockerfile must switch to USER webvault"
+        df.contains("USER citadel"),
+        "Dockerfile must switch to USER citadel"
     );
     assert!(
-        df.contains("COPY --from=builder /app/target/release/web-vault /usr/local/bin/web-vault"),
-        "Dockerfile must copy compiled release binary into /usr/local/bin/web-vault"
+        df.contains("COPY --from=builder /app/target/release/citadel /usr/local/bin/citadel"),
+        "Dockerfile must copy compiled release binary into /usr/local/bin/citadel"
     );
     assert!(
-        df.contains("ENV WEB_VAULT_HOME=/data"),
-        "Dockerfile must set ENV WEB_VAULT_HOME=/data"
+        df.contains("ENV CITADEL_HOME=/data"),
+        "Dockerfile must set ENV CITADEL_HOME=/data"
     );
     assert!(
         df.contains("VOLUME [\"/data\"]"),
@@ -68,8 +68,8 @@ fn dockerfile_meets_multi_stage_non_root_spec() {
         "Dockerfile must expose port 4317"
     );
     assert!(
-        df.contains("ENTRYPOINT [\"web-vault\", \"serve\", \"--bind\", \"0.0.0.0:4317\"]"),
-        "Dockerfile must set ENTRYPOINT to web-vault serve --bind 0.0.0.0:4317"
+        df.contains("ENTRYPOINT [\"citadel\", \"serve\", \"--bind\", \"0.0.0.0:4317\"]"),
+        "Dockerfile must set ENTRYPOINT to citadel serve --bind 0.0.0.0:4317"
     );
 }
 
@@ -176,13 +176,13 @@ fn readme_documents_quickstart_native_mcp_and_skill() {
         "BOOKS_DIR=",
         "http://127.0.0.1:4317",
         "cargo install --path .",
-        "web-vault daemon install",
+        "citadel daemon install",
         "http://127.0.0.1:4317/mcp",
-        "web-vault mcp",
-        "container exec -i web-vault web-vault mcp",
+        "citadel mcp",
+        "container exec -i citadel citadel mcp",
         "`query`",
         "`manage`",
-        "web-vault skill install",
+        "citadel skill install",
         "--global",
         "--path",
     ] {
@@ -195,7 +195,7 @@ fn readme_documents_quickstart_native_mcp_and_skill() {
     for cmd in [
         "add", "list", "show", "sync", "rm", "query", "ui", "serve", "daemon", "skill",
     ] {
-        let pattern = format!("web-vault {cmd}");
+        let pattern = format!("citadel {cmd}");
         assert!(
             readme.contains(&pattern),
             "README.md must document CLI command: {pattern}"

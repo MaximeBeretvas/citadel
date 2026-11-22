@@ -22,8 +22,8 @@ Implement local Markdown folder ingestion (`src/ingest/local.rs` + `src/ingest/m
 
 ## Acceptance Criteria
 - Each page upsert + section rebuild + `page_revisions` upsert runs inside a single SQLite transaction.
-- `web-vault add <path>` auto-detects local directory vs `http(s)://` URL (web sync returns a clear "not yet implemented until Task 08" or registers with `--no-sync` until Task 08 lands).
-- `web-vault query "<sql>"` routes through `src/db/readonly.rs` and supports `--format table|json|csv`.
+- `citadel add <path>` auto-detects local directory vs `http(s)://` URL (web sync returns a clear "not yet implemented until Task 08" or registers with `--no-sync` until Task 08 lands).
+- `citadel query "<sql>"` routes through `src/db/readonly.rs` and supports `--format table|json|csv`.
 
 ## Checks Gate
 ```bash

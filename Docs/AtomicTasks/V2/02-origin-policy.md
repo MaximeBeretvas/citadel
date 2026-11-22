@@ -9,7 +9,7 @@ Enforce the Private-origin check (loopback, RFC1918, link-local, CGNAT, multicas
 
 ## Exact Files
 - `src/sources/origin.rs` (new): origin classification and the Private-origin rule, moved from `mcp/validate.rs` and `ingest::classify_origin`. One parse and one rule.
-- `src/config.rs`: add `allow_private_origins: bool`, read from `WEB_VAULT_ALLOW_PRIVATE_ORIGINS` (`1`/`true`). Default `false`.
+- `src/config.rs`: add `allow_private_origins: bool`, read from `CITADEL_ALLOW_PRIVATE_ORIGINS` (`1`/`true`). Default `false`.
 - `src/sources/mod.rs`: apply the check on `add` and at the start of every Sync (rejects Private origins stored before this change).
 - `src/mcp/validate.rs`:
   - Delete `validate_web_url` and the `validate_local_dir` pass-through.

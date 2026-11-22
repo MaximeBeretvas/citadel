@@ -46,7 +46,7 @@ async fn get_mcp(headers: HeaderMap) -> Response {
     (
         StatusCode::OK,
         Json(json!({
-            "name": "web-vault",
+            "name": "citadel",
             "version": env!("CARGO_PKG_VERSION"),
             "transport": "streamable-http",
             "endpoint": "/mcp"
@@ -115,7 +115,7 @@ mod tests {
         assert_eq!(init_json["jsonrpc"], "2.0");
         assert_eq!(init_json["id"], 1);
         assert_eq!(init_json["result"]["protocolVersion"], "2025-03-26");
-        assert_eq!(init_json["result"]["serverInfo"]["name"], "web-vault");
+        assert_eq!(init_json["result"]["serverInfo"]["name"], "citadel");
 
         // 2. notification -> 202 Accepted with empty body
         let notif_req = json!({
@@ -187,7 +187,7 @@ mod tests {
             .expect("GET /mcp response");
         assert_eq!(resp.status(), StatusCode::OK);
         let info = read_json(resp).await;
-        assert_eq!(info["name"], "web-vault");
+        assert_eq!(info["name"], "citadel");
         assert_eq!(info["transport"], "streamable-http");
         assert_eq!(info["endpoint"], "/mcp");
 

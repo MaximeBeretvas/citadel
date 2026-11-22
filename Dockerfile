@@ -15,7 +15,7 @@ RUN OFFLINE=""; \
     else \
         cargo build --release --locked $OFFLINE; \
     fi \
-    && strip /app/target/release/web-vault || true
+    && strip /app/target/release/citadel || true
 
 FROM debian:trixie-slim AS runtime
 
@@ -31,15 +31,15 @@ RUN case ",$FEATURES," in \
           && rm -rf /var/lib/apt/lists/* ;; \
     esac
 
-RUN useradd --system --create-home --home-dir /home/webvault --shell /usr/sbin/nologin webvault \
+RUN useradd --system --create-home --home-dir /home/citadel --shell /usr/sbin/nologin citadel \
     && mkdir -p /data /sources \
-    && chown -R webvault:webvault /data
+    && chown -R citadel:citadel /data
 
-COPY --from=builder /app/target/release/web-vault /usr/local/bin/web-vault
+COPY --from=builder /app/target/release/citadel /usr/local/bin/citadel
 
-USER webvault
-ENV WEB_VAULT_HOME=/data
+USER citadel
+ENV CITADEL_HOME=/data
 VOLUME ["/data"]
 EXPOSE 4317
 
-ENTRYPOINT ["web-vault", "serve", "--bind", "0.0.0.0:4317"]
+ENTRYPOINT ["citadel", "serve", "--bind", "0.0.0.0:4317"]

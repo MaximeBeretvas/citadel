@@ -7,17 +7,17 @@ use tempfile::tempdir;
 #[test]
 fn stdio_binary_emits_only_valid_jsonrpc_frames_with_debug_logs() {
     let vault_dir = tempdir().expect("vault tempdir");
-    let bin = env!("CARGO_BIN_EXE_web-vault");
+    let bin = env!("CARGO_BIN_EXE_citadel");
 
     let mut child = Command::new(bin)
         .arg("mcp")
-        .env("WEB_VAULT_HOME", vault_dir.path())
+        .env("CITADEL_HOME", vault_dir.path())
         .env("RUST_LOG", "debug")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .expect("spawn web-vault mcp");
+        .expect("spawn citadel mcp");
 
     {
         let stdin = child.stdin.as_mut().expect("stdin pipe");
@@ -34,10 +34,10 @@ fn stdio_binary_emits_only_valid_jsonrpc_frames_with_debug_logs() {
             .expect("write stdin");
     }
 
-    let output = child.wait_with_output().expect("wait for web-vault mcp");
+    let output = child.wait_with_output().expect("wait for citadel mcp");
     assert!(
         output.status.success(),
-        "web-vault mcp failed: {}",
+        "citadel mcp failed: {}",
         String::from_utf8_lossy(&output.stderr)
     );
 

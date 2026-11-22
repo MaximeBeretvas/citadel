@@ -13,10 +13,10 @@ use crate::sources::{AddSourceParams, Removal, SourceLifecycle, SourceSyncResult
 
 /// Local knowledge vault & MCP server for documentation sites and Markdown folders.
 #[derive(Debug, Parser)]
-#[command(name = "web-vault", version, about)]
+#[command(name = "citadel", version, about)]
 pub struct Cli {
-    /// Override the vault data directory (also respects WEB_VAULT_HOME).
-    #[arg(long, global = true, value_name = "DIR", env = "WEB_VAULT_HOME")]
+    /// Override the vault data directory (also respects CITADEL_HOME).
+    #[arg(long, global = true, value_name = "DIR", env = "CITADEL_HOME")]
     pub data_dir: Option<PathBuf>,
 
     #[command(subcommand)]
@@ -121,8 +121,8 @@ pub enum Commands {
 
     /// Run the all-in-one server (daemon + Web UI + MCP Streamable HTTP on /mcp).
     Serve {
-        /// Socket address to bind (also respects WEB_VAULT_BIND).
-        #[arg(long, env = "WEB_VAULT_BIND", default_value = "0.0.0.0:4317")]
+        /// Socket address to bind (also respects CITADEL_BIND).
+        #[arg(long, env = "CITADEL_BIND", default_value = "0.0.0.0:4317")]
         bind: String,
     },
 
@@ -182,7 +182,7 @@ pub enum DaemonCommands {
 pub enum SkillCommands {
     /// Install the embedded SKILL.md router file.
     Install {
-        /// Target parent directory (installs into <dir>/web-vault/SKILL.md).
+        /// Target parent directory (installs into <dir>/citadel/SKILL.md).
         #[arg(long)]
         path: Option<PathBuf>,
 
@@ -379,7 +379,7 @@ pub fn run_cli_with_writer<W: Write>(cli: Cli, out: &mut W) -> anyhow::Result<()
                 if let Some(pid) = crate::daemon::start_daemon(&config, foreground)? {
                     writeln!(
                         out,
-                        "Started web-vault daemon (pid {pid}, log: {}).",
+                        "Started citadel daemon (pid {pid}, log: {}).",
                         config.log_path().display()
                     )?;
                 }
@@ -387,7 +387,7 @@ pub fn run_cli_with_writer<W: Write>(cli: Cli, out: &mut W) -> anyhow::Result<()
             }
             DaemonCommands::Stop => {
                 match crate::daemon::stop_daemon(&config)? {
-                    Some(pid) => writeln!(out, "Stopped web-vault daemon (pid {pid}).")?,
+                    Some(pid) => writeln!(out, "Stopped citadel daemon (pid {pid}).")?,
                     None => writeln!(out, "Daemon is not running.")?,
                 }
                 Ok(())
@@ -746,7 +746,7 @@ mod tests {
 
     fn run_args(vault_dir: &std::path::Path, args: &[&str]) -> anyhow::Result<String> {
         let vault_str = vault_dir.to_string_lossy().into_owned();
-        let mut argv = vec!["web-vault".to_string(), "--data-dir".to_string(), vault_str];
+        let mut argv = vec!["citadel".to_string(), "--data-dir".to_string(), vault_str];
         argv.extend(args.iter().map(|s| (*s).to_string()));
         let cli = Cli::try_parse_from(argv)?;
         let mut buf = Vec::new();
@@ -800,7 +800,7 @@ mod tests {
     fn cli_parse_smoke() {
         let cases: &[&[&str]] = &[
             &[
-                "web-vault",
+                "citadel",
                 "add",
                 "https://example.com/docs",
                 "--name",
@@ -820,13 +820,13 @@ mod tests {
                 "--render-js",
                 "--no-sync",
             ],
-            &["web-vault", "list", "--json"],
-            &["web-vault", "show", "example-docs"],
-            &["web-vault", "sync", "example-docs", "--prune"],
-            &["web-vault", "sync", "--all"],
-            &["web-vault", "rm", "example-docs", "--yes"],
+            &["citadel", "list", "--json"],
+            &["citadel", "show", "example-docs"],
+            &["citadel", "sync", "example-docs", "--prune"],
+            &["citadel", "sync", "--all"],
+            &["citadel", "rm", "example-docs", "--yes"],
             &[
-                "web-vault",
+                "citadel",
                 "query",
                 "SELECT name FROM v_sources",
                 "--limit",
@@ -834,24 +834,18 @@ mod tests {
                 "--format",
                 "json",
             ],
-            &["web-vault", "serve", "--bind", "0.0.0.0:4317"],
-            &["web-vault", "mcp"],
-            &["web-vault", "ui", "--port", "4317", "--no-open"],
-            &["web-vault", "daemon", "start", "--foreground"],
-            &["web-vault", "daemon", "stop"],
-            &["web-vault", "daemon", "status"],
-            &["web-vault", "daemon", "install"],
-            &["web-vault", "daemon", "uninstall"],
+            &["citadel", "serve", "--bind", "0.0.0.0:4317"],
+            &["citadel", "mcp"],
+            &["citadel", "ui", "--port", "4317", "--no-open"],
+            &["citadel", "daemon", "start", "--foreground"],
+            &["citadel", "daemon", "stop"],
+            &["citadel", "daemon", "status"],
+            &["citadel", "daemon", "install"],
+            &["citadel", "daemon", "uninstall"],
             &[
-                "web-vault",
-                "skill",
-                "install",
-                "--global",
-                "--target",
-                "claude",
-                "--force",
+                "citadel", "skill", "install", "--global", "--target", "claude", "--force",
             ],
-            &["web-vault", "skill", "install", "--path", "/tmp/skills"],
+            &["citadel", "skill", "install", "--path", "/tmp/skills"],
         ];
 
         for args in cases {
@@ -973,7 +967,7 @@ mod tests {
             &["skill", "install", "--path", &skills_str],
         )
         .expect("skill install --path should succeed");
-        let installed = skills_dir.path().join("web-vault/SKILL.md");
+        let installed = skills_dir.path().join("citadel/SKILL.md");
         assert!(out.contains(&installed.display().to_string()));
         assert_eq!(
             std::fs::read_to_string(&installed).expect("read installed skill"),

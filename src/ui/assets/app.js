@@ -2,7 +2,7 @@
   "use strict";
 
   const VALID_VIEWS = ["sources", "browser", "changes", "sql"];
-  const THEME_STORAGE_KEY = "web-vault-theme";
+  const THEME_STORAGE_KEY = "citadel-theme";
 
   const SQL_PRESETS = [
     {

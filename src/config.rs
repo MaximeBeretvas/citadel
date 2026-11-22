@@ -2,16 +2,16 @@ use std::path::PathBuf;
 
 use crate::error::{Result, VaultError};
 
-/// Resolved filesystem paths for a `web-vault` data directory.
+/// Resolved filesystem paths for a `citadel` data directory.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VaultConfig {
     pub data_dir: PathBuf,
-    /// Allow Sources whose Origin is a Private origin (`WEB_VAULT_ALLOW_PRIVATE_ORIGINS`).
+    /// Allow Sources whose Origin is a Private origin (`CITADEL_ALLOW_PRIVATE_ORIGINS`).
     pub allow_private_origins: bool,
 }
 
 /// Environment variable that allows Private origins when set to `1` or `true`.
-pub const ALLOW_PRIVATE_ORIGINS_ENV: &str = "WEB_VAULT_ALLOW_PRIVATE_ORIGINS";
+pub const ALLOW_PRIVATE_ORIGINS_ENV: &str = "CITADEL_ALLOW_PRIVATE_ORIGINS";
 
 impl VaultConfig {
     /// Construct a configuration pointing directly at `data_dir`.
@@ -28,16 +28,16 @@ impl VaultConfig {
         self
     }
 
-    /// Resolve configuration using `--data-dir` > `WEB_VAULT_HOME` > OS data dir.
+    /// Resolve configuration using `--data-dir` > `CITADEL_HOME` > OS data dir.
     pub fn resolve(explicit: Option<PathBuf>) -> Result<Self> {
-        let env_val = std::env::var("WEB_VAULT_HOME").ok();
+        let env_val = std::env::var("CITADEL_HOME").ok();
         let mut config = Self::resolve_with_env(explicit, env_val.as_deref())?;
         config.allow_private_origins =
             parse_flag(std::env::var(ALLOW_PRIVATE_ORIGINS_ENV).ok().as_deref());
         Ok(config)
     }
 
-    /// Resolve configuration with an explicit optional `WEB_VAULT_HOME` value.
+    /// Resolve configuration with an explicit optional `CITADEL_HOME` value.
     pub fn resolve_with_env(explicit: Option<PathBuf>, env_val: Option<&str>) -> Result<Self> {
         if let Some(dir) = explicit.filter(|p| !p.as_os_str().is_empty()) {
             return Ok(Self::new(dir));
@@ -48,9 +48,9 @@ impl VaultConfig {
         }
 
         let dirs =
-            directories::ProjectDirs::from("com", "webvault", "web-vault").ok_or_else(|| {
+            directories::ProjectDirs::from("com", "citadel", "citadel").ok_or_else(|| {
                 VaultError::Config(
-                    "could not determine OS data directory; pass --data-dir or set WEB_VAULT_HOME"
+                    "could not determine OS data directory; pass --data-dir or set CITADEL_HOME"
                         .to_string(),
                 )
             })?;
@@ -121,23 +121,17 @@ mod tests {
 
     #[test]
     fn derives_vault_db_and_pid_paths() {
-        let cfg = VaultConfig::resolve_with_env(Some(PathBuf::from("/var/lib/web-vault")), None)
+        let cfg = VaultConfig::resolve_with_env(Some(PathBuf::from("/var/lib/citadel")), None)
             .expect("config should resolve");
 
-        assert_eq!(cfg.db_path(), PathBuf::from("/var/lib/web-vault/vault.db"));
-        assert_eq!(
-            cfg.pid_path(),
-            PathBuf::from("/var/lib/web-vault/daemon.pid")
-        );
-        assert_eq!(
-            cfg.log_path(),
-            PathBuf::from("/var/lib/web-vault/daemon.log")
-        );
+        assert_eq!(cfg.db_path(), PathBuf::from("/var/lib/citadel/vault.db"));
+        assert_eq!(cfg.pid_path(), PathBuf::from("/var/lib/citadel/daemon.pid"));
+        assert_eq!(cfg.log_path(), PathBuf::from("/var/lib/citadel/daemon.log"));
     }
 
     #[test]
     fn falls_back_to_os_data_dir_when_overrides_absent_or_blank() {
-        if let Some(expected) = directories::ProjectDirs::from("com", "webvault", "web-vault") {
+        if let Some(expected) = directories::ProjectDirs::from("com", "citadel", "citadel") {
             let cfg = VaultConfig::resolve_with_env(None, Some("   "))
                 .expect("OS fallback should resolve");
             assert_eq!(cfg.data_dir, expected.data_dir());

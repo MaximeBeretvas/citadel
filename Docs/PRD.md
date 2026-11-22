@@ -1,8 +1,8 @@
-# PRD: web-vault
+# PRD: Citadel
 
 > **Status:** Draft v1  
 > **Stage:** `Idea -> [PRD] -> TechSpec (SPEC.md) -> AgentRules -> AtomicTasks -> Prototype -> LLMCode`  
-> **Scope note:** This document defines *what* **web-vault** does, *who* it serves, and *why*. Technical architecture, storage internals, crawling libraries, and UI implementation choices are intentionally deferred to `SPEC.md`.
+> **Scope note:** This document defines *what* **Citadel** does, *who* it serves, and *why*. Technical architecture, storage internals, crawling libraries, and UI implementation choices are intentionally deferred to `SPEC.md`.
 
 ---
 
@@ -14,7 +14,7 @@ Data and software engineers rely heavily on external documentation (APIs, framew
 - **Static, siloed knowledge:** Converted books and docs sit in disconnected Markdown folders or static skills that go out of date and require manual re-ingestion.
 - **Bloated MCP tool surfaces:** Existing MCP servers expose a separate tool for every narrow operation, wasting LLM context tokens and forcing multi-turn tool-call chains.
 
-**Vision:** **web-vault** is a local-first, ultra-lightweight knowledge daemon written in **Rust**. It collects documentation from the web and local Markdown folders, automatically keeps web sources fresh via diff-based background checks, exposes a **minimal composable MCP interface** so any LLM can ground its answers in one call, and provides a fast **CLI + lightweight UI** to manage everything.
+**Vision:** **Citadel** is a local-first, ultra-lightweight knowledge daemon written in **Rust**. It collects documentation from the web and local Markdown folders, automatically keeps web sources fresh via diff-based background checks, exposes a **minimal composable MCP interface** so any LLM can ground its answers in one call, and provides a fast **CLI + lightweight UI** to manage everything.
 
 ---
 
@@ -23,10 +23,10 @@ Data and software engineers rely heavily on external documentation (APIs, framew
 **Primary Persona:** Data & software engineers using MCP-compatible LLMs (Claude Code, Antigravity, Codex, etc.) in daily development.
 
 **Core Grounding Loop:**
-1. The engineer registers documentation URLs or local Markdown folders in **web-vault**.
-2. **web-vault** runs quietly in the background, storing content and periodically refreshing web sources when real content changes.
-3. The engineer installs the **web-vault** agent skill into a project or global agent directory via the CLI.
-4. When the engineer asks their LLM a question, the LLM recognizes that **web-vault** may hold authoritative docs, queries **web-vault** in a single composable MCP tool call, and grounds its response in the retrieved, up-to-date sources.
+1. The engineer registers documentation URLs or local Markdown folders in **Citadel**.
+2. **Citadel** runs quietly in the background, storing content and periodically refreshing web sources when real content changes.
+3. The engineer installs the **Citadel** agent skill into a project or global agent directory via the CLI.
+4. When the engineer asks their LLM a question, the LLM recognizes that **Citadel** may hold authoritative docs, queries **Citadel** in a single composable MCP tool call, and grounds its response in the retrieved, up-to-date sources.
 
 ---
 
@@ -36,14 +36,14 @@ Data and software engineers rely heavily on external documentation (APIs, framew
 - **Unified local knowledge base:** Treat crawled web documentation and local Markdown folders as first-class, uniformly queryable sources.
 - **Always-fresh web docs:** Automatically detect meaningful content changes on a schedule while surfacing removed, renamed, or failing pages.
 - **Minimal MCP footprint:** Provide as few MCP tools as possible—ideally **one composable query tool** (e.g., SQL-like) rather than one tool per function.
-- **Zero-friction agent onboarding:** Ship a built-in CLI command to install the **web-vault** skill into the current directory, a custom path, or global agent locations (`.claude`, `.agents`, etc.).
+- **Zero-friction agent onboarding:** Ship a built-in CLI command to install the **Citadel** skill into the current directory, a custom path, or global agent locations (`.claude`, `.agents`, etc.).
 - **Low-resource background operation:** Run continuously in the background with minimal CPU and RAM usage (Rust constraint).
 - **Fast human visibility:** Offer a lightweight UI launched from a single CLI command (`ui`) to browse, inspect, and manage stored knowledge.
 
 ### Non-Goals (v1)
 - Multi-user cloud hosting, team sync, or SaaS accounts (local-first only).
 - General-purpose web search across the open internet (only user-curated sources).
-- Automated LLM summarization or book-distillation pipelines (like `book-to-skill` / `cangjie-skill`); **web-vault** stores and serves faithful source content.
+- Automated LLM summarization or book-distillation pipelines (like `book-to-skill` / `cangjie-skill`); **Citadel** stores and serves faithful source content.
 - Authentication-heavy scraping behind paywalls or interactive login flows.
 
 ---
@@ -84,7 +84,7 @@ Data and software engineers rely heavily on external documentation (APIs, framew
 | **FR-4.1** | **Source management:** Commands to add (URL or folder), list, inspect, refresh, and remove sources. | Must |
 | **FR-4.2** | **Daemon & MCP control:** Commands to start/stop/check the background daemon and launch the MCP server endpoint. | Must |
 | **FR-4.3** | **Direct querying:** Ability to run the same composable query from the terminal for debugging or human use. | Should |
-| **FR-4.4** | **Skill installer:** A dedicated CLI command to install the **web-vault** agent skill (`SKILL.md`), supporting three target modes: (1) current working directory, (2) an explicit user-provided path via argument/flag, and (3) standard global agent locations (e.g., `~/.claude/skills`, `~/.agents/skills`, and similar cross-agent roots). | Must |
+| **FR-4.4** | **Skill installer:** A dedicated CLI command to install the **Citadel** agent skill (`SKILL.md`), supporting three target modes: (1) current working directory, (2) an explicit user-provided path via argument/flag, and (3) standard global agent locations (e.g., `~/.claude/skills`, `~/.agents/skills`, and similar cross-agent roots). | Must |
 | **FR-4.5** | **UI launcher:** A single `ui` CLI command that starts/opens the lightweight management UI. | Must |
 
 ### 4.5 Lightweight Management UI
@@ -111,10 +111,10 @@ Data and software engineers rely heavily on external documentation (APIs, framew
 
 ## 6. Key User Journeys
 
-1. **Add & Auto-Maintain Web Docs:** User runs CLI add command with `https://docs.example.com/` -> **web-vault** discovers sub-pages, stores clean content -> background daemon checks periodically and updates only changed pages, flagging any removed URLs.
-2. **Import Local Markdown Books/Docs:** User runs CLI add command pointing to `/path/to/markdown/book-folder` -> **web-vault** indexes all `.md` files -> book becomes queryable alongside web docs.
-3. **Install Skill & Ground an LLM:** User runs CLI skill install command (targeting `.`, `--path ...`, or global `.claude` / `.agents`) -> in a later LLM session, user asks a technical question -> LLM follows the skill, queries **web-vault** via its single MCP tool, and answers grounded in exact, fresh docs.
-4. **Manage Knowledge Visually:** User runs `web-vault ui` -> lightweight UI opens immediately -> user checks which doc sites updated recently, inspects a stale URL, adds a new doc source, and closes the UI while the daemon keeps running.
+1. **Add & Auto-Maintain Web Docs:** User runs CLI add command with `https://docs.example.com/` -> **Citadel** discovers sub-pages, stores clean content -> background daemon checks periodically and updates only changed pages, flagging any removed URLs.
+2. **Import Local Markdown Books/Docs:** User runs CLI add command pointing to `/path/to/markdown/book-folder` -> **Citadel** indexes all `.md` files -> book becomes queryable alongside web docs.
+3. **Install Skill & Ground an LLM:** User runs CLI skill install command (targeting `.`, `--path ...`, or global `.claude` / `.agents`) -> in a later LLM session, user asks a technical question -> LLM follows the skill, queries **Citadel** via its single MCP tool, and answers grounded in exact, fresh docs.
+4. **Manage Knowledge Visually:** User runs `citadel ui` -> lightweight UI opens immediately -> user checks which doc sites updated recently, inspects a stale URL, adds a new doc source, and closes the UI while the daemon keeps running.
 
 ---
 

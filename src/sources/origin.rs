@@ -260,6 +260,6 @@ mod tests {
         assert_eq!(kind, SourceKind::Local);
         assert!(Path::new(&canon).is_dir());
         assert!(classify_origin(&file_path.to_string_lossy()).is_err());
-        assert!(classify_origin("/nonexistent/path/web-vault-check").is_err());
+        assert!(classify_origin("/nonexistent/path/citadel-check").is_err());
     }
 }

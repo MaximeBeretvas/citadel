@@ -1,5 +1,5 @@
 [package]
-name = "web-vault"
+name = "citadel"
 version = "0.1.0"
 edition = "2021"
 description = "Local knowledge vault and MCP server for web documentation and Markdown folders"

@@ -12,7 +12,7 @@ Never claim a Rust invariant, MCP response, CLI flow, or UI layout works from re
 | Touched Area | Verification Loop | Required Tooling |
 |---|---|---|
 | Any Rust code (`src/**`) | Cargo Gate (`fmt`, `clippy`, `test`) | `cargo` |
-| SQLite / Read-Only (`src/db/**`) | Safety Suite + Live RO Probe | `cargo`, `web-vault query` |
+| SQLite / Read-Only (`src/db/**`) | Safety Suite + Live RO Probe | `cargo`, `citadel query` |
 | MCP (`src/mcp/**`) | `stdio` JSON-RPC Purity + `/mcp` HTTP Probe | `python3` / `jq`, `curl` |
 | Embedded Web UI (`src/ui/**`) | **Portable Headless Chrome Visual Loop** | Chrome / Chromium (`CHROME_BIN`), `curl` |
 | CLI & Skill (`src/cli/**`, `src/skill/**`) | Temp-Vault CLI & Symlink Smoke | `cargo run` |
@@ -41,7 +41,7 @@ cargo test db::readonly
 ### `stdio` Purity & Contract Probe
 Verify `stdout` emits **strictly valid JSON-RPC frames** even with verbose `RUST_LOG=debug` logging (all logs must land on `stderr`):
 ```bash
-WEB_VAULT_HOME=/tmp/wv-mcp-review RUST_LOG=debug cargo run --quiet -- mcp <<'EOF' \
+CITADEL_HOME=/tmp/wv-mcp-review RUST_LOG=debug cargo run --quiet -- mcp <<'EOF' \
   1>/tmp/wv-mcp-out.jsonl 2>/tmp/wv-mcp-err.log
 {"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"review","version":"0.1"}}}
 {"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}
@@ -60,7 +60,7 @@ print("MCP stdio OK:", tools)
 rm -rf /tmp/wv-mcp-review /tmp/wv-mcp-out.jsonl /tmp/wv-mcp-err.log
 ```
 
-### Streamable HTTP Probe (`web-vault serve`)
+### Streamable HTTP Probe (`citadel serve`)
 ```bash
 curl -sf -X POST http://127.0.0.1:4317/mcp \
   -H 'Content-Type: application/json' \
@@ -83,10 +83,10 @@ test -x "$CHROME" && echo "Chrome ready: $CHROME" || echo "CHROME_MISSING"
 Populate a throwaway vault (`/tmp/wv-ui-review`) with realistic data (at least 1 local source, pages, sections, and a diff/stale row when available), then start the server in the background:
 ```bash
 rm -rf /tmp/wv-ui-review && mkdir -p /tmp/wv-ui-review/sample-docs
-printf '# Sample Doc\n\n## Intro\nHello web-vault.\n\n## Details\nGrounded UI test.\n' > /tmp/wv-ui-review/sample-docs/guide.md
+printf '# Sample Doc\n\n## Intro\nHello citadel.\n\n## Details\nGrounded UI test.\n' > /tmp/wv-ui-review/sample-docs/guide.md
 
-WEB_VAULT_HOME=/tmp/wv-ui-review cargo run --quiet -- add /tmp/wv-ui-review/sample-docs --name sample-docs
-WEB_VAULT_HOME=/tmp/wv-ui-review cargo run --quiet -- ui --port 4317 --no-open >/tmp/wv-ui.log 2>&1 &
+CITADEL_HOME=/tmp/wv-ui-review cargo run --quiet -- add /tmp/wv-ui-review/sample-docs --name sample-docs
+CITADEL_HOME=/tmp/wv-ui-review cargo run --quiet -- ui --port 4317 --no-open >/tmp/wv-ui.log 2>&1 &
 UI_PID=$!
 sleep 1
 curl -sf http://127.0.0.1:4317/api/health
@@ -142,8 +142,8 @@ If Step 1 prints `CHROME_MISSING`, run `cargo test ui::` and `curl` checks again
 ## 4. CLI & Skill Installer Smoke Loop (`src/cli/**`, `src/skill/**`)
 
 ```bash
-WEB_VAULT_HOME=/tmp/wv-cli-review cargo run --quiet -- skill install --path /tmp/wv-cli-review/skills
-test -f /tmp/wv-cli-review/skills/web-vault/SKILL.md
+CITADEL_HOME=/tmp/wv-cli-review cargo run --quiet -- skill install --path /tmp/wv-cli-review/skills
+test -f /tmp/wv-cli-review/skills/citadel/SKILL.md
 rm -rf /tmp/wv-cli-review
 ```
 
@@ -152,7 +152,7 @@ rm -rf /tmp/wv-cli-review
 ## 5. Apple `container` Loop (`Dockerfile`, `Makefile`)
 
 ```bash
-container build -t web-vault:check .
+container build -t citadel:check .
 ```
 When testing runtime behavior, start a short-lived container on loopback (`127.0.0.1:4317:4317`), verify `curl -sf http://127.0.0.1:4317/api/health` and `POST /mcp`, then stop and remove the test container. If running on Linux/CI without Apple's `container` CLI, note `Container build: skipped (Apple container CLI unavailable)` in `HumanAudit`.
 

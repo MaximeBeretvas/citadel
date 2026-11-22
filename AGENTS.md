@@ -1,4 +1,4 @@
-# AGENTS.md — web-vault
+# AGENTS.md — Citadel
 
 ## Context Pointers
 Read the authoritative doc before acting on its branch; never duplicate its details here:
@@ -37,16 +37,16 @@ Follow `AtomicTasks -> LLMCode -> Checks -> HumanAudit` for every change:
    ```
    When `Dockerfile` changes, also verify using Apple's `container` CLI (never `docker`):
    ```bash
-   container build -t web-vault:check .
+   container build -t citadel:check .
    ```
    If any check fails, fix the root cause and re-run the full gate.
 4. **HumanAudit handoff:** Summarize changed files, exact command results, and any risks or assumptions; wait for human review before merging.
 
 ## Engineering Invariants
 - **Error handling:** Propagate errors with `Result`, `thiserror` (library modules), and `anyhow` (CLI/top-level); reserve `unwrap()` and `expect()` strictly for `#[cfg(test)]`.
-- **MCP `stdio` purity:** Send all `tracing` logs to `stderr` or `daemon.log`; keep `stdout` strictly reserved for JSON-RPC frames in `web-vault mcp`.
+- **MCP `stdio` purity:** Send all `tracing` logs to `stderr` or `daemon.log`; keep `stdout` strictly reserved for JSON-RPC frames in `citadel mcp`.
 - **SQLite read-only boundary:** Execute every MCP `query` through `src/db/readonly.rs` (`SQLITE_OPEN_READ_ONLY`, `PRAGMA query_only = ON`, authorizer allowlist, 5s timeout, row/byte caps). Re-run the read-only safety tests after any `src/db/` change.
-- **Source lifecycle validation:** Every entry point (CLI, UI, MCP, daemon) changes Sources only through `SourceLifecycle` in `src/sources/`, which enforces `http(s)://` URL checks, the Private-origin rule (loopback/RFC1918/link-local/CGNAT/local hostnames, refused unless `WEB_VAULT_ALLOW_PRIVATE_ORIGINS=1`) on `add` and before every web Sync, and directory canonicalization for local Markdown folders. Keep that rule only in `src/sources/origin.rs`; re-run `cargo test sources` after any `src/sources/`, `src/mcp/` or `src/ingest/` change.
+- **Source lifecycle validation:** Every entry point (CLI, UI, MCP, daemon) changes Sources only through `SourceLifecycle` in `src/sources/`, which enforces `http(s)://` URL checks, the Private-origin rule (loopback/RFC1918/link-local/CGNAT/local hostnames, refused unless `CITADEL_ALLOW_PRIVATE_ORIGINS=1`) on `add` and before every web Sync, and directory canonicalization for local Markdown folders. Keep that rule only in `src/sources/origin.rs`; re-run `cargo test sources` after any `src/sources/`, `src/mcp/` or `src/ingest/` change.
 - **FTS5 consistency:** Maintain `pages_fts` and `sections_fts` via SQLite triggers inside the same transaction as `pages`/`sections` writes. Keep `src/db/schema.sql` and `Docs/SPEC.md` in sync.
 - **Diff hygiene:** Normalize line endings and strip volatile frontmatter timestamps before SHA-256 hashing; mark missing/failing pages `stale`/`error` rather than silently deleting them.
 - **Zero-runtime footprint:** Keep the binary self-contained (`rusqlite` bundled, `rust-embed` offline UI assets, zero external CDNs, minimal idle RAM in `serve`/`daemon`).

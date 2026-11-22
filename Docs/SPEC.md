@@ -1,4 +1,4 @@
-# Technical Specification: web-vault
+# Technical Specification: Citadel
 
 > **Status:** Draft v1  
 > **Stage:** `Idea -> PRD -> [TechSpec (SPEC.md)] -> AgentRules -> AtomicTasks -> Prototype -> LLMCode`  
@@ -8,8 +8,8 @@
 
 ## 1. Architecture Overview
 
-**web-vault** is built as a **single native Rust binary** (`web-vault`) backed by a local **SQLite (WAL mode) + FTS5** database.
-- **Default deployment (Apple `container`):** Runs `web-vault serve` inside a minimal OCI Linux container managed by Apple's **`container`** CLI (`https://github.com/apple/container`, built from `Containerfile`/`Dockerfile`), combining the background scheduler/watcher, embedded Web UI (`/`), REST API (`/api/*`), and MCP Streamable HTTP endpoint (`/mcp`) in one low-resource process (~15–25 MB RAM).
+**Citadel** is built as a **single native Rust binary** (`citadel`) backed by a local **SQLite (WAL mode) + FTS5** database.
+- **Default deployment (Apple `container`):** Runs `citadel serve` inside a minimal OCI Linux container managed by Apple's **`container`** CLI (`https://github.com/apple/container`, built from `Containerfile`/`Dockerfile`), combining the background scheduler/watcher, embedded Web UI (`/`), REST API (`/api/*`), and MCP Streamable HTTP endpoint (`/mcp`) in one low-resource process (~15–25 MB RAM).
 - **Native installation (macOS/Linux):** Install the same binary locally; `cli`, `mcp` (`stdio`), `ui`, and `daemon` share `vault.db` directly in WAL mode so `mcp` and `cli` work even when the daemon is stopped.
 
 ```mermaid
@@ -19,12 +19,12 @@ flowchart TB
         User["Engineer (Terminal / Browser)"]
     end
 
-    subgraph Binary["Single Rust Binary: web-vault (Apple container default or Native)"]
-        Serve["web-vault serve (Container default: Daemon + UI + MCP HTTP /mcp)"]
-        MCP["web-vault mcp (stdio JSON-RPC)"]
-        CLI["web-vault CLI (add / sync / query / skill)"]
-        UI["web-vault ui (Axum + rust-embed)"]
-        Daemon["web-vault daemon (Scheduler + File Watcher)"]
+    subgraph Binary["Single Rust Binary: citadel (Apple container default or Native)"]
+        Serve["citadel serve (Container default: Daemon + UI + MCP HTTP /mcp)"]
+        MCP["citadel mcp (stdio JSON-RPC)"]
+        CLI["citadel CLI (add / sync / query / skill)"]
+        UI["citadel ui (Axum + rust-embed)"]
+        Daemon["citadel daemon (Scheduler + File Watcher)"]
         Crawler["Ingestion Engine (spider + spider_transformations + MD parser)"]
     end
 
@@ -54,15 +54,15 @@ flowchart TB
 ```
 
 ### Data & Config Paths
-Resolved via `WEB_VAULT_HOME` env var, `--data-dir` flag, or OS defaults (`directories` crate):
-- **Container default:** `/data` (mounted persistent volume, `WEB_VAULT_HOME=/data`; optional host Markdown folders mounted read-only under `/sources/...`).
-- **macOS (native):** `~/Library/Application Support/web-vault/` (or `~/.local/share/web-vault/` if XDG is set)
-- **Linux (native):** `${XDG_DATA_HOME:-~/.local/share}/web-vault/`
+Resolved via `CITADEL_HOME` env var, `--data-dir` flag, or OS defaults (`directories` crate):
+- **Container default:** `/data` (mounted persistent volume, `CITADEL_HOME=/data`; optional host Markdown folders mounted read-only under `/sources/...`).
+- **macOS (native):** `~/Library/Application Support/com.citadel.citadel/` (`directories` bundle-id layout; XDG variables are ignored on macOS)
+- **Linux (native):** `${XDG_DATA_HOME:-~/.local/share}/citadel/`
 - **Files inside data dir:**
   - `vault.db` (+ `vault.db-wal`, `vault.db-shm`) — primary SQLite database
   - `daemon.pid` — active daemon PID lockfile
   - `daemon.log` — rotating daemon log
-- **`WEB_VAULT_ALLOW_PRIVATE_ORIGINS`:** `1` or `true` allows web Sources on Private origins (intranet docs, `localhost`); off by default.
+- **`CITADEL_ALLOW_PRIVATE_ORIGINS`:** `1` or `true` allows web Sources on Private origins (intranet docs, `localhost`); off by default.
 
 ---
 
@@ -283,11 +283,11 @@ To eliminate false-positive diffs (such as volatile `created:` / `updated:` / `c
 
 ---
 
-## 5. MCP Server Specification (`web-vault mcp` & `/mcp`)
+## 5. MCP Server Specification (`citadel mcp` & `/mcp`)
 
 ### Transports
-- **Streamable HTTP (Container default):** Mounted at `POST/GET /mcp` on `web-vault serve` (default `http://127.0.0.1:4317/mcp` on the host). Lets any MCP client connect directly to the running container without spawning extra processes.
-- **Stdio (Native & `container exec`):** `web-vault mcp` speaks newline-delimited JSON-RPC 2.0 on `stdin`/`stdout` (also usable via `container exec -i web-vault web-vault mcp`).
+- **Streamable HTTP (Container default):** Mounted at `POST/GET /mcp` on `citadel serve` (default `http://127.0.0.1:4317/mcp` on the host). Lets any MCP client connect directly to the running container without spawning extra processes.
+- **Stdio (Native & `container exec`):** `citadel mcp` speaks newline-delimited JSON-RPC 2.0 on `stdin`/`stdout` (also usable via `container exec -i citadel citadel mcp`).
 - **Logging rule:** In `stdio` mode, all logs MUST go to `stderr` or file—never `stdout`.
 
 ### Tool Surface (2 Minimal Composable Tools)
@@ -372,7 +372,7 @@ To eliminate false-positive diffs (such as volatile `created:` / `updated:` / `c
 }
 ```
 - **Validation & Safety Guardrails for `manage`:**
-  - `origin` URLs must use `http://` or `https://` and reject Private origins (loopback, RFC1918, link-local such as `169.254.169.254`, CGNAT, multicast, `localhost`/`*.local`) unless `WEB_VAULT_ALLOW_PRIVATE_ORIGINS=1`. The same rule (`src/sources/origin.rs`) applies to every entry point: CLI `add`, UI `POST /api/sources`, MCP `manage add`, and every Sync, including the scheduler.
+  - `origin` URLs must use `http://` or `https://` and reject Private origins (loopback, RFC1918, link-local such as `169.254.169.254`, CGNAT, multicast, `localhost`/`*.local`) unless `CITADEL_ALLOW_PRIVATE_ORIGINS=1`. The same rule (`src/sources/origin.rs`) applies to every entry point: CLI `add`, UI `POST /api/sources`, MCP `manage add`, and every Sync, including the scheduler.
   - Local `origin` paths must resolve to an existing directory (`canonicalize`) and only ingest `*.md` / `*.markdown` files.
   - `remove` returns the deleted source name and page count; `add`/`sync` returns structured sync summary (`pages_added`, `pages_updated`, `pages_unchanged`, `pages_stale`, `pages_failed`).
   - `sync` without `name` syncs every Source independently and also returns `results`: one entry per Source with `outcome` `synced` (plus `summary`), `already_syncing`, or `error` (plus `error`). A failed Source never stops the others.
@@ -385,7 +385,7 @@ To eliminate false-positive diffs (such as volatile `created:` / `updated:` / `c
 ## 6. CLI Specification
 
 ```text
-web-vault
+citadel
   add <url-or-path> [--name <slug>] [--tags <a,b>] [--interval <duration>]
                     [--max-pages <n>] [--max-depth <n>] [--include <pat>...]
                     [--exclude <pat>...] [--render-js] [--no-sync]
@@ -394,7 +394,7 @@ web-vault
   sync [<name>] [--all] [--prune] # manual sync; --all reports every source, exits 1 if any failed
   rm <name> [--yes]               # remove source and cascade stored pages
                                   # add/sync refuse Private origins (loopback, RFC1918,
-                                  # link-local, localhost) unless WEB_VAULT_ALLOW_PRIVATE_ORIGINS=1
+                                  # link-local, localhost) unless CITADEL_ALLOW_PRIVATE_ORIGINS=1
   query "<sql>" [--limit <n>] [--format table|json|csv]
   serve [--bind 0.0.0.0:4317]     # all-in-one server: daemon + Web UI + MCP HTTP (/mcp) (Container default)
   mcp                             # start stdio MCP server (native / container exec)
@@ -411,16 +411,16 @@ web-vault
 
 ### `skill install` Path Resolution
 The embedded static router `SKILL.md` (`src/skill/SKILL.md`) documents the SQLite schema, FTS5 query recipes, and grounding rules.
-1. **Default (no flags):** Installs into `./.agents/skills/web-vault/SKILL.md` in the current working directory.
-2. **`--path <dir>`:** Installs into `<dir>/web-vault/SKILL.md` (creating parent directories if needed).
+1. **Default (no flags):** Installs into `./.agents/skills/citadel/SKILL.md` in the current working directory.
+2. **`--path <dir>`:** Installs into `<dir>/citadel/SKILL.md` (creating parent directories if needed).
 3. **`--global`:**
-   - Default `--target all` (or `agents`): writes the canonical copy to `~/.agents/skills/web-vault/SKILL.md` and creates a symlink at `~/.claude/skills/web-vault -> ~/.agents/skills/web-vault` (if `~/.claude` exists or `--target claude` is requested).
-   - Additional `--target` values (`copilot` -> `~/.copilot/skills/web-vault`, `opencode` -> `~/.config/opencode/skills/web-vault`) symlink to the same canonical `~/.agents/skills/web-vault` directory.
+   - Default `--target all` (or `agents`): writes the canonical copy to `~/.agents/skills/citadel/SKILL.md` and creates a symlink at `~/.claude/skills/citadel -> ~/.agents/skills/citadel` (if `~/.claude` exists or `--target claude` is requested).
+   - Additional `--target` values (`copilot` -> `~/.copilot/skills/citadel`, `opencode` -> `~/.config/opencode/skills/citadel`) symlink to the same canonical `~/.agents/skills/citadel` directory.
 4. **Safety:** Refuses to overwrite an existing `SKILL.md` unless `--force` is passed.
 
 ---
 
-## 7. Embedded Local Web UI (`web-vault ui`)
+## 7. Embedded Local Web UI (`citadel ui`)
 
 ### Server & Security
 - Built with `axum`, serving static assets embedded at compile time via `rust-embed` (zero external CDN requests, works 100% offline).
@@ -453,34 +453,34 @@ The embedded static router `SKILL.md` (`src/skill/SKILL.md`) documents the SQLit
 Uses Apple's native macOS OCI runtime (**`container`**, `https://github.com/apple/container`)—no Docker Desktop required.
 - **Multi-stage `Dockerfile` (OCI-standard):**
   - Builder stage: `rust:1-slim` compiling `--release` binary (`linux/arm64` native on Apple Silicon, `linux/amd64` portable).
-  - Runtime stage: `debian:bookworm-slim` (or `gcr.io/distroless/cc-debian12`) running as non-root user `webvault`, final image ~25–35 MB (optional `--build-arg FEATURES=chrome` variant installs headless Chromium).
-- **Container entrypoint:** `web-vault serve --bind 0.0.0.0:4317` (runs the background scheduler, local folder watcher, embedded Web UI on `/`, REST API on `/api/*`, and MCP Streamable HTTP on `/mcp`).
+  - Runtime stage: `debian:bookworm-slim` (or `gcr.io/distroless/cc-debian12`) running as non-root user `citadel`, final image ~25–35 MB (optional `--build-arg FEATURES=chrome` variant installs headless Chromium).
+- **Container entrypoint:** `citadel serve --bind 0.0.0.0:4317` (runs the background scheduler, local folder watcher, embedded Web UI on `/`, REST API on `/api/*`, and MCP Streamable HTTP on `/mcp`).
 - **Standard `container` CLI workflow:**
   ```bash
   # One-time setup & build
   container system start
-  container volume create web-vault-data
-  container build -t web-vault:latest .
+  container volume create citadel-data
+  container build -t citadel:latest .
 
   # Run detached with loopback port publish, persistent volume, and optional local Markdown mount
-  container run -d --name web-vault \
+  container run -d --name citadel \
     -p 127.0.0.1:4317:4317 \
-    -e WEB_VAULT_HOME=/data \
-    -v web-vault-data:/data \
+    -e CITADEL_HOME=/data \
+    -v citadel-data:/data \
     -v /Users/maxime/Dev/books/markdown:/sources/books:ro \
-    web-vault:latest
+    citadel:latest
   ```
 - **CLI & operations with `container`:**
-  - Run CLI commands inside the container: `container exec web-vault web-vault <cmd>` (e.g., `add`, `sync`, `query`), or manage via the Web UI at `http://127.0.0.1:4317`.
-  - Inspect status/logs: `container ls`, `container logs web-vault`, `container stop web-vault`.
+  - Run CLI commands inside the container: `container exec citadel citadel <cmd>` (e.g., `add`, `sync`, `query`), or manage via the Web UI at `http://127.0.0.1:4317`.
+  - Inspect status/logs: `container ls`, `container logs citadel`, `container stop citadel`.
   - A small `Makefile` (or `justfile`) wraps `container build`, `run`, `stop`, `logs`, and `exec` for one-command ergonomics.
 
 ### 8.2 Optional Native Install (macOS / Linux)
-- **Install:** `cargo install --path .` (or prebuilt GitHub Release binary) puts `web-vault` on `$PATH`.
-- **PID & single-instance lock:** Acquires an advisory file lock on `daemon.pid` so only one daemon runs per `WEB_VAULT_HOME`.
-- **OS service integration (`web-vault daemon install`):**
-  - **macOS:** Generates `~/Library/LaunchAgents/com.webvault.daemon.plist` (`KeepAlive`, `RunAtLoad`) and loads via `launchctl`.
-  - **Linux:** Generates `~/.config/systemd/user/web-vault.service` and enables via `systemctl --user`.
+- **Install:** `cargo install --path .` (or prebuilt GitHub Release binary) puts `citadel` on `$PATH`.
+- **PID & single-instance lock:** Acquires an advisory file lock on `daemon.pid` so only one daemon runs per `CITADEL_HOME`.
+- **OS service integration (`citadel daemon install`):**
+  - **macOS:** Generates `~/Library/LaunchAgents/com.citadel.daemon.plist` (`KeepAlive`, `RunAtLoad`) and loads via `launchctl`.
+  - **Linux:** Generates `~/.config/systemd/user/citadel.service` and enables via `systemctl --user`.
 
 ### 8.3 Shared Scheduler & Watcher Behavior (Container & Native)
 - **Web scheduler loop:** Ticks every 60 seconds; selects `web` sources where `refresh_interval_secs > 0` and `last_synced_at + refresh_interval_secs <= now`; runs up to 2 source syncs concurrently with small random jitter (0–30s).
@@ -495,5 +495,5 @@ Uses Apple's native macOS OCI runtime (**`container`**, `https://github.com/appl
 |---|---|
 | **Unit tests** | Frontmatter/noise stripping & SHA-256 stability; `pulldown-cmark` H1–H3 section splitting & breadcrumbs; unified diff generation; `skill install` path resolution & symlinks. |
 | **SQLite safety tests** | Verify MCP `query` rejects `INSERT`, `UPDATE`, `DELETE`, `DROP`, `ATTACH`, `PRAGMA`, multi-statements, and enforces timeout + row/byte caps. |
-| **Integration tests** | Local `wiremock`/Axum fixture site crawled via `spider` -> stored -> modified -> re-crawled (verifying `pages_updated`, `page_revisions`, and `stale` marking on removed URL); temp Markdown folder sync; end-to-end `web-vault mcp` `stdio` JSON-RPC round-trip. |
-| **Resource budget check** | Verify idle `web-vault daemon` RSS stays under ~25 MB on a 1,000-page vault. |
+| **Integration tests** | Local `wiremock`/Axum fixture site crawled via `spider` -> stored -> modified -> re-crawled (verifying `pages_updated`, `page_revisions`, and `stale` marking on removed URL); temp Markdown folder sync; end-to-end `citadel mcp` `stdio` JSON-RPC round-trip. |
+| **Resource budget check** | Verify idle `citadel daemon` RSS stays under ~25 MB on a 1,000-page vault. |
