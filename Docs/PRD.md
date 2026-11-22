@@ -25,7 +25,7 @@ Data and software engineers rely heavily on external documentation (APIs, framew
 **Core Grounding Loop:**
 1. The engineer registers documentation URLs or local Markdown folders in **Citadel**.
 2. **Citadel** runs quietly in the background, storing content and periodically refreshing web sources when real content changes.
-3. The engineer installs the **Citadel** agent skill into a project or global agent directory via the CLI.
+3. The engineer runs `citadel setup` to walk through an interactive wizard that installs the **Citadel** agent skill and configures the MCP server (locally in the project folder or globally) for their LLM client(s) (Claude Code, Antigravity / `agy`, Codex).
 4. When the engineer asks their LLM a question, the LLM recognizes that **Citadel** may hold authoritative docs, queries **Citadel** in a single composable MCP tool call, and grounds its response in the retrieved, up-to-date sources.
 
 ---
@@ -36,7 +36,8 @@ Data and software engineers rely heavily on external documentation (APIs, framew
 - **Unified local knowledge base:** Treat crawled web documentation and local Markdown folders as first-class, uniformly queryable sources.
 - **Always-fresh web docs:** Automatically detect meaningful content changes on a schedule while surfacing removed, renamed, or failing pages.
 - **Minimal MCP footprint:** Provide as few MCP tools as possible—ideally **one composable query tool** (e.g., SQL-like) rather than one tool per function.
-- **Zero-friction agent onboarding:** Ship a built-in CLI command to install the **Citadel** skill into the current directory, a custom path, or global agent locations (`.claude`, `.agents`, etc.).
+- **Zero-friction agent onboarding:** Ship an interactive `citadel setup` wizard that configures both the **Citadel** agent skill and MCP server settings—locally in a project folder or globally—for Claude Code, Antigravity (`agy`), and Codex.
+- **Effortless self-maintenance:** Automatically detect when a newer version of **Citadel** is available and let users upgrade cleanly with a single `citadel update` command.
 - **Low-resource background operation:** Run continuously in the background with minimal CPU and RAM usage (Rust constraint).
 - **Fast human visibility:** Offer a lightweight UI launched from a single CLI command (`ui`) to browse, inspect, and manage stored knowledge.
 
@@ -86,6 +87,9 @@ Data and software engineers rely heavily on external documentation (APIs, framew
 | **FR-4.3** | **Direct querying:** Ability to run the same composable query from the terminal for debugging or human use. | Should |
 | **FR-4.4** | **Skill installer:** A dedicated CLI command to install the **Citadel** agent skill (`SKILL.md`), supporting three target modes: (1) current working directory, (2) an explicit user-provided path via argument/flag, and (3) standard global agent locations (e.g., `~/.claude/skills`, `~/.agents/skills`, and similar cross-agent roots). | Must |
 | **FR-4.5** | **UI launcher:** A single `ui` CLI command that starts/opens the lightweight management UI. | Must |
+| **FR-4.6** | **Interactive setup wizard (`citadel setup`):** Launch a guided terminal wizard that creates both the **Citadel** agent skill (`SKILL.md`) and the MCP server configuration in one flow, letting the user choose **local** (current project folder) or **global** scope for **Claude Code**, **Antigravity (`agy`)**, and **Codex**. Safely merges into existing MCP config files without overwriting unrelated servers, remains idempotent on re-run, and supports non-interactive flags for automation. | Must |
+| **FR-4.7** | **Self-update (`citadel update`):** Upgrade **Citadel** to the latest release via a single CLI command, verifying release integrity before replacing the binary (and showing clear upgrade instructions when running inside an OCI container). | Must |
+| **FR-4.8** | **Automatic update awareness:** Automatically check in the background (with local caching) whether a newer version of **Citadel** is available and surface a non-intrusive notice in interactive CLI sessions—never blocking startup, failing silently when offline, never polluting `citadel mcp` `stdio` or machine-readable output, and supporting an opt-out. | Must |
 
 ### 4.5 Lightweight Management UI
 | ID | Requirement | Priority |
@@ -95,6 +99,7 @@ Data and software engineers rely heavily on external documentation (APIs, framew
 | **FR-5.3** | **Knowledge browser:** Browse and search stored pages/documents and read their stored content. | Must |
 | **FR-5.4** | **Change & health visibility:** Inspect recently updated pages (what changed) and flagged stale/failed URLs. | Should |
 | **FR-5.5** | **Management actions:** Add new URLs/folders, trigger manual refreshes, edit refresh schedules, and remove sources directly from the UI. | Must |
+| **FR-5.6** | **Update indicator:** Display a subtle, non-intrusive indicator when a newer version of **Citadel** is available, showing the available version and how to upgrade (`citadel update`). | Should |
 
 ---
 
@@ -103,9 +108,9 @@ Data and software engineers rely heavily on external documentation (APIs, framew
 - **Resource Efficiency (Rust):** Implemented in Rust as a lightweight native binary; idle background service must consume minimal RAM and negligible CPU.
 - **Deployment Flexibility (Container Default + Native Option):** Default deployment as a lightweight OCI container via Apple's **`container`** CLI (`https://github.com/apple/container`) with persistent volume storage and optional host Markdown bind mounts, while also supporting direct native installation on macOS/Linux.
 - **Fast Startup & Query Latency:** CLI commands, `ui` launch, and MCP queries should feel instantaneous for local knowledge bases spanning thousands of pages.
-- **Local-First & Portable:** All stored knowledge and configuration live locally on disk in predictable user directories with no external service dependencies.
+- **Local-First & Portable:** All stored knowledge and configuration live locally on disk in predictable user directories with no external service dependencies; automatic update checks are lightweight, cached, non-blocking, fail silently when offline, and can be opted out of.
 - **Polite Crawling:** Respect basic web etiquette (rate limiting, concurrency caps, conditional requests where available) so background checks do not hammer documentation hosts.
-- **Safe LLM Access:** The composable MCP query interface must remain strictly read-only to prevent destructive SQL mutations or arbitrary filesystem access; adding sources via MCP must be explicitly validated and scoped.
+- **Safe LLM Access & Non-Destructive Setup:** The composable MCP query interface must remain strictly read-only to prevent destructive SQL mutations or arbitrary filesystem access; adding sources via MCP must be explicitly validated and scoped; `citadel setup` must safely merge MCP settings without clobbering existing agent configuration.
 
 ---
 
@@ -113,17 +118,19 @@ Data and software engineers rely heavily on external documentation (APIs, framew
 
 1. **Add & Auto-Maintain Web Docs:** User runs CLI add command with `https://docs.example.com/` -> **Citadel** discovers sub-pages, stores clean content -> background daemon checks periodically and updates only changed pages, flagging any removed URLs.
 2. **Import Local Markdown Books/Docs:** User runs CLI add command pointing to `/path/to/markdown/book-folder` -> **Citadel** indexes all `.md` files -> book becomes queryable alongside web docs.
-3. **Install Skill & Ground an LLM:** User runs CLI skill install command (targeting `.`, `--path ...`, or global `.claude` / `.agents`) -> in a later LLM session, user asks a technical question -> LLM follows the skill, queries **Citadel** via its single MCP tool, and answers grounded in exact, fresh docs.
+3. **Set Up Agent Integration & Ground an LLM:** User runs `citadel setup` in a project folder -> interactive wizard asks which agent(s) (Claude Code, Antigravity / `agy`, Codex) and scope (local vs. global) to configure -> **Citadel** creates the skill and merges the MCP server config -> in the next LLM session, the user asks a technical question and the LLM queries **Citadel** via MCP to answer grounded in exact, fresh docs.
 4. **Manage Knowledge Visually:** User runs `citadel ui` -> lightweight UI opens immediately -> user checks which doc sites updated recently, inspects a stale URL, adds a new doc source, and closes the UI while the daemon keeps running.
+5. **Stay Up to Date:** **Citadel** automatically detects a newer release in the background and shows a subtle notice in the CLI or UI -> user runs `citadel update` -> **Citadel** downloads, verifies, and installs the new version cleanly.
 
 ---
 
 ## 7. Success Criteria
 
-- An engineer can add a multi-page doc site and a local Markdown folder, install the skill, and get a grounded LLM answer in under 5 minutes.
+- An engineer can add a multi-page doc site and a local Markdown folder, run `citadel setup` to configure the skill and MCP server, and get a grounded LLM answer in under 5 minutes.
 - LLMs consistently discover and retrieve relevant documentation in **1–2 MCP tool calls** using the minimal composable tool interface.
 - Background refreshes run unattended without noticeable CPU/memory impact or noisy false-positive updates.
 - The `ui` command launches in under 1 second and covers all day-to-day source management without touching config files manually.
+- Users are notified of new releases with zero noticeable CLI/UI startup delay and can upgrade with a single `citadel update` command.
 
 ---
 
@@ -135,4 +142,5 @@ The following technical choices are intentionally left open for the **TechSpec (
 2. **Crawling strategy:** Pure HTTP/HTML + sitemap/`llms.txt` vs. optional headless-browser fallback for JS-rendered SPA doc sites.
 3. **UI form factor:** Embedded local web UI (served on localhost) vs. native Terminal UI (TUI).
 4. **Daemon architecture:** OS service integration (`launchd`/`systemd`) vs. self-managed background daemon, plus IPC between CLI, UI, daemon, and MCP server.
-5. **Skill template & multi-agent path resolution:** Exact `SKILL.md` prompt design and symlink vs. copy behavior across `.claude`, `.agents`, etc.
+5. **Skill template, MCP config merge & multi-agent paths:** Exact `SKILL.md` prompt design, symlink vs. copy behavior, and per-agent local/global MCP config file locations and merge semantics for Claude Code, Antigravity (`agy`), and Codex.
+6. **Release distribution & self-update mechanics:** Release channel (e.g., GitHub Releases), checksum/signature verification, version-check cache TTL and opt-out env var, and upgrade behavior in Apple `container` vs. native installs.

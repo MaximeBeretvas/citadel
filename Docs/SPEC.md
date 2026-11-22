@@ -22,7 +22,7 @@ flowchart TB
     subgraph Binary["Single Rust Binary: citadel (Apple container default or Native)"]
         Serve["citadel serve (Container default: Daemon + UI + MCP HTTP /mcp)"]
         MCP["citadel mcp (stdio JSON-RPC)"]
-        CLI["citadel CLI (add / sync / query / skill)"]
+        CLI["citadel CLI (add / sync / query / setup / update / skill)"]
         UI["citadel ui (Axum + rust-embed)"]
         Daemon["citadel daemon (Scheduler + File Watcher)"]
         Crawler["Ingestion Engine (spider + spider_transformations + MD parser)"]
@@ -62,7 +62,9 @@ Resolved via `CITADEL_HOME` env var, `--data-dir` flag, or OS defaults (`directo
   - `vault.db` (+ `vault.db-wal`, `vault.db-shm`) — primary SQLite database
   - `daemon.pid` — active daemon PID lockfile
   - `daemon.log` — rotating daemon log
+  - `update-check.json` — cached latest-release metadata (`checked_at`, `latest_version`, `release_url`, 24h TTL)
 - **`CITADEL_ALLOW_PRIVATE_ORIGINS`:** `1` or `true` allows web Sources on Private origins (intranet docs, `localhost`); off by default.
+- **`CITADEL_NO_UPDATE_CHECK`:** `1` or `true` disables automatic background update checks.
 
 ---
 
@@ -80,6 +82,8 @@ Resolved via `CITADEL_HOME` env var, `--data-dir` flag, or OS defaults (`directo
 | File watching | `notify` + `notify-debouncer-mini` | Cross-platform FS events for local Markdown folders |
 | MCP server | `rmcp` (or lightweight custom JSON-RPC 2.0 over `tokio::io::stdin/stdout`) | Strict stdio transport; zero stdout pollution |
 | Embedded Web UI | `axum`, `rust-embed`, `mime_guess`, `open` | Single-binary local web server, ~10 MB RAM |
+| Interactive setup & config merge | `cliclack`, `toml_edit`, `serde_json` | Guided CLI setup wizard + format/comment-preserving TOML (Codex) and JSON (Claude/Antigravity) MCP config merging |
+| Self-update & version check | `reqwest` (existing), `semver`, `flate2`, `tar`, `sha2` (existing) | GitHub Releases version check, tarball extraction, and SHA-256 verification |
 | Logging & Errors | `tracing`, `tracing-subscriber`, `thiserror`, `anyhow` | Structured logs to `stderr` (never `stdout` in MCP mode) |
 
 ### Cargo Feature Flags
@@ -118,6 +122,13 @@ src/
   skill/
     mod.rs           # Skill path resolver + installer (CWD, --path, --global)
     SKILL.md         # Embedded static router skill (include_str!)
+  setup/
+    mod.rs           # Interactive `citadel setup` wizard + non-interactive runner
+    agents.rs        # Per-agent skill & MCP config path resolvers (claude, agy, codex)
+    merge.rs         # Safe JSON (`serde_json`) & TOML (`toml_edit`) MCP config mergers
+  update/
+    mod.rs           # `citadel update` GitHub Releases downloader, SHA-256 verifier, atomic swap
+    check.rs         # Cached 24h update-check.json reader + non-blocking background refresher
 ```
 
 ---
@@ -407,6 +418,11 @@ citadel
     uninstall
   skill
     install [--path <dir>] [--global] [--target <agents|claude|copilot|opencode|all>] [--force]
+  setup                           # interactive wizard to configure skill + MCP for claude, agy, codex
+        [--agent <claude|agy|codex>...] [--scope <local|global>]
+        [--transport <stdio|http>] [--url <http-mcp-url>]
+        [--only <skill|mcp|both>] [--force] [--yes]
+  update [--check] [--yes]        # check for or install latest GitHub Release binary
 ```
 
 ### `skill install` Path Resolution
@@ -417,6 +433,50 @@ The embedded static router `SKILL.md` (`src/skill/SKILL.md`) documents the SQLit
    - Default `--target all` (or `agents`): writes the canonical copy to `~/.agents/skills/citadel/SKILL.md` and creates a symlink at `~/.claude/skills/citadel -> ~/.agents/skills/citadel` (if `~/.claude` exists or `--target claude` is requested).
    - Additional `--target` values (`copilot` -> `~/.copilot/skills/citadel`, `opencode` -> `~/.config/opencode/skills/citadel`) symlink to the same canonical `~/.agents/skills/citadel` directory.
 4. **Safety:** Refuses to overwrite an existing `SKILL.md` unless `--force` is passed.
+
+### Interactive Setup Wizard (`citadel setup`)
+Running `citadel setup` in an interactive TTY launches a guided `cliclack` wizard; passing flags (`--agent`, `--scope`, `--yes`) runs non-interactively for scripts/CI.
+
+#### Wizard Flow
+1. **Select target agent(s)** (multi-select): **Claude Code (`claude`)**, **Antigravity (`agy`)**, **Codex (`codex`)**.
+2. **Select scope**: **Local** (current working directory) or **Global** (user home config).
+3. **Select components**: **Skill + MCP** (default), Skill only, or MCP only.
+4. **Confirm MCP transport** (when MCP is selected): auto-detects whether a `citadel serve` HTTP endpoint (`http://127.0.0.1:4317/mcp`) is reachable and defaults accordingly (`http` if reachable, otherwise `stdio` using `citadel mcp`); user can switch between `stdio` and `http` (or override via `--transport` / `--url`).
+5. **Preview & confirm**: Prints the exact list of files to create/update (flagging any existing `citadel` entries) before writing.
+
+#### Per-Agent Target Paths & Config Formats
+| Agent | Scope | Skill Path | MCP Config Path & Entry |
+|---|---|---|---|
+| **Claude Code** (`claude`) | Local | `./.claude/skills/citadel/SKILL.md` | `./.mcp.json` (`mcpServers.citadel`, JSON) |
+| **Claude Code** (`claude`) | Global | `~/.claude/skills/citadel` *(symlink -> `~/.agents/skills/citadel`)* | `~/.claude.json` (`mcpServers.citadel`, JSON) |
+| **Antigravity** (`agy`) | Local | `./.agents/skills/citadel/SKILL.md` | `./.agents/plugins/citadel/plugin.json` + `./.agents/plugins/citadel/mcp_config.json` (`mcpServers.citadel`, JSON) |
+| **Antigravity** (`agy`) | Global | `~/.gemini/config/skills/citadel` *(symlink -> `~/.agents/skills/citadel`)* | `~/.gemini/config/mcp_config.json` (`mcpServers.citadel`, JSON) |
+| **Codex** (`codex`) | Local | `./.agents/skills/citadel/SKILL.md` | `./.codex/config.toml` (`[mcp_servers.citadel]`, TOML) |
+| **Codex** (`codex`) | Global | `~/.agents/skills/citadel/SKILL.md` | `~/.codex/config.toml` (`[mcp_servers.citadel]`, TOML) |
+
+- **MCP entry shape:**
+  - `stdio`: `{ "command": "citadel", "args": ["mcp"] }` (JSON) / `command = "citadel"`, `args = ["mcp"]` (TOML).
+  - `http`: `{ "url": "http://127.0.0.1:4317/mcp" }` (JSON, using `"type": "http"` for Claude Code where required) / `url = "http://127.0.0.1:4317/mcp"` (TOML).
+- **Safe merging & overwrite rules:**
+  - JSON configs are parsed and updated via `serde_json` (`mcpServers["citadel"] = ...`), preserving all unrelated keys and other MCP servers.
+  - TOML configs (`config.toml`) are edited via `toml_edit`, preserving existing comments, formatting, and other `[mcp_servers.*]` tables.
+  - When a `citadel` skill or MCP entry already exists, interactive mode asks for confirmation before overwriting; non-interactive mode refuses to overwrite unless `--force` is passed.
+
+### Self-Update & Automatic Update Awareness (`citadel update`)
+
+#### Release Artifacts (GitHub Releases)
+- Published on GitHub Releases as versioned tarballs (`citadel-v<semver>-<target>.tar.gz` for `aarch64-apple-darwin`, `x86_64-apple-darwin`, `aarch64-unknown-linux-gnu`, `x86_64-unknown-linux-gnu`) alongside a `checksums.sha256` manifest.
+
+#### `citadel update` Execution
+1. **Container detection:** If running inside an OCI container (`/.dockerenv`, `/run/.containerenv`, or `CITADEL_CONTAINER=1`), do **not** mutate the container binary; instead print the current/latest version and exact Apple `container` pull/recreate commands.
+2. **Version check:** Query the GitHub Releases latest endpoint and compare with `env!("CARGO_PKG_VERSION")` using `semver`. With `--check`, print status and exit without modifying the binary.
+3. **Atomic native upgrade:** Download the platform tarball and `checksums.sha256` into a temp file in the executable's directory, verify the SHA-256 digest before extracting, atomically replace the running binary (preserving permissions and rolling back on failure), and if a native daemon is running (`daemon.pid`), restart it cleanly.
+
+#### Automatic Update Awareness (`update-check.json`)
+- Stored at `<CITADEL_HOME>/update-check.json` with `{ "checked_at": "<ISO-8601>", "latest_version": "<semver>", "release_url": "<url>" }` and a **24-hour TTL**.
+- **Zero-latency CLI path:** Interactive CLI commands read `update-check.json` synchronously (0 ms network cost). If `latest_version > current_version`, print a single-line notice to `stderr` (`Update available: vX.Y.Z -> run \`citadel update\``). When the cache is missing or >24h old, spawn a detached, non-blocking background refresh with a short HTTP timeout that fails silently when offline.
+- **Strict silence rules:** Never check or print notices during `citadel mcp` (`stdio` purity), when `--json` is passed, when `stderr` is not a TTY, or when `CITADEL_NO_UPDATE_CHECK=1`.
+- **Web UI integration:** `GET /api/version` returns `{ current_version, latest_version, update_available, release_url }` from the same cache (triggering a non-blocking refresh if stale) so the UI header can show a subtle update badge.
 
 ---
 
@@ -438,9 +498,10 @@ The embedded static router `SKILL.md` (`src/skill/SKILL.md`) documents the SQLit
 | `GET /api/pages/:id` | Full page Markdown + sections + metadata |
 | `GET /api/pages/:id/diff` | Latest unified diff from `page_revisions` |
 | `POST /api/query` | Run read-only SQL query via `db::readonly` |
+| `GET /api/version` | Current version and cached update availability (`update-check.json`) |
 
 ### UI Views (Lightweight Vanilla JS / Minimal CSS)
-1. **Sources:** Table of web + local sources, status badges, last-synced time, quick Add modal, Sync/Delete actions.
+1. **Sources:** Table of web + local sources, status badges, last-synced time, quick Add modal, Sync/Delete actions (with a subtle header badge when `GET /api/version` reports an update available).
 2. **Knowledge Browser:** Filter by source or FTS search, inspect rendered/raw Markdown and heading sections.
 3. **Changes & Health:** Recent diffs (`v_recent_changes`) with colored unified diff viewer + list of `stale`/`error` pages.
 4. **SQL Explorer:** Interactive read-only query box using the exact same `query` engine as the MCP server.
@@ -493,7 +554,7 @@ Uses Apple's native macOS OCI runtime (**`container`**, `https://github.com/appl
 
 | Layer | What is Tested |
 |---|---|
-| **Unit tests** | Frontmatter/noise stripping & SHA-256 stability; `pulldown-cmark` H1–H3 section splitting & breadcrumbs; unified diff generation; `skill install` path resolution & symlinks. |
+| **Unit tests** | Frontmatter/noise stripping & SHA-256 stability; `pulldown-cmark` H1–H3 section splitting & breadcrumbs; unified diff generation; `skill install` path resolution & symlinks; `setup` JSON/TOML MCP config merging, Antigravity local plugin scaffolding, and `--force` overwrite guards; `update` semver comparison, `update-check.json` 24h TTL, and SHA-256 verification. |
 | **SQLite safety tests** | Verify MCP `query` rejects `INSERT`, `UPDATE`, `DELETE`, `DROP`, `ATTACH`, `PRAGMA`, multi-statements, and enforces timeout + row/byte caps. |
-| **Integration tests** | Local `wiremock`/Axum fixture site crawled via `spider` -> stored -> modified -> re-crawled (verifying `pages_updated`, `page_revisions`, and `stale` marking on removed URL); temp Markdown folder sync; end-to-end `citadel mcp` `stdio` JSON-RPC round-trip. |
+| **Integration tests** | Local `wiremock`/Axum fixture site crawled via `spider` -> stored -> modified -> re-crawled (verifying `pages_updated`, `page_revisions`, and `stale` marking on removed URL); temp Markdown folder sync; end-to-end `citadel mcp` `stdio` JSON-RPC round-trip (verifying zero update-notice pollution on `stdout`); mock GitHub Release download/verify/swap test for `citadel update`. |
 | **Resource budget check** | Verify idle `citadel daemon` RSS stays under ~25 MB on a 1,000-page vault. |
