@@ -224,6 +224,66 @@
     }
   }
 
+  async function loadVersion() {
+    try {
+      const data = await apiRequest("/api/version");
+      const versionEl = el("app-version");
+      if (versionEl && data && data.current_version) {
+        versionEl.textContent = `v${data.current_version}`;
+      }
+      const wrap = el("update-badge-wrap");
+      const label = el("update-badge-label");
+      const link = el("update-release-link");
+      if (!wrap || !label) return;
+
+      if (data && data.update_available && data.latest_version) {
+        label.textContent = `Update v${data.latest_version} available`;
+        if (link && typeof data.release_url === "string" && /^https?:\/\//i.test(data.release_url)) {
+          link.href = data.release_url;
+          link.hidden = false;
+        } else if (link) {
+          link.hidden = true;
+        }
+        wrap.hidden = false;
+      } else {
+        wrap.hidden = true;
+      }
+    } catch {
+      // Fail silently if /api/version is unavailable.
+    }
+  }
+
+  function initUpdatePopover() {
+    const btn = el("update-badge-btn");
+    const popover = el("update-popover");
+    const wrap = el("update-badge-wrap");
+    if (!btn || !popover || !wrap) return;
+
+    const close = () => {
+      popover.hidden = true;
+      btn.setAttribute("aria-expanded", "false");
+    };
+
+    btn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      const willOpen = popover.hidden;
+      popover.hidden = !willOpen;
+      btn.setAttribute("aria-expanded", String(willOpen));
+    });
+
+    document.addEventListener("click", (e) => {
+      if (!popover.hidden && !wrap.contains(e.target)) {
+        close();
+      }
+    });
+
+    document.addEventListener("keydown", (e) => {
+      if (e.key === "Escape" && !popover.hidden) {
+        close();
+      }
+    });
+  }
+
   // View 1: Sources
   async function fetchSources() {
     const sources = await apiRequest("/api/sources");
@@ -989,9 +1049,11 @@
 
   function boot() {
     initTheme();
+    initUpdatePopover();
     initSqlPresets();
     initEvents();
     void loadHealth();
+    void loadVersion();
 
     if (!window.location.hash) {
       window.history.replaceState(null, "", "#sources");

@@ -49,6 +49,7 @@ fn build_ui_routes(config: VaultConfig) -> Router {
 
     Router::new()
         .route("/api/health", get(api::health))
+        .route("/api/version", get(api::get_version))
         .route(
             "/api/sources",
             get(api::list_sources).post(api::create_source),
@@ -952,5 +953,92 @@ mod tests {
             .await
             .expect("evil POST /mcp resp");
         assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn get_version_returns_current_version_when_cache_missing() {
+        let vault_dir = tempdir().expect("vault tempdir");
+        let mut config = VaultConfig::new(vault_dir.path());
+        config.no_update_check = true;
+        let app = build_router(config);
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri("/api/version")
+                    .body(Body::empty())
+                    .expect("GET /api/version"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = read_json_body(resp).await;
+        assert_eq!(body["current_version"], env!("CARGO_PKG_VERSION"));
+        assert_eq!(body["update_available"], false);
+        assert!(body["latest_version"].is_null());
+    }
+
+    #[tokio::test]
+    async fn get_version_reports_update_available_when_cache_has_newer_semver() {
+        let vault_dir = tempdir().expect("vault tempdir");
+        let config = VaultConfig::new(vault_dir.path());
+        std::fs::write(
+            config.update_check_path(),
+            r#"{"checked_at":"2099-01-01T00:00:00Z","latest_version":"v99.0.0","release_url":"https://github.com/mberetvas/citadel/releases/tag/v99.0.0"}"#,
+        )
+        .expect("seed update-check.json");
+
+        let app = build_router(config);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri("/api/version")
+                    .body(Body::empty())
+                    .expect("GET /api/version"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = read_json_body(resp).await;
+        assert_eq!(body["current_version"], env!("CARGO_PKG_VERSION"));
+        assert_eq!(body["update_available"], true);
+        assert_eq!(body["latest_version"], "99.0.0");
+        assert_eq!(
+            body["release_url"],
+            "https://github.com/mberetvas/citadel/releases/tag/v99.0.0"
+        );
+    }
+
+    #[tokio::test]
+    async fn get_version_reports_up_to_date_when_cache_matches_current() {
+        let vault_dir = tempdir().expect("vault tempdir");
+        let config = VaultConfig::new(vault_dir.path());
+        let current = env!("CARGO_PKG_VERSION");
+        std::fs::write(
+            config.update_check_path(),
+            format!(
+                r#"{{"checked_at":"2099-01-01T00:00:00Z","latest_version":"v{current}","release_url":"https://github.com/mberetvas/citadel/releases/tag/v{current}"}}"#
+            ),
+        )
+        .expect("seed update-check.json");
+
+        let app = build_router(config);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri("/api/version")
+                    .body(Body::empty())
+                    .expect("GET /api/version"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = read_json_body(resp).await;
+        assert_eq!(body["current_version"], current);
+        assert_eq!(body["latest_version"], current);
+        assert_eq!(body["update_available"], false);
     }
 }

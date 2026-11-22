@@ -12,6 +12,9 @@ use crate::error::{Result, VaultError};
 use crate::ingest::{self, SourceRecord, SourceSummary, SyncSummary};
 use crate::sources::{AddSourceParams, Removal, RemovedSource, SourceLifecycle};
 use crate::ui::UiState;
+use crate::update::check::{
+    current_unix_secs, read_cached_status, spawn_background_refresh, UpdateStatus,
+};
 
 /// HTTP error wrapper mapping [`VaultError`] variants to structured JSON responses.
 #[derive(Debug)]
@@ -168,6 +171,17 @@ pub async fn health() -> Json<HealthResponse> {
         status: "ok",
         version: env!("CARGO_PKG_VERSION"),
     })
+}
+
+/// `GET /api/version`
+pub async fn get_version(State(state): State<UiState>) -> Json<UpdateStatus> {
+    let cache_path = state.config.update_check_path();
+    let (status, is_stale) =
+        read_cached_status(&cache_path, env!("CARGO_PKG_VERSION"), current_unix_secs());
+    if is_stale && !state.config.no_update_check {
+        spawn_background_refresh(cache_path);
+    }
+    Json(status)
 }
 
 /// `GET /api/sources`
