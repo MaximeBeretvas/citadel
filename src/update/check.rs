@@ -180,6 +180,20 @@ pub fn spawn_background_refresh(path: PathBuf) {
         });
 }
 
+/// Spawn a detached child process running `__update-check-refresh` so the refresh outlives short-lived CLI commands.
+pub fn spawn_detached_cli_refresh_with_url(exe: &Path, data_dir: &Path, api_url: &str) {
+    let _ = std::process::Command::new(exe)
+        .arg("--data-dir")
+        .arg(data_dir)
+        .arg("__update-check-refresh")
+        .arg("--api-url")
+        .arg(api_url)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn();
+}
+
 /// Print a single-line update notice to `stderr` in interactive CLI sessions and refresh stale cache.
 pub fn maybe_print_cli_update_notice(config: &VaultConfig) {
     if config.no_update_check || !std::io::stderr().is_terminal() {
@@ -197,7 +211,9 @@ pub fn maybe_print_cli_update_notice(config: &VaultConfig) {
     }
 
     if is_stale {
-        spawn_background_refresh(cache_path);
+        if let Ok(exe) = std::env::current_exe() {
+            spawn_detached_cli_refresh_with_url(&exe, &config.data_dir, DEFAULT_RELEASES_API_URL);
+        }
     }
 }
 

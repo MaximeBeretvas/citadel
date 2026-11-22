@@ -166,6 +166,13 @@ pub enum Commands {
         #[arg(short = 'y', long)]
         yes: bool,
     },
+
+    /// Internal detached helper to refresh `update-check.json` after short-lived CLI commands.
+    #[command(name = "__update-check-refresh", hide = true)]
+    UpdateCheckRefresh {
+        #[arg(long, hide = true)]
+        api_url: Option<String>,
+    },
 }
 
 /// CLI arguments for `citadel setup`.
@@ -282,6 +289,7 @@ pub fn run_cli_with_writer<W: Write>(cli: Cli, out: &mut W) -> anyhow::Result<()
         &cli.command,
         Commands::Mcp
             | Commands::Update { .. }
+            | Commands::UpdateCheckRefresh { .. }
             | Commands::Serve { .. }
             | Commands::Ui { .. }
             | Commands::Daemon { .. }
@@ -588,8 +596,19 @@ fn dispatch_command<W: Write>(
                 current_exe,
                 releases_api_url: crate::update::check::DEFAULT_RELEASES_API_URL.to_string(),
                 force_container: None,
+                stdin_is_tty: None,
             };
             block_on(crate::update::run_update(opts, out))??;
+            Ok(())
+        }
+        Commands::UpdateCheckRefresh { api_url } => {
+            if !config.no_update_check {
+                let url = api_url
+                    .as_deref()
+                    .unwrap_or(crate::update::check::DEFAULT_RELEASES_API_URL);
+                let cache_path = config.update_check_path();
+                let _ = block_on(crate::update::check::refresh_cache(url, &cache_path));
+            }
             Ok(())
         }
     }

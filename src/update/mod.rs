@@ -25,6 +25,7 @@ pub struct UpdateOpts {
     pub current_exe: PathBuf,
     pub releases_api_url: String,
     pub force_container: Option<bool>,
+    pub stdin_is_tty: Option<bool>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -265,7 +266,16 @@ pub async fn run_update<W: Write>(opts: UpdateOpts, out: &mut W) -> Result<()> {
         return Ok(());
     }
 
-    if !opts.yes && std::io::stdin().is_terminal() {
+    let is_tty = opts
+        .stdin_is_tty
+        .unwrap_or_else(|| std::io::stdin().is_terminal());
+    if !opts.yes {
+        if !is_tty {
+            return Err(VaultError::Validation(
+                "refusing to upgrade without confirmation on non-interactive stdin; pass --yes to proceed"
+                    .to_string(),
+            ));
+        }
         write!(out, "Upgrade citadel from v{current} to v{latest}? [y/N]: ")?;
         out.flush()?;
         let mut answer = String::new();
@@ -343,7 +353,7 @@ pub async fn run_update<W: Write>(opts: UpdateOpts, out: &mut W) -> Result<()> {
         Ok(crate::daemon::DaemonStatus::Running(_))
     ) {
         let _ = crate::daemon::stop_daemon(&opts.config);
-        match crate::daemon::start_daemon(&opts.config, false) {
+        match crate::daemon::start_daemon_with_exe(&opts.config, false, &opts.current_exe) {
             Ok(Some(pid)) => writeln!(out, "Restarted citadel daemon (pid {pid}).")?,
             Ok(None) => {}
             Err(err) => writeln!(out, "Warning: failed to restart daemon: {err}")?,
@@ -477,6 +487,7 @@ mod tests {
                 current_exe: fake_bin.clone(),
                 releases_api_url: "http://127.0.0.1:9/unused".to_string(),
                 force_container: Some(true),
+                stdin_is_tty: Some(false),
             },
             &mut out,
         )
@@ -569,6 +580,7 @@ mod tests {
                 current_exe: fake_bin.clone(),
                 releases_api_url: format!("http://{addr}/releases/latest"),
                 force_container: Some(false),
+                stdin_is_tty: Some(false),
             },
             &mut out,
         )
@@ -581,5 +593,58 @@ mod tests {
             b"upgraded-v0.2.0-binary"
         );
         assert!(config.update_check_path().is_file());
+    }
+
+    #[tokio::test]
+    async fn non_tty_update_without_yes_refuses_to_mutate_binary() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind listener");
+        let addr = listener.local_addr().expect("local addr");
+        let app = axum::Router::new().route(
+            "/releases/latest",
+            axum::routing::get(|| async {
+                axum::Json(serde_json::json!({
+                    "tag_name": "v0.2.0",
+                    "html_url": "https://github.com/mberetvas/citadel/releases/tag/v0.2.0",
+                    "assets": []
+                }))
+            }),
+        );
+        let server = tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+
+        let dir = tempdir().expect("tempdir");
+        let fake_bin = dir.path().join("citadel");
+        std::fs::write(&fake_bin, b"old-v0.1.0-binary").expect("write old bin");
+        let config = VaultConfig::new(dir.path().join("data"));
+
+        let mut out = Vec::new();
+        let err = run_update(
+            UpdateOpts {
+                config,
+                check_only: false,
+                yes: false,
+                current_version: "0.1.0".to_string(),
+                current_exe: fake_bin.clone(),
+                releases_api_url: format!("http://{addr}/releases/latest"),
+                force_container: Some(false),
+                stdin_is_tty: Some(false),
+            },
+            &mut out,
+        )
+        .await
+        .expect_err("non-TTY update without --yes must refuse");
+        server.abort();
+
+        assert!(
+            matches!(err, VaultError::Validation(_)),
+            "expected Validation error, got: {err}"
+        );
+        assert_eq!(
+            std::fs::read(&fake_bin).expect("read untouched bin"),
+            b"old-v0.1.0-binary"
+        );
     }
 }

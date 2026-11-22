@@ -42,8 +42,8 @@ pub async fn detect_default_transport(probe_url: &str) -> McpTransport {
     };
 
     match client.get(probe_url).send().await {
-        Ok(_) => McpTransport::Http(probe_url.to_string()),
-        Err(_) => McpTransport::Stdio,
+        Ok(resp) if resp.status().is_success() => McpTransport::Http(probe_url.to_string()),
+        Ok(_) | Err(_) => McpTransport::Stdio,
     }
 }
 
@@ -448,6 +448,28 @@ mod tests {
             detect_default_transport(&dead_url).await,
             McpTransport::Stdio
         );
+    }
+
+    #[tokio::test]
+    async fn detect_transport_returns_stdio_on_404_response() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind ephemeral listener");
+        let addr = listener.local_addr().expect("local addr");
+        let app = axum::Router::new().route(
+            "/mcp",
+            axum::routing::get(|| async { axum::http::StatusCode::NOT_FOUND }),
+        );
+        let server = tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+
+        let ui_only_url = format!("http://{addr}/mcp");
+        assert_eq!(
+            detect_default_transport(&ui_only_url).await,
+            McpTransport::Stdio
+        );
+        server.abort();
     }
 
     #[tokio::test]
