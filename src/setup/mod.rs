@@ -246,12 +246,12 @@ pub fn apply_plan(plan: &SetupPlan, force: bool) -> Result<ApplyReport> {
                     *include_http_type,
                     force,
                 )?;
-                std::fs::write(&action.path, merged)?;
+                write_file_atomic(&action.path, &merged)?;
             }
             ActionKind::MergeTomlMcp => {
                 let existing = read_optional_file(&action.path)?;
                 let merged = merge_toml_mcp_config(existing.as_deref(), &plan.transport, force)?;
-                std::fs::write(&action.path, merged)?;
+                write_file_atomic(&action.path, &merged)?;
             }
         }
         written_paths.push(action.path.clone());
@@ -302,6 +302,61 @@ fn read_optional_file(path: &Path) -> Result<Option<String>> {
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(err) => Err(err.into()),
     }
+}
+
+/// Replace `path` with `contents` through a sibling temp file and a rename.
+///
+/// Agents such as Claude Code rewrite their config files while running, so a reader
+/// must never see a half-written file. A symlinked config (dotfiles) is followed so the
+/// link survives, and the existing file mode (e.g. `0600` on `~/.claude.json`) is kept.
+fn write_file_atomic(path: &Path, contents: &str) -> Result<()> {
+    use std::io::Write as _;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+    let target = match std::fs::canonicalize(path) {
+        Ok(resolved) => resolved,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => path.to_path_buf(),
+        Err(err) => return Err(err.into()),
+    };
+    let parent = target.parent().ok_or_else(|| {
+        VaultError::Config(format!(
+            "cannot determine parent directory of {}",
+            target.display()
+        ))
+    })?;
+    let file_name = target
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("config");
+    let tmp_path = parent.join(format!(
+        ".{file_name}.citadel.{}.{}.tmp",
+        std::process::id(),
+        TEMP_COUNTER.fetch_add(1, Ordering::Relaxed)
+    ));
+
+    let result = (|| -> Result<()> {
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            // Owner-only until the original mode is copied, so secrets never leak.
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let mut file = options.open(&tmp_path)?;
+        if let Ok(meta) = std::fs::metadata(&target) {
+            file.set_permissions(meta.permissions())?;
+        }
+        file.write_all(contents.as_bytes())?;
+        file.sync_all()?;
+        std::fs::rename(&tmp_path, &target)?;
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&tmp_path);
+    }
+    result
 }
 
 fn remove_existing_path(path: &Path) -> Result<()> {
@@ -413,6 +468,62 @@ mod tests {
             claude_json["mcpServers"]["citadel"]["args"],
             serde_json::json!(["mcp"])
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn apply_plan_rewrites_claude_json_atomically_and_keeps_order_mode_and_symlink() {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+        let cwd = tempdir().expect("cwd tempdir");
+        let home = tempdir().expect("home tempdir");
+        let dotfiles = home.path().join("dotfiles");
+        std::fs::create_dir_all(&dotfiles).expect("mkdir dotfiles");
+        let real_config = dotfiles.join("claude.json");
+        std::fs::write(
+            &real_config,
+            "{\n  \"zeta\": 1,\n  \"mcpServers\": {\"other\": {\"command\": \"x\"}},\n  \"alpha\": 2\n}\n",
+        )
+        .expect("seed config");
+        std::fs::set_permissions(&real_config, std::fs::Permissions::from_mode(0o600))
+            .expect("chmod 600");
+        let link = home.path().join(".claude.json");
+        std::os::unix::fs::symlink(&real_config, &link).expect("symlink config");
+        let inode_before = std::fs::metadata(&real_config).expect("meta").ino();
+
+        let plan = build_plan(
+            cwd.path(),
+            Some(home.path()),
+            &[AgentKind::Claude],
+            SetupScope::Global,
+            SetupComponents::Mcp,
+            McpTransport::Stdio,
+        )
+        .expect("plan");
+        apply_plan(&plan, false).expect("apply");
+
+        assert!(std::fs::symlink_metadata(&link)
+            .expect("link meta")
+            .file_type()
+            .is_symlink());
+        let meta = std::fs::metadata(&real_config).expect("meta after");
+        assert_ne!(
+            meta.ino(),
+            inode_before,
+            "config must be replaced by rename"
+        );
+        assert_eq!(meta.permissions().mode() & 0o777, 0o600);
+
+        let text = std::fs::read_to_string(&real_config).expect("read");
+        let pos = |k: &str| text.find(k).unwrap_or_else(|| panic!("missing {k}"));
+        assert!(pos("\"zeta\"") < pos("\"mcpServers\""));
+        assert!(pos("\"mcpServers\"") < pos("\"alpha\""));
+        assert!(pos("\"other\"") < pos("\"citadel\""));
+        let leftovers: Vec<_> = std::fs::read_dir(&dotfiles)
+            .expect("read dotfiles")
+            .map(|e| e.expect("entry").file_name())
+            .collect();
+        assert_eq!(leftovers, vec![std::ffi::OsString::from("claude.json")]);
     }
 
     #[tokio::test]
