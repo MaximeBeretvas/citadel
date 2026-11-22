@@ -1,5 +1,0 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256" role="img" aria-label="Citadel — Beacon Tower">
-  <title>Citadel — Beacon Tower</title>
-  <!-- Tapered watchtower; the beacon is a round window of light in the lantern -->
-  <path transform="translate(128,122) scale(1.1) translate(-128,-122)" fill="#0f172a" fill-rule="evenodd" d="M128,28 L156,52 V92 H176 V112 H168 L184,216 H144 V184 A16,16 0 0 0 112,184 V216 H72 L88,112 H80 V92 H100 V52 Z M128,60 A12,12 0 1 0 128,84 A12,12 0 1 0 128,60 Z"/>
-</svg>

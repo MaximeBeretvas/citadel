@@ -1,5 +1,0 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256" role="img" aria-label="Citadel — Bookmark Keep">
-  <title>Citadel — Bookmark Keep</title>
-  <!-- A bookmark ribbon with a battlement top: a fortress for everything you've saved -->
-  <path transform="translate(128,126) scale(1.1) translate(-128,-132)" fill="#0f172a" fill-rule="evenodd" d="M72,40 H94 V62 H116 V40 H140 V62 H162 V40 H184 V224 L128,184 L72,224 Z M128,100 A16,16 0 1 0 128,132 A16,16 0 1 0 128,100 Z"/>
-</svg>

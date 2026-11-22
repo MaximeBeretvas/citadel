@@ -1,9 +1,0 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256" role="img" aria-label="Citadel — Concentric Walls">
-  <title>Citadel — Concentric Walls</title>
-  <!-- Nested walls with aligned gates: one straight path to the core (one MCP call) -->
-  <g fill="#0f172a">
-    <path d="M114,220 H36 V36 H220 V220 H142 V200 H200 V56 H56 V200 H114 Z"/>
-    <path d="M114,184 H72 V72 H184 V184 H142 V164 H164 V92 H92 V164 H114 Z"/>
-    <rect x="110" y="110" width="36" height="36"/>
-  </g>
-</svg>

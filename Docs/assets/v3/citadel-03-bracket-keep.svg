@@ -1,7 +1,0 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256" role="img" aria-label="Citadel — Bracket Keep">
-  <title>Citadel — Bracket Keep</title>
-  <!-- Code brackets become crenellated walls guarding a waiting terminal cursor -->
-  <path fill="#0f172a" d="M44,40 H66 V56 H80 V40 H102 V84 H80 V172 H102 V216 H44 Z"/>
-  <path fill="#0f172a" d="M212,40 H190 V56 H176 V40 H154 V84 H176 V172 H154 V216 H212 Z"/>
-  <rect fill="#0f172a" x="114" y="100" width="28" height="56" rx="3"/>
-</svg>
