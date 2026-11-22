@@ -402,6 +402,11 @@ h3 {
   display: none;
 }
 
+/* `hidden` must win over component display rules (e.g. .update-release-link). */
+[hidden] {
+  display: none !important;
+}
+
 .view-header {
   display: flex;
   align-items: flex-start;
