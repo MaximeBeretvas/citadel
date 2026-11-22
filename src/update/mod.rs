@@ -5,14 +5,13 @@ use std::path::{Component, Path, PathBuf};
 use std::time::Duration;
 
 use flate2::read::GzDecoder;
-use serde::Deserialize;
-use sha2::{Digest, Sha256};
 
 use crate::config::VaultConfig;
 use crate::error::{Result, VaultError};
+use crate::ingest::normalize::sha256_hex;
 use crate::update::check::{
-    current_unix_secs, format_iso8601_utc, is_newer_version, normalize_version_str,
-    read_cached_status, write_cache_atomic, UpdateCheckCache,
+    current_unix_secs, fetch_release, is_newer_version, normalize_version_str, read_cached_status,
+    write_cache_atomic, UpdateCheckCache,
 };
 
 /// Options for [`run_update`].
@@ -28,29 +27,12 @@ pub struct UpdateOpts {
     pub stdin_is_tty: Option<bool>,
 }
 
-#[derive(Debug, Deserialize)]
-struct ReleaseAsset {
-    name: String,
-    browser_download_url: String,
-}
-
-#[derive(Debug, Deserialize)]
-struct FullGitHubRelease {
-    tag_name: String,
-    html_url: String,
-    #[serde(default)]
-    assets: Vec<ReleaseAsset>,
-}
-
 /// Detect whether Citadel is running inside an OCI container.
 pub fn is_running_in_container() -> bool {
     if Path::new("/.dockerenv").exists() || Path::new("/run/.containerenv").exists() {
         return true;
     }
-    std::env::var("CITADEL_CONTAINER")
-        .ok()
-        .map(|v| v.trim().to_string())
-        .is_some_and(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+    crate::config::parse_flag(std::env::var("CITADEL_CONTAINER").ok().as_deref())
 }
 
 /// Map the compile-time target OS and architecture to the GitHub Release target triple.
@@ -94,9 +76,7 @@ pub fn verify_sha256_manifest(manifest: &str, archive_name: &str, bytes: &[u8]) 
         ))
     })?;
 
-    let mut hasher = Sha256::new();
-    hasher.update(bytes);
-    let actual = format!("{:x}", hasher.finalize());
+    let actual = sha256_hex(bytes);
 
     if !actual.eq_ignore_ascii_case(expected) {
         return Err(VaultError::Validation(format!(
@@ -207,30 +187,11 @@ pub async fn run_update<W: Write>(opts: UpdateOpts, out: &mut W) -> Result<()> {
         .user_agent(format!("citadel/{current}"))
         .build()?;
 
-    let release_resp = client
-        .get(&opts.releases_api_url)
-        .send()
-        .await?
-        .error_for_status()?;
-    let release_body = release_resp.text().await?;
-    let release: FullGitHubRelease = serde_json::from_str(&release_body)
-        .map_err(|err| VaultError::Other(format!("invalid GitHub release JSON response: {err}")))?;
-
-    let latest = normalize_version_str(&release.tag_name).to_string();
-    if semver::Version::parse(&latest).is_err() {
-        return Err(VaultError::Validation(format!(
-            "release tag '{}' is not a valid semver version",
-            release.tag_name
-        )));
-    }
-
-    // Refresh update-check.json cache.
-    let cache = UpdateCheckCache {
-        checked_at: format_iso8601_utc(current_unix_secs()),
-        latest_version: latest.clone(),
-        release_url: release.html_url.clone(),
-    };
-    let _ = write_cache_atomic(&opts.config.update_check_path(), &cache);
+    let (release, latest) = fetch_release(&client, &opts.releases_api_url).await?;
+    let _ = write_cache_atomic(
+        &opts.config.update_check_path(),
+        &UpdateCheckCache::now(latest.clone(), release.html_url.clone()),
+    );
 
     if !is_newer_version(&current, &latest) {
         writeln!(out, "citadel v{current} is already up to date")?;
@@ -289,21 +250,26 @@ pub async fn run_update<W: Write>(opts: UpdateOpts, out: &mut W) -> Result<()> {
             ))
         })?;
 
-    let manifest = client
-        .get(&checksums_asset.browser_download_url)
-        .send()
-        .await?
-        .error_for_status()?
-        .text()
-        .await?;
-
-    let archive_bytes = client
-        .get(&archive_asset.browser_download_url)
-        .send()
-        .await?
-        .error_for_status()?
-        .bytes()
-        .await?;
+    let (manifest, archive_bytes) = tokio::try_join!(
+        async {
+            client
+                .get(&checksums_asset.browser_download_url)
+                .send()
+                .await?
+                .error_for_status()?
+                .text()
+                .await
+        },
+        async {
+            client
+                .get(&archive_asset.browser_download_url)
+                .send()
+                .await?
+                .error_for_status()?
+                .bytes()
+                .await
+        },
+    )?;
 
     verify_sha256_manifest(&manifest, &archive_name, &archive_bytes)?;
 
@@ -318,15 +284,12 @@ pub async fn run_update<W: Write>(opts: UpdateOpts, out: &mut W) -> Result<()> {
     })?;
     let temp_bin = parent_dir.join(format!(".citadel.update.{}.tmp", std::process::id()));
 
-    if let Err(err) = extract_binary_from_tar_gz(&archive_bytes, &temp_bin) {
+    let installed = extract_binary_from_tar_gz(&archive_bytes, &temp_bin)
+        .and_then(|()| atomic_replace_binary(&temp_bin, &install_path));
+    if installed.is_err() {
         let _ = std::fs::remove_file(&temp_bin);
-        return Err(err);
     }
-
-    if let Err(err) = atomic_replace_binary(&temp_bin, &install_path) {
-        let _ = std::fs::remove_file(&temp_bin);
-        return Err(err);
-    }
+    installed?;
 
     writeln!(out, "Updated citadel from v{current} to v{latest}.")?;
 
@@ -338,7 +301,7 @@ pub async fn run_update<W: Write>(opts: UpdateOpts, out: &mut W) -> Result<()> {
         restart_daemon_after_update(
             out,
             || crate::daemon::stop_daemon(&opts.config),
-            || crate::daemon::start_daemon_with_exe(&opts.config, false, &opts.current_exe),
+            || crate::daemon::start_daemon_with_exe(&opts.config, &opts.current_exe),
         )?;
     }
 
@@ -379,14 +342,7 @@ mod tests {
     use crate::error::VaultError;
     use flate2::write::GzEncoder;
     use flate2::Compression;
-    use sha2::{Digest, Sha256};
     use tempfile::tempdir;
-
-    fn sha256_hex(bytes: &[u8]) -> String {
-        let mut hasher = Sha256::new();
-        hasher.update(bytes);
-        format!("{:x}", hasher.finalize())
-    }
 
     fn build_tar_gz(entries: &[(&str, &[u8])]) -> Vec<u8> {
         let encoder = GzEncoder::new(Vec::new(), Compression::default());

@@ -539,13 +539,13 @@ fn dispatch_command<W: Write>(
         Commands::Setup(args) => {
             let cwd = std::env::current_dir()?;
             let home = directories::BaseDirs::new().map(|d| d.home_dir().to_path_buf());
-            let is_interactive = setup_wants_wizard(
+            let mode = setup_mode(
                 &args,
                 std::io::stdin().is_terminal(),
                 std::io::stderr().is_terminal(),
             );
 
-            if is_interactive {
+            if mode == SetupMode::Wizard {
                 block_on(crate::setup::run_interactive_wizard(
                     &cwd,
                     home.as_deref(),
@@ -554,14 +554,15 @@ fn dispatch_command<W: Write>(
                 return Ok(());
             }
 
+            let skipped = mode.skip_reason();
             if args.agents.is_empty() {
                 anyhow::bail!(
-                    "setup flags were given, so the wizard is skipped: add --agent <claude|agy|codex> and --scope <local|global>, or run `citadel setup` with no flags in a terminal for the wizard"
+                    "{skipped}: add --agent <claude|agy|codex> and --scope <local|global>, or run `citadel setup` with no flags in a terminal for the wizard"
                 );
             }
             let scope = args.scope.ok_or_else(|| {
                 anyhow::anyhow!(
-                    "setup flags were given, so the wizard is skipped: add --scope <local|global>, or run `citadel setup` with no flags in a terminal for the wizard"
+                    "{skipped}: add --scope <local|global>, or run `citadel setup` with no flags in a terminal for the wizard"
                 )
             })?;
             let transport = args.transport.map(|t| match t {
@@ -614,16 +615,40 @@ fn dispatch_command<W: Write>(
     }
 }
 
+/// How `citadel setup` runs, and why the wizard was skipped when it was.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SetupMode {
+    Wizard,
+    FlagsGiven,
+    NoTerminal,
+}
+
+impl SetupMode {
+    fn skip_reason(self) -> &'static str {
+        match self {
+            Self::Wizard => "the wizard was not run",
+            Self::FlagsGiven => "setup flags were given, so the wizard is skipped",
+            Self::NoTerminal => "no terminal is attached, so the wizard is skipped",
+        }
+    }
+}
+
 /// Open the `citadel setup` wizard only in a terminal and only when no setup choice was
 /// given as a flag; otherwise the wizard would silently replace the user's flags.
-fn setup_wants_wizard(args: &SetupArgs, stdin_is_tty: bool, stderr_is_tty: bool) -> bool {
+fn setup_mode(args: &SetupArgs, stdin_is_tty: bool, stderr_is_tty: bool) -> SetupMode {
     let has_explicit_choice = args.yes
         || args.force
         || !args.agents.is_empty()
         || args.scope.is_some()
         || args.transport.is_some()
         || args.only.is_some();
-    !has_explicit_choice && stdin_is_tty && stderr_is_tty
+    if has_explicit_choice {
+        SetupMode::FlagsGiven
+    } else if stdin_is_tty && stderr_is_tty {
+        SetupMode::Wizard
+    } else {
+        SetupMode::NoTerminal
+    }
 }
 
 fn write_sync_summary<W: Write>(out: &mut W, sum: &SyncSummary) -> std::io::Result<()> {
@@ -1012,8 +1037,8 @@ mod tests {
             }
         };
 
-        assert!(setup_wants_wizard(&parse(&[]), true, true));
-        assert!(!setup_wants_wizard(&parse(&[]), false, true));
+        assert_eq!(setup_mode(&parse(&[]), true, true), SetupMode::Wizard);
+        assert_eq!(setup_mode(&parse(&[]), false, true), SetupMode::NoTerminal);
         for flags in [
             &["--only", "mcp"][..],
             &["--transport", "http"][..],
@@ -1022,8 +1047,9 @@ mod tests {
             &["--agent", "claude"][..],
             &["--scope", "global"][..],
         ] {
-            assert!(
-                !setup_wants_wizard(&parse(flags), true, true),
+            assert_eq!(
+                setup_mode(&parse(flags), true, true),
+                SetupMode::FlagsGiven,
                 "{flags:?} must not be silently replaced by wizard answers"
             );
         }

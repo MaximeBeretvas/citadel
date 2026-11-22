@@ -110,22 +110,23 @@ pub fn merge_toml_mcp_config(
         None => DocumentMut::new(),
     };
 
-    if let Some(existing_servers) = doc.get(MCP_SERVERS_TOML_KEY) {
-        let table = existing_servers.as_table_like().ok_or_else(|| {
+    if doc.get(MCP_SERVERS_TOML_KEY).is_none() {
+        let mut servers = Table::new();
+        servers.set_implicit(true);
+        doc[MCP_SERVERS_TOML_KEY] = Item::Table(servers);
+    }
+    let servers = doc[MCP_SERVERS_TOML_KEY]
+        .as_table_like_mut()
+        .ok_or_else(|| {
             VaultError::Validation(format!(
                 "existing TOML MCP config has non-table `{MCP_SERVERS_TOML_KEY}` field"
             ))
         })?;
-        if table.contains_key(CITADEL_KEY) && !force {
-            return Err(VaultError::Validation(
-                "TOML MCP config already contains `[mcp_servers.citadel]`; pass --force to overwrite"
-                    .to_string(),
-            ));
-        }
-    } else {
-        let mut servers = Table::new();
-        servers.set_implicit(true);
-        doc[MCP_SERVERS_TOML_KEY] = Item::Table(servers);
+    if servers.contains_key(CITADEL_KEY) && !force {
+        return Err(VaultError::Validation(
+            "TOML MCP config already contains `[mcp_servers.citadel]`; pass --force to overwrite"
+                .to_string(),
+        ));
     }
 
     let mut citadel_table = Table::new();
@@ -140,15 +141,7 @@ pub fn merge_toml_mcp_config(
             citadel_table["url"] = toml_edit::value(url.as_str());
         }
     }
-
-    let servers_table = doc[MCP_SERVERS_TOML_KEY]
-        .as_table_like_mut()
-        .ok_or_else(|| {
-            VaultError::Validation(format!(
-                "existing TOML MCP config has non-table `{MCP_SERVERS_TOML_KEY}` field"
-            ))
-        })?;
-    servers_table.insert(CITADEL_KEY, Item::Table(citadel_table));
+    servers.insert(CITADEL_KEY, Item::Table(citadel_table));
 
     let mut rendered = doc.to_string();
     if !rendered.ends_with('\n') {
@@ -165,13 +158,7 @@ pub fn agy_plugin_manifest_json() -> String {
         "description": "Local knowledge vault and MCP server for web documentation and Markdown folders",
         "mcpServers": "./mcp_config.json"
     });
-    match serde_json::to_string_pretty(&manifest) {
-        Ok(mut s) => {
-            s.push('\n');
-            s
-        }
-        Err(_) => "{\"name\":\"citadel\",\"mcpServers\":\"./mcp_config.json\"}\n".to_string(),
-    }
+    format!("{manifest:#}\n")
 }
 
 #[cfg(test)]

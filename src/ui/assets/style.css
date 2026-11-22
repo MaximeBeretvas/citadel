@@ -398,10 +398,6 @@ h3 {
   max-width: 100%;
 }
 
-.view[hidden] {
-  display: none;
-}
-
 /* `hidden` must win over component display rules (e.g. .update-release-link). */
 [hidden] {
   display: none !important;

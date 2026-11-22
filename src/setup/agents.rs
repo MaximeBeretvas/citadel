@@ -84,9 +84,6 @@ pub struct PlannedAction {
 /// Complete resolved setup plan for one or more agents.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SetupPlan {
-    pub agents: Vec<AgentKind>,
-    pub scope: SetupScope,
-    pub components: SetupComponents,
     pub transport: McpTransport,
     pub actions: Vec<PlannedAction>,
 }
@@ -113,175 +110,80 @@ pub fn build_plan(
         ));
     }
 
-    let home_dir = match scope {
-        SetupScope::Global => Some(home.ok_or_else(|| {
+    let base = match scope {
+        SetupScope::Local => cwd,
+        SetupScope::Global => home.ok_or_else(|| {
             VaultError::Config("could not determine home directory for global setup".to_string())
-        })?),
-        SetupScope::Local => home,
+        })?,
     };
-
-    let mut unique_agents = Vec::new();
-    let mut seen_agents = HashSet::new();
-    for &agent in agents {
-        if seen_agents.insert(agent) {
-            unique_agents.push(agent);
-        }
-    }
 
     let mut actions = Vec::new();
     let mut seen_paths = HashSet::new();
-
-    for &agent in &unique_agents {
+    for &agent in agents {
+        let mut targets = Vec::new();
         if components.includes_skill() {
-            match (agent, scope) {
-                (AgentKind::Claude, SetupScope::Local) => {
-                    push_action(
-                        &mut actions,
-                        &mut seen_paths,
-                        cwd.join(".claude/skills/citadel/SKILL.md"),
-                        ActionKind::WriteSkillFile,
-                    );
-                }
-                (AgentKind::Claude, SetupScope::Global) => {
-                    let h = home_dir
-                        .ok_or_else(|| VaultError::Config("missing home directory".to_string()))?;
-                    let canonical_dir = h.join(".agents/skills/citadel");
-                    push_action(
-                        &mut actions,
-                        &mut seen_paths,
-                        canonical_dir.join("SKILL.md"),
-                        ActionKind::WriteSkillFile,
-                    );
-                    push_action(
-                        &mut actions,
-                        &mut seen_paths,
-                        h.join(".claude/skills/citadel"),
-                        ActionKind::CreateSkillSymlink {
-                            target: canonical_dir,
-                        },
-                    );
-                }
-                (AgentKind::Agy, SetupScope::Local) | (AgentKind::Codex, SetupScope::Local) => {
-                    push_action(
-                        &mut actions,
-                        &mut seen_paths,
-                        cwd.join(".agents/skills/citadel/SKILL.md"),
-                        ActionKind::WriteSkillFile,
-                    );
-                }
-                (AgentKind::Agy, SetupScope::Global) => {
-                    let h = home_dir
-                        .ok_or_else(|| VaultError::Config("missing home directory".to_string()))?;
-                    let canonical_dir = h.join(".agents/skills/citadel");
-                    push_action(
-                        &mut actions,
-                        &mut seen_paths,
-                        canonical_dir.join("SKILL.md"),
-                        ActionKind::WriteSkillFile,
-                    );
-                    push_action(
-                        &mut actions,
-                        &mut seen_paths,
-                        h.join(".gemini/config/skills/citadel"),
-                        ActionKind::CreateSkillSymlink {
-                            target: canonical_dir,
-                        },
-                    );
-                }
-                (AgentKind::Codex, SetupScope::Global) => {
-                    let h = home_dir
-                        .ok_or_else(|| VaultError::Config("missing home directory".to_string()))?;
-                    push_action(
-                        &mut actions,
-                        &mut seen_paths,
-                        h.join(".agents/skills/citadel/SKILL.md"),
-                        ActionKind::WriteSkillFile,
-                    );
-                }
-            }
+            targets.extend(skill_targets(agent, scope, base));
         }
-
         if components.includes_mcp() {
-            match (agent, scope) {
-                (AgentKind::Claude, SetupScope::Local) => {
-                    push_action(
-                        &mut actions,
-                        &mut seen_paths,
-                        cwd.join(".mcp.json"),
-                        ActionKind::MergeJsonMcp {
-                            include_http_type: true,
-                        },
-                    );
-                }
-                (AgentKind::Claude, SetupScope::Global) => {
-                    let h = home_dir
-                        .ok_or_else(|| VaultError::Config("missing home directory".to_string()))?;
-                    push_action(
-                        &mut actions,
-                        &mut seen_paths,
-                        h.join(".claude.json"),
-                        ActionKind::MergeJsonMcp {
-                            include_http_type: true,
-                        },
-                    );
-                }
-                (AgentKind::Agy, SetupScope::Local) => {
-                    push_action(
-                        &mut actions,
-                        &mut seen_paths,
-                        cwd.join(".agents/plugins/citadel/plugin.json"),
-                        ActionKind::WriteAgyPluginManifest,
-                    );
-                    push_action(
-                        &mut actions,
-                        &mut seen_paths,
-                        cwd.join(".agents/plugins/citadel/mcp_config.json"),
-                        ActionKind::MergeJsonMcp {
-                            include_http_type: false,
-                        },
-                    );
-                }
-                (AgentKind::Agy, SetupScope::Global) => {
-                    let h = home_dir
-                        .ok_or_else(|| VaultError::Config("missing home directory".to_string()))?;
-                    push_action(
-                        &mut actions,
-                        &mut seen_paths,
-                        h.join(".gemini/config/mcp_config.json"),
-                        ActionKind::MergeJsonMcp {
-                            include_http_type: false,
-                        },
-                    );
-                }
-                (AgentKind::Codex, SetupScope::Local) => {
-                    push_action(
-                        &mut actions,
-                        &mut seen_paths,
-                        cwd.join(".codex/config.toml"),
-                        ActionKind::MergeTomlMcp,
-                    );
-                }
-                (AgentKind::Codex, SetupScope::Global) => {
-                    let h = home_dir
-                        .ok_or_else(|| VaultError::Config("missing home directory".to_string()))?;
-                    push_action(
-                        &mut actions,
-                        &mut seen_paths,
-                        h.join(".codex/config.toml"),
-                        ActionKind::MergeTomlMcp,
-                    );
-                }
-            }
+            targets.extend(mcp_targets(agent, scope, base));
+        }
+        for (path, kind) in targets {
+            push_action(&mut actions, &mut seen_paths, path, kind);
         }
     }
 
-    Ok(SetupPlan {
-        agents: unique_agents,
-        scope,
-        components,
-        transport,
-        actions,
-    })
+    Ok(SetupPlan { transport, actions })
+}
+
+/// Skill files and symlinks for `agent`, relative to the scope's `base` directory.
+fn skill_targets(agent: AgentKind, scope: SetupScope, base: &Path) -> Vec<(PathBuf, ActionKind)> {
+    let canonical_dir = base.join(".agents/skills/citadel");
+    let skill_file = (canonical_dir.join("SKILL.md"), ActionKind::WriteSkillFile);
+    let symlink = |rel: &str| {
+        (
+            base.join(rel),
+            ActionKind::CreateSkillSymlink {
+                target: canonical_dir.clone(),
+            },
+        )
+    };
+    match (agent, scope) {
+        (AgentKind::Claude, SetupScope::Local) => vec![(
+            base.join(".claude/skills/citadel/SKILL.md"),
+            ActionKind::WriteSkillFile,
+        )],
+        (AgentKind::Claude, SetupScope::Global) => {
+            vec![skill_file, symlink(".claude/skills/citadel")]
+        }
+        (AgentKind::Agy, SetupScope::Global) => {
+            vec![skill_file, symlink(".gemini/config/skills/citadel")]
+        }
+        (AgentKind::Agy | AgentKind::Codex, SetupScope::Local)
+        | (AgentKind::Codex, SetupScope::Global) => vec![skill_file],
+    }
+}
+
+/// MCP config files for `agent`, relative to the scope's `base` directory.
+fn mcp_targets(agent: AgentKind, scope: SetupScope, base: &Path) -> Vec<(PathBuf, ActionKind)> {
+    let json = |rel: &str, include_http_type: bool| {
+        (
+            base.join(rel),
+            ActionKind::MergeJsonMcp { include_http_type },
+        )
+    };
+    match (agent, scope) {
+        (AgentKind::Claude, SetupScope::Local) => vec![json(".mcp.json", true)],
+        (AgentKind::Claude, SetupScope::Global) => vec![json(".claude.json", true)],
+        (AgentKind::Agy, SetupScope::Local) => vec![
+            (
+                base.join(".agents/plugins/citadel/plugin.json"),
+                ActionKind::WriteAgyPluginManifest,
+            ),
+            json(".agents/plugins/citadel/mcp_config.json", false),
+        ],
+        (AgentKind::Agy, SetupScope::Global) => vec![json(".gemini/config/mcp_config.json", false)],
+        (AgentKind::Codex, _) => vec![(base.join(".codex/config.toml"), ActionKind::MergeTomlMcp)],
+    }
 }
 
 fn push_action(

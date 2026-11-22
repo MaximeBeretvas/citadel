@@ -93,7 +93,7 @@ impl VaultConfig {
 }
 
 /// Parse a boolean environment flag: `1` or `true` (any case) enables it.
-fn parse_flag(raw: Option<&str>) -> bool {
+pub(crate) fn parse_flag(raw: Option<&str>) -> bool {
     raw.map(str::trim)
         .is_some_and(|v| v == "1" || v.eq_ignore_ascii_case("true"))
 }

@@ -211,19 +211,7 @@
     }
   }
 
-  // Health / Version
-  async function loadHealth() {
-    try {
-      const data = await apiRequest("/api/health");
-      const versionEl = el("app-version");
-      if (versionEl && data && data.version) {
-        versionEl.textContent = `v${data.version}`;
-      }
-    } catch {
-      // Keep default version pill quietly
-    }
-  }
-
+  // Version
   async function loadVersion() {
     try {
       const data = await apiRequest("/api/version");
@@ -1052,7 +1040,6 @@
     initUpdatePopover();
     initSqlPresets();
     initEvents();
-    void loadHealth();
     void loadVersion();
 
     if (!window.location.hash) {

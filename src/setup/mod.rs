@@ -5,14 +5,12 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use crate::error::{Result, VaultError};
+use crate::fsutil::{create_dir_symlink, remove_existing_path, write_file_atomic};
 use crate::setup::agents::{
     build_plan, ActionKind, AgentKind, McpTransport, PlannedAction, SetupComponents, SetupPlan,
     SetupScope,
 };
-use crate::setup::merge::{
-    agy_plugin_manifest_json, json_has_citadel_entry, merge_json_mcp_config, merge_toml_mcp_config,
-    toml_has_citadel_entry,
-};
+use crate::setup::merge::{agy_plugin_manifest_json, merge_json_mcp_config, merge_toml_mcp_config};
 use crate::skill::ROUTER_SKILL_MD;
 
 /// Default local Streamable HTTP MCP endpoint served by `citadel serve`.
@@ -43,7 +41,7 @@ pub async fn detect_default_transport(probe_url: &str) -> McpTransport {
 
     match client.get(probe_url).send().await {
         Ok(resp) if resp.status().is_success() => McpTransport::Http(probe_url.to_string()),
-        Ok(_) | Err(_) => McpTransport::Stdio,
+        _ => McpTransport::Stdio,
     }
 }
 
@@ -279,39 +277,18 @@ pub fn apply_plan(plan: &SetupPlan, force: bool) -> Result<ApplyReport> {
     Ok(ApplyReport { written_paths })
 }
 
+/// Refuse to replace an existing skill file, symlink or manifest. MCP configs are
+/// checked by the merge functions, which only object to an existing `citadel` entry.
 fn check_no_conflict(action: &PlannedAction) -> Result<()> {
-    let exists = std::fs::symlink_metadata(&action.path).is_ok();
-    if !exists {
-        return Ok(());
-    }
-
     match &action.kind {
-        ActionKind::WriteSkillFile
-        | ActionKind::CreateSkillSymlink { .. }
-        | ActionKind::WriteAgyPluginManifest => Err(VaultError::Validation(format!(
-            "target already exists at {}; pass --force to overwrite",
-            action.path.display()
-        ))),
-        ActionKind::MergeJsonMcp { .. } => {
-            let existing = std::fs::read_to_string(&action.path)?;
-            if json_has_citadel_entry(&existing) {
-                return Err(VaultError::Validation(format!(
-                    "MCP config at {} already contains `mcpServers.citadel`; pass --force to overwrite",
-                    action.path.display()
-                )));
-            }
-            Ok(())
+        ActionKind::MergeJsonMcp { .. } | ActionKind::MergeTomlMcp => Ok(()),
+        _ if std::fs::symlink_metadata(&action.path).is_ok() => {
+            Err(VaultError::Validation(format!(
+                "target already exists at {}; pass --force to overwrite",
+                action.path.display()
+            )))
         }
-        ActionKind::MergeTomlMcp => {
-            let existing = std::fs::read_to_string(&action.path)?;
-            if toml_has_citadel_entry(&existing) {
-                return Err(VaultError::Validation(format!(
-                    "MCP config at {} already contains `[mcp_servers.citadel]`; pass --force to overwrite",
-                    action.path.display()
-                )));
-            }
-            Ok(())
-        }
+        _ => Ok(()),
     }
 }
 
@@ -328,88 +305,6 @@ fn read_optional_file(path: &Path) -> Result<Option<String>> {
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(err) => Err(err.into()),
     }
-}
-
-/// Replace `path` with `contents` through a sibling temp file and a rename.
-///
-/// Agents such as Claude Code rewrite their config files while running, so a reader
-/// must never see a half-written file. A symlinked config (dotfiles) is followed so the
-/// link survives, and the existing file mode (e.g. `0600` on `~/.claude.json`) is kept.
-fn write_file_atomic(path: &Path, contents: &str) -> Result<()> {
-    use std::io::Write as _;
-    use std::sync::atomic::{AtomicU64, Ordering};
-    static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
-
-    let target = match std::fs::canonicalize(path) {
-        Ok(resolved) => resolved,
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => path.to_path_buf(),
-        Err(err) => return Err(err.into()),
-    };
-    let parent = target.parent().ok_or_else(|| {
-        VaultError::Config(format!(
-            "cannot determine parent directory of {}",
-            target.display()
-        ))
-    })?;
-    let file_name = target
-        .file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or("config");
-    let tmp_path = parent.join(format!(
-        ".{file_name}.citadel.{}.{}.tmp",
-        std::process::id(),
-        TEMP_COUNTER.fetch_add(1, Ordering::Relaxed)
-    ));
-
-    let result = (|| -> Result<()> {
-        let mut options = std::fs::OpenOptions::new();
-        options.write(true).create_new(true);
-        #[cfg(unix)]
-        {
-            // Owner-only until the original mode is copied, so secrets never leak.
-            use std::os::unix::fs::OpenOptionsExt;
-            options.mode(0o600);
-        }
-        let mut file = options.open(&tmp_path)?;
-        if let Ok(meta) = std::fs::metadata(&target) {
-            file.set_permissions(meta.permissions())?;
-        }
-        file.write_all(contents.as_bytes())?;
-        file.sync_all()?;
-        std::fs::rename(&tmp_path, &target)?;
-        Ok(())
-    })();
-    if result.is_err() {
-        let _ = std::fs::remove_file(&tmp_path);
-    }
-    result
-}
-
-fn remove_existing_path(path: &Path) -> Result<()> {
-    match std::fs::symlink_metadata(path) {
-        Ok(meta) => {
-            if meta.file_type().is_dir() {
-                std::fs::remove_dir_all(path)?;
-            } else {
-                std::fs::remove_file(path)?;
-            }
-            Ok(())
-        }
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(err) => Err(err.into()),
-    }
-}
-
-#[cfg(unix)]
-fn create_dir_symlink(target: &Path, link: &Path) -> Result<()> {
-    std::os::unix::fs::symlink(target, link)?;
-    Ok(())
-}
-
-#[cfg(windows)]
-fn create_dir_symlink(target: &Path, link: &Path) -> Result<()> {
-    std::os::windows::fs::symlink_dir(target, link)?;
-    Ok(())
 }
 
 #[cfg(test)]

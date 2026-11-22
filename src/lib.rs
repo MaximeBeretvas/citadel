@@ -3,6 +3,7 @@ pub mod config;
 pub mod daemon;
 pub mod db;
 pub mod error;
+pub(crate) mod fsutil;
 pub mod ingest;
 pub mod mcp;
 pub mod serve;

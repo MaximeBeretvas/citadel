@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 use clap::ValueEnum;
 
 use crate::error::{Result, VaultError};
+use crate::fsutil::{create_dir_symlink, remove_existing_path};
 
 const SKILL_DIR_NAME: &str = "citadel";
 const SKILL_FILE_NAME: &str = "SKILL.md";
@@ -161,33 +162,6 @@ fn ensure_not_exists(path: &Path, label: &str) -> Result<()> {
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
         Err(err) => Err(err.into()),
     }
-}
-
-fn remove_existing_path(path: &Path) -> Result<()> {
-    match std::fs::symlink_metadata(path) {
-        Ok(meta) => {
-            if meta.file_type().is_dir() {
-                std::fs::remove_dir_all(path)?;
-            } else {
-                std::fs::remove_file(path)?;
-            }
-            Ok(())
-        }
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(err) => Err(err.into()),
-    }
-}
-
-#[cfg(unix)]
-fn create_dir_symlink(target: &Path, link: &Path) -> Result<()> {
-    std::os::unix::fs::symlink(target, link)?;
-    Ok(())
-}
-
-#[cfg(windows)]
-fn create_dir_symlink(target: &Path, link: &Path) -> Result<()> {
-    std::os::windows::fs::symlink_dir(target, link)?;
-    Ok(())
 }
 
 #[cfg(test)]

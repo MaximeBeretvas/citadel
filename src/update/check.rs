@@ -37,10 +37,55 @@ pub struct UpdateStatus {
     pub release_url: Option<String>,
 }
 
+impl UpdateCheckCache {
+    /// Cache entry stamped with the current time.
+    pub fn now(latest_version: String, release_url: String) -> Self {
+        Self {
+            checked_at: format_iso8601_utc(current_unix_secs()),
+            latest_version,
+            release_url,
+        }
+    }
+}
+
+/// GitHub Releases API response (only the fields Citadel reads).
 #[derive(Debug, Deserialize)]
-struct GitHubLatestRelease {
-    tag_name: String,
-    html_url: String,
+pub(crate) struct GitHubRelease {
+    pub tag_name: String,
+    pub html_url: String,
+    #[serde(default)]
+    pub assets: Vec<ReleaseAsset>,
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct ReleaseAsset {
+    pub name: String,
+    pub browser_download_url: String,
+}
+
+/// Fetch the release at `api_url` and return it with its tag normalized to a SemVer string.
+pub(crate) async fn fetch_release(
+    client: &reqwest::Client,
+    api_url: &str,
+) -> Result<(GitHubRelease, String)> {
+    let body = client
+        .get(api_url)
+        .send()
+        .await?
+        .error_for_status()?
+        .text()
+        .await?;
+    let release: GitHubRelease = serde_json::from_str(&body)
+        .map_err(|err| VaultError::Other(format!("invalid GitHub release JSON response: {err}")))?;
+
+    let latest = normalize_version_str(&release.tag_name).to_string();
+    if semver::Version::parse(&latest).is_err() {
+        return Err(VaultError::Validation(format!(
+            "release tag '{}' is not a valid semver version",
+            release.tag_name
+        )));
+    }
+    Ok((release, latest))
 }
 
 /// Strip an optional leading `v` / `V` prefix and trim whitespace.
@@ -117,28 +162,9 @@ pub fn write_cache_atomic(path: &Path, cache: &UpdateCheckCache) -> Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-
     let payload = serde_json::to_string_pretty(cache)
         .map_err(|err| VaultError::Other(format!("failed to serialize update cache: {err}")))?;
-
-    // pid + per-process counter: two refreshes in one process never share a temp file.
-    static TEMP_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    let tmp_name = format!(
-        ".update-check.{}.{}.tmp",
-        std::process::id(),
-        TEMP_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-    );
-    let tmp_path = path
-        .parent()
-        .map(|p| p.join(&tmp_name))
-        .unwrap_or_else(|| PathBuf::from(&tmp_name));
-
-    std::fs::write(&tmp_path, format!("{payload}\n"))?;
-    if let Err(err) = std::fs::rename(&tmp_path, path) {
-        let _ = std::fs::remove_file(&tmp_path);
-        return Err(err.into());
-    }
-    Ok(())
+    crate::fsutil::write_file_atomic(path, &format!("{payload}\n"))
 }
 
 /// Decide whether a stale cache may start a refresh now, and record the attempt if so.
@@ -177,48 +203,29 @@ pub async fn refresh_cache(api_url: &str, path: &Path) -> Result<UpdateCheckCach
         .timeout(Duration::from_secs(3))
         .user_agent(format!("citadel/{}", env!("CARGO_PKG_VERSION")))
         .build()?;
-
-    let resp = client.get(api_url).send().await?.error_for_status()?;
-    let body = resp.text().await?;
-    let release: GitHubLatestRelease = serde_json::from_str(&body)
-        .map_err(|err| VaultError::Other(format!("invalid GitHub release JSON response: {err}")))?;
-
-    let latest_version = normalize_version_str(&release.tag_name).to_string();
-    if semver::Version::parse(&latest_version).is_err() {
-        return Err(VaultError::Validation(format!(
-            "release tag '{}' is not a valid semver version",
-            release.tag_name
-        )));
-    }
-
-    let cache = UpdateCheckCache {
-        checked_at: format_iso8601_utc(current_unix_secs()),
-        latest_version,
-        release_url: release.html_url,
-    };
+    let (release, latest) = fetch_release(&client, api_url).await?;
+    let cache = UpdateCheckCache::now(latest, release.html_url);
     write_cache_atomic(path, &cache)?;
     Ok(cache)
 }
 
-/// Spawn a detached, non-blocking background refresh that swallows all errors silently.
+/// Spawn a detached, non-blocking refresh on the current tokio runtime that swallows all errors.
 pub fn spawn_background_refresh(path: PathBuf) {
-    if let Ok(handle) = tokio::runtime::Handle::try_current() {
-        handle.spawn(async move {
-            let _ = refresh_cache(DEFAULT_RELEASES_API_URL, &path).await;
-        });
-        return;
-    }
+    tokio::spawn(async move {
+        let _ = refresh_cache(DEFAULT_RELEASES_API_URL, &path).await;
+    });
+}
 
-    let _ = std::thread::Builder::new()
-        .name("citadel-update-check".to_string())
-        .spawn(move || {
-            if let Ok(rt) = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-            {
-                let _ = rt.block_on(refresh_cache(DEFAULT_RELEASES_API_URL, &path));
-            }
-        });
+/// Read the cached update status and decide whether the caller should start a refresh now.
+///
+/// Returns `true` only when the cache is stale, update checks are enabled, and this
+/// caller won the rate-limited refresh claim.
+pub fn read_status_and_claim_refresh(config: &VaultConfig) -> (UpdateStatus, bool) {
+    let cache_path = config.update_check_path();
+    let now = current_unix_secs();
+    let (status, is_stale) = read_cached_status(&cache_path, env!("CARGO_PKG_VERSION"), now);
+    let refresh = is_stale && !config.no_update_check && claim_refresh_attempt(&cache_path, now);
+    (status, refresh)
 }
 
 /// Spawn a detached child process running `__update-check-refresh` so the refresh outlives short-lived CLI commands.
@@ -241,9 +248,7 @@ pub fn maybe_print_cli_update_notice(config: &VaultConfig) {
         return;
     }
 
-    let cache_path = config.update_check_path();
-    let (status, is_stale) =
-        read_cached_status(&cache_path, env!("CARGO_PKG_VERSION"), current_unix_secs());
+    let (status, refresh) = read_status_and_claim_refresh(config);
 
     if status.update_available {
         if let Some(latest) = status.latest_version {
@@ -251,7 +256,7 @@ pub fn maybe_print_cli_update_notice(config: &VaultConfig) {
         }
     }
 
-    if is_stale && claim_refresh_attempt(&cache_path, current_unix_secs()) {
+    if refresh {
         if let Ok(exe) = std::env::current_exe() {
             spawn_detached_cli_refresh_with_url(&exe, &config.data_dir, DEFAULT_RELEASES_API_URL);
         }

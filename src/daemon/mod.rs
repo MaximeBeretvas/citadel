@@ -153,20 +153,6 @@ pub fn start_daemon(config: &VaultConfig, foreground: bool) -> Result<Option<u32
     config.ensure_data_dir()?;
 
     if foreground {
-        return start_daemon_with_exe(config, true, Path::new(""));
-    }
-
-    let exe = std::env::current_exe()?;
-    start_daemon_with_exe(config, false, &exe)
-}
-
-/// Start the background daemon using an explicit executable path (avoids Linux `/proc/self/exe` `(deleted)` paths after self-update).
-pub fn start_daemon_with_exe(
-    config: &VaultConfig,
-    foreground: bool,
-    exe: &Path,
-) -> Result<Option<u32>> {
-    if foreground {
         let _lock = PidLock::acquire(&config.pid_path())?;
         let rt = tokio::runtime::Builder::new_multi_thread()
             .enable_all()
@@ -176,6 +162,11 @@ pub fn start_daemon_with_exe(
         return Ok(None);
     }
 
+    start_daemon_with_exe(config, &std::env::current_exe()?)
+}
+
+/// Spawn the detached daemon from an explicit executable path (avoids Linux `/proc/self/exe` `(deleted)` paths after self-update).
+pub fn start_daemon_with_exe(config: &VaultConfig, exe: &Path) -> Result<Option<u32>> {
     if let DaemonStatus::Running(pid) = daemon_status(config)? {
         return Err(VaultError::AlreadyRunning(format!(
             "daemon is already running (pid {pid})"
@@ -857,7 +848,7 @@ mod tests {
         let vault_dir = tempdir().expect("vault tempdir");
         let config = VaultConfig::new(vault_dir.path());
         let missing_exe = vault_dir.path().join("nonexistent-citadel-bin");
-        let err = start_daemon_with_exe(&config, false, &missing_exe)
+        let err = start_daemon_with_exe(&config, &missing_exe)
             .expect_err("nonexistent explicit exe must fail with io NotFound");
         assert!(
             matches!(err, VaultError::Io(ref io_err) if io_err.kind() == std::io::ErrorKind::NotFound),
