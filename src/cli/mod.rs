@@ -556,12 +556,12 @@ fn dispatch_command<W: Write>(
 
             if args.agents.is_empty() {
                 anyhow::bail!(
-                    "specify at least one --agent <claude|agy|codex> (or run `citadel setup` in an interactive terminal)"
+                    "setup flags were given, so the wizard is skipped: add --agent <claude|agy|codex> and --scope <local|global>, or run `citadel setup` with no flags in a terminal for the wizard"
                 );
             }
             let scope = args.scope.ok_or_else(|| {
                 anyhow::anyhow!(
-                    "specify --scope <local|global> when running `citadel setup` non-interactively"
+                    "setup flags were given, so the wizard is skipped: add --scope <local|global>, or run `citadel setup` with no flags in a terminal for the wizard"
                 )
             })?;
             let transport = args.transport.map(|t| match t {
