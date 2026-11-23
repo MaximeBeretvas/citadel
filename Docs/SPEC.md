@@ -516,7 +516,7 @@ Running `citadel setup` in an interactive TTY launches a guided `cliclack` wizar
 The `Makefile` drives Docker by default (`RUNTIME ?= docker`); Apple's macOS OCI runtime (**`container`**, `https://github.com/apple/container`) remains supported with `RUNTIME=container`, which also runs `container system start` and vendors crates for its builder. Apple `container` is beta and its build VM cache filled a host disk, hence the default (ADR-0003).
 - **Multi-stage `Dockerfile` (OCI-standard):**
   - Builder stage: `rust:1-slim` compiling `--release` binary (`linux/arm64` native on Apple Silicon, `linux/amd64` portable).
-  - Runtime stage: `debian:bookworm-slim` (or `gcr.io/distroless/cc-debian12`) running as non-root user `citadel`, lite image ~25–35 MB with `make build-lite` / `--build-arg FEATURES=`; the default `FEATURES=chrome` image installs headless Chromium (~1.2 GB).
+  - Runtime stage: `debian:bookworm-slim` (or `gcr.io/distroless/cc-debian12`) running as non-root user `citadel`, lite image ~173 MB with `make build-lite` / `--build-arg FEATURES=`; the default `FEATURES=chrome` image installs headless Chromium (~1.2 GB). Sizes measured with Docker on arm64, v0.2.0.
 - **Container entrypoint:** `citadel serve --bind 0.0.0.0:4317` (runs the background scheduler, local folder watcher, embedded Web UI on `/`, REST API on `/api/*`, and MCP Streamable HTTP on `/mcp`).
 - **Standard workflow (`make build` / `make run` wrap this; replace `docker` with `container` and start `container system start` first for Apple's runtime):**
   ```bash
