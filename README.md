@@ -34,9 +34,11 @@ Install the `citadel` binary straight from GitHub with Cargo. Requires a Rust to
 ```bash
 cargo install --git https://github.com/mberetvas/citadel --locked
 
-# Optional: include headless Chromium support for JS-rendered sites
-cargo install --git https://github.com/mberetvas/citadel --locked --features chrome
+# Lite build: no headless-browser support (smaller binary, no Chrome needed)
+cargo install --git https://github.com/mberetvas/citadel --locked --no-default-features
 ```
+
+The default build includes the `chrome` feature, so Sources added with `--render-js` can crawl sites whose navigation is built by JavaScript. Those crawls need Google Chrome or Chromium installed (or `CHROME_URL` pointing at a running instance); Citadel launches a private headless browser only while such a crawl runs, so other Sources and the idle daemon never start one.
 
 This builds the `main` branch; add `--tag <tag>` or `--branch <name>` to pin another ref, and re-run with `--force` to upgrade. Ensure `~/.cargo/bin` is on your `$PATH`, then verify and optionally register the background service:
 
@@ -50,7 +52,7 @@ citadel daemon install
 
 ### Prebuilt Binaries (macOS & Linux)
 
-Every [GitHub Release](https://github.com/mberetvas/citadel/releases) ships a `citadel` binary for macOS (Apple Silicon `aarch64-apple-darwin`, Intel `x86_64-apple-darwin`) and Linux (`x86_64-unknown-linux-gnu`, `aarch64-unknown-linux-gnu`; glibc 2.35+), plus a `checksums.sha256` manifest. No Rust toolchain needed:
+Every [GitHub Release](https://github.com/mberetvas/citadel/releases) ships a `citadel` binary built with the default features (including `chrome`) for macOS (Apple Silicon `aarch64-apple-darwin`, Intel `x86_64-apple-darwin`) and Linux (`x86_64-unknown-linux-gnu`, `aarch64-unknown-linux-gnu`; glibc 2.35+), plus a `checksums.sha256` manifest. No Rust toolchain needed:
 
 ```bash
 V=v0.2.0                  # release tag
@@ -73,11 +75,11 @@ Windows is **not yet tested** and has no prebuilt binary. Install with the `carg
 Uses Apple's native macOS OCI runtime ([`apple/container`](https://github.com/apple/container))—no Docker Desktop required.
 
 ```bash
-# Build the multi-stage non-root image (~25–35 MB)
+# Build the multi-stage non-root image (includes Chromium for --render-js Sources)
 make build
 
-# Optional: build with headless Chromium support for JS-rendered sites
-FEATURES=chrome make build
+# Lite image without Chromium (~25–35 MB); --render-js Sources fall back to static HTTP
+make build-lite
 
 # Start the container (Web UI + REST API + MCP HTTP on loopback)
 make run
@@ -103,10 +105,9 @@ make clean                     # Stop and remove the container (preserves data v
 For development, install from a cloned repository instead:
 
 ```bash
-cargo install --path . --locked
+make install          # cargo install --path . --locked --force (default features, includes chrome)
 
-# Optional: include headless Chromium support for JS-rendered sites
-cargo install --path . --locked --features chrome
+make install-lite     # same, with --no-default-features (no headless-browser support)
 ```
 
 ## MCP Client Configuration

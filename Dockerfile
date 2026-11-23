@@ -2,7 +2,8 @@
 
 FROM rust:1-slim AS builder
 
-ARG FEATURES=""
+# Cargo features to build with. Default "chrome" enables JS rendering; FEATURES="" builds lite.
+ARG FEATURES="chrome"
 
 WORKDIR /app
 
@@ -10,16 +11,12 @@ COPY . .
 
 RUN OFFLINE=""; \
     if [ -d vendor ]; then OFFLINE="--offline"; fi; \
-    if [ -n "$FEATURES" ]; then \
-        cargo build --release --locked $OFFLINE --features "$FEATURES"; \
-    else \
-        cargo build --release --locked $OFFLINE; \
-    fi \
+    cargo build --release --locked $OFFLINE --no-default-features --features "$FEATURES" \
     && strip /app/target/release/citadel || true
 
 FROM debian:trixie-slim AS runtime
 
-ARG FEATURES=""
+ARG FEATURES="chrome"
 
 # Reuse ca-certificates from builder (rust:1-slim ships Debian trixie-slim with ca-certificates pre-installed)
 COPY --from=builder /etc/ssl/certs /etc/ssl/certs

@@ -24,12 +24,12 @@ fn dockerfile_meets_multi_stage_non_root_spec() {
         "Dockerfile must use debian:trixie-slim AS runtime"
     );
     assert!(
-        df.contains("ARG FEATURES=\"\""),
-        "Dockerfile must declare ARG FEATURES=\"\""
+        df.contains("ARG FEATURES=\"chrome\""),
+        "Dockerfile must default ARG FEATURES=\"chrome\" (JS rendering on by default)"
     );
     assert!(
-        df.contains("--features"),
-        "Dockerfile must support conditional --features build arg"
+        df.contains("--no-default-features --features \"$FEATURES\""),
+        "Dockerfile must let FEATURES fully control the build so an empty value builds lite"
     );
     assert!(
         df.contains("ca-certificates"),
@@ -109,9 +109,24 @@ fn makefile_uses_strictly_apple_container_cli() {
         "VOLUME ?=",
         "PORT ?=",
         "BOOKS_DIR ?=",
-        "FEATURES ?=",
+        "FEATURES ?= chrome",
     ] {
         assert!(mk.contains(var), "Makefile must define {var}");
+    }
+
+    for (target, command) in [
+        ("install:", "cargo install --path . --locked --force"),
+        (
+            "install-lite:",
+            "cargo install --path . --locked --force --no-default-features",
+        ),
+        ("build-lite:", "FEATURES="),
+    ] {
+        assert!(mk.contains(target), "Makefile must define target {target}");
+        assert!(
+            mk.contains(command),
+            "Makefile {target} must run `{command}`"
+        );
     }
 
     assert!(mk.contains(".PHONY:"), "Makefile must declare .PHONY");

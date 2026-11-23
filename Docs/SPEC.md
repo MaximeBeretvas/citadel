@@ -76,7 +76,7 @@ Resolved via `CITADEL_HOME` env var, `--data-dir` flag, or OS defaults (`directo
 | Async runtime | `tokio` (multi-thread, `rt-multi-thread`, `macros`, `signal`, `time`) | Required by `spider` and `axum` |
 | CLI | `clap` (derive) | Type-safe subcommands, help, shell completions |
 | Storage & FTS | `rusqlite` (`bundled`, `modern_sqlite`, `hooks`, `functions`) | Zero system SQLite dependency, FTS5 + authorizer + progress handler |
-| Web crawling | `spider` + `spider_transformations` (MIT) | Async crawler, sitemap, politeness, readability + HTML-to-MD, optional `chrome` feature |
+| Web crawling | `spider` + `spider_transformations` (MIT) | Async crawler, sitemap, politeness, readability + HTML-to-MD, `chrome` feature (default) |
 | Markdown parsing | `pulldown-cmark` | Fast AST heading splitter for `sections` |
 | Hashing & Diffing | `sha2`, `similar` | Normalized SHA-256 content hashes + unified diffs |
 | File watching | `notify` + `notify-debouncer-mini` | Cross-platform FS events for local Markdown folders |
@@ -88,7 +88,7 @@ Resolved via `CITADEL_HOME` env var, `--data-dir` flag, or OS defaults (`directo
 
 ### Cargo Feature Flags
 - `default = []` — pure Rust binary, no browser dependencies.
-- `chrome = ["spider/chrome"]` — enables optional per-source headless Chrome/CDP rendering for JS-only SPAs.
+- `default = ["chrome"]`; `chrome = ["spider/chrome", "dep:tempfile"]` — per-source headless Chrome/CDP rendering for JS-built pages. Lite builds use `--no-default-features` (`make install-lite`, `make build-lite`).
 
 ### Source Layout
 ```text
@@ -267,7 +267,7 @@ Every SQL statement executed through MCP passes **four layers of defense**:
    - Scope restricted to `origin` host + path prefix (unless overridden by `include_patterns`).
    - `respect_robots_txt(true)`, configurable `max_pages` and `max_depth`, polite concurrency cap (default 4 concurrent requests, 100 ms delay).
    - Automatic `sitemap.xml` discovery; if `llms.txt` exists at root, include its linked URLs in the seed queue.
-   - If `source.render_js == 1` and binary is built with `--features chrome`, use `spider`'s Chrome headless mode; otherwise return a clear warning if `chrome` feature is absent.
+   - If `source.render_js == 1` and the binary has the `chrome` feature, launch a private headless Chrome for this crawl (temporary profile, `src/ingest/browser.rs`) — or use `CHROME_URL` when set — and hand it to `spider` via `with_chrome_connection`; wait for idle network + idle DOM (10 s cap per page) before reading links. No reachable browser fails the Sync with an actionable error. Without the `chrome` feature, crawl over static HTTP and return a clear warning.
 2. **Extraction:** Transform raw HTML with `spider_transformations::transformation::content` (`ReturnFormat::Markdown`, `readability: true`, stripping `<nav>`, `<footer>`, `<script>`, `<style>`).
 3. **Stale Detection:** Track the set of URIs seen during a full sync run. Any previously `active` page for that source **not** seen in the completed crawl is marked `status = 'stale'` (never silently deleted). Pages returning 4xx/5xx are marked `status = 'error'` with `http_status` and `error_message` while preserving their last good `content_md`.
 
@@ -516,7 +516,7 @@ Running `citadel setup` in an interactive TTY launches a guided `cliclack` wizar
 Uses Apple's native macOS OCI runtime (**`container`**, `https://github.com/apple/container`)—no Docker Desktop required.
 - **Multi-stage `Dockerfile` (OCI-standard):**
   - Builder stage: `rust:1-slim` compiling `--release` binary (`linux/arm64` native on Apple Silicon, `linux/amd64` portable).
-  - Runtime stage: `debian:bookworm-slim` (or `gcr.io/distroless/cc-debian12`) running as non-root user `citadel`, final image ~25–35 MB (optional `--build-arg FEATURES=chrome` variant installs headless Chromium).
+  - Runtime stage: `debian:bookworm-slim` (or `gcr.io/distroless/cc-debian12`) running as non-root user `citadel`, final image ~25–35 MB (default `FEATURES=chrome` installs headless Chromium; `make build-lite` / `--build-arg FEATURES=` builds without it).
 - **Container entrypoint:** `citadel serve --bind 0.0.0.0:4317` (runs the background scheduler, local folder watcher, embedded Web UI on `/`, REST API on `/api/*`, and MCP Streamable HTTP on `/mcp`).
 - **Standard `container` CLI workflow:**
   ```bash
@@ -592,4 +592,4 @@ Uses Apple's native macOS OCI runtime (**`container`**, `https://github.com/appl
 3. Check the Release page lists the four tarballs and `checksums.sha256`; `citadel update --check` on an older build reports the new version.
 
 ### Out of Scope
-Windows CI, binaries, self-update and daemon (Windows is not yet tested); container image builds in CI (no Apple `container` on GitHub runners); `--features chrome` release builds; macOS signing/notarization; dependency auditing; automated version bumps.
+Windows CI, binaries, self-update and daemon (Windows is not yet tested); container image builds in CI (no Apple `container` on GitHub runners); macOS signing/notarization; dependency auditing; automated version bumps.

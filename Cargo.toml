@@ -7,7 +7,7 @@ license = "Apache-2.0"
 repository = "https://github.com/mberetvas/citadel"
 
 [features]
-default = []
+default = ["chrome"]
 chrome = ["spider/chrome", "dep:tempfile"]
 
 [dependencies]

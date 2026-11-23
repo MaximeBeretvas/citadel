@@ -4,16 +4,30 @@ VOLUME ?= citadel-data
 PORT ?= 4317
 DNS ?= 1.1.1.1
 BOOKS_DIR ?=
-FEATURES ?=
+# Cargo features for the container image. "chrome" (default) enables JS rendering for
+# render_js Sources; use `make build-lite` (FEATURES=) for an image without a browser.
+FEATURES ?= chrome
 CMD ?= list
 
-.PHONY: build run stop logs exec clean
+.PHONY: install install-lite build build-lite run stop logs exec clean
+
+# Native install into ~/.cargo/bin with the default features (includes chrome).
+install:
+	cargo install --path . --locked --force
+
+# Native install without the chrome feature: no browser stack, render_js falls back to static HTTP.
+install-lite:
+	cargo install --path . --locked --force --no-default-features
 
 build:
 	@mkdir -p .cargo
 	@trap 'rm -rf vendor .cargo' EXIT; \
 	cargo vendor --locked --versioned-dirs vendor > .cargo/config.toml; \
-	container build $(if $(FEATURES),--build-arg FEATURES=$(FEATURES),) -t $(IMAGE) .
+	container build --build-arg FEATURES="$(FEATURES)" -t $(IMAGE) .
+
+# Container image without chrome or chromium.
+build-lite:
+	$(MAKE) build FEATURES=
 
 run:
 	container system status >/dev/null 2>&1 || container system start

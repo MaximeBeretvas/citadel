@@ -165,13 +165,14 @@ pub fn atomic_replace_binary(new_bin: &Path, current_bin: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Warning to show before replacing a binary built with Cargo features that release binaries lack.
-fn feature_loss_warning(built_with_chrome: bool) -> Option<&'static str> {
-    built_with_chrome.then_some(
-        "this citadel was built with the `chrome` feature, but release binaries are not: \
-         after the update, Sources added with --render-js fall back to a static HTTP crawl. \
-         To keep JavaScript rendering, reinstall from source with \
-         `cargo install --path . --locked --features chrome` instead.",
+/// Note to show before replacing a binary whose Cargo features differ from release binaries,
+/// which are built with the default features (including `chrome`).
+fn feature_build_warning(built_with_chrome: bool) -> Option<&'static str> {
+    (!built_with_chrome).then_some(
+        "this citadel is a lite build without the `chrome` feature, but release binaries \
+         include it: after the update, Sources added with --render-js use JavaScript rendering \
+         (Chrome or Chromium required). To stay lite, skip this update and run \
+         `make install-lite` from a source checkout instead.",
     )
 }
 
@@ -224,7 +225,7 @@ pub async fn run_update<W: Write>(opts: UpdateOpts, out: &mut W) -> Result<()> {
         return Ok(());
     }
 
-    if let Some(warning) = feature_loss_warning(cfg!(feature = "chrome")) {
+    if let Some(warning) = feature_build_warning(cfg!(feature = "chrome")) {
         writeln!(out, "Warning: {warning}")?;
     }
 
@@ -561,11 +562,11 @@ mod tests {
     }
 
     #[test]
-    fn updating_a_chrome_build_warns_that_js_rendering_is_lost() {
-        assert_eq!(feature_loss_warning(false), None);
-        let warning = feature_loss_warning(true).expect("a chrome build must be warned");
-        assert!(warning.contains("--render-js"), "{warning}");
-        assert!(warning.contains("--features chrome"), "{warning}");
+    fn updating_a_lite_build_says_the_release_adds_js_rendering() {
+        assert_eq!(feature_build_warning(true), None);
+        let warning = feature_build_warning(false).expect("a lite build must be told");
+        assert!(warning.contains("JavaScript rendering"), "{warning}");
+        assert!(warning.contains("make install-lite"), "{warning}");
     }
 
     #[test]
