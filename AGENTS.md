@@ -3,7 +3,7 @@
 ## Context Pointers
 Read the authoritative doc before acting on its branch; never duplicate its details here:
 - [Docs/PRD.md](./Docs/PRD.md) — product scope, user journeys, functional & non-functional requirements.
-- [Docs/SPEC.md](./Docs/SPEC.md) — Rust crate stack, module layout, SQLite + FTS5 schema, MCP `query`/`manage` contracts, CLI, embedded UI, and Apple `container`/native deployment.
+- [Docs/SPEC.md](./Docs/SPEC.md) — Rust crate stack, module layout, SQLite + FTS5 schema, MCP `query`/`manage` contracts, CLI, embedded UI, and container (Docker default, Apple `container` optional)/native deployment.
 - [REVIEW.md](./REVIEW.md) — grounded verification & visual feedback loops (headless Chrome UI screenshots, MCP JSON-RPC probes, container smoke tests) and `HumanAudit` evidence format.
 - `Docs/AtomicTasks/` *(created in AtomicTasks)* — ordered atomic task specs and acceptance criteria.
 - [CONTEXT.md](./CONTEXT.md) — domain glossary (Source, Origin, Sync, Sync claim…); use these terms.
@@ -35,9 +35,9 @@ Follow `AtomicTasks -> LLMCode -> Checks -> HumanAudit` for every change:
    cargo clippy --all-targets -- -D warnings
    cargo test
    ```
-   When `Dockerfile` changes, also verify using Apple's `container` CLI (never `docker`):
+   When `Dockerfile` or `Makefile` changes, also build the image with Docker (the default runtime; ADR-0003). Never run Apple `container` as a check: it is beta and has crashed a host.
    ```bash
-   container build -t citadel:check .
+   docker build -t citadel:check .
    ```
    If any check fails, fix the root cause and re-run the full gate.
 4. **HumanAudit handoff:** Summarize changed files, exact command results, and any risks or assumptions; wait for human review before merging.

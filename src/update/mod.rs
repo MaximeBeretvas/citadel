@@ -407,25 +407,50 @@ async fn print_container_upgrade_guidance<W: Write>(
     }
     let checkout_tag = newer.map_or("<latest release tag>", |release| release.tag.as_str());
 
+    write_container_rebuild_steps(
+        out,
+        container_cli(Path::new("/.dockerenv").exists()),
+        checkout_tag,
+    )?;
+    Ok(())
+}
+
+/// CLI of the container runtime Citadel runs under: Docker creates `/.dockerenv`, Apple's
+/// `container` creates no marker file (it is detected through `CITADEL_CONTAINER=1`).
+fn container_cli(dockerenv_exists: bool) -> &'static str {
+    if dockerenv_exists {
+        "docker"
+    } else {
+        "container"
+    }
+}
+
+/// Steps to rebuild and recreate the container from the release source on the host.
+fn write_container_rebuild_steps<W: Write>(
+    out: &mut W,
+    cli: &str,
+    checkout_tag: &str,
+) -> Result<()> {
     writeln!(
         out,
         "Self-updating in place is disabled inside containers. To upgrade, check out the release \
          in your Citadel source checkout on the host, then rebuild and recreate the container \
-         with Apple `container`:"
+         with `{cli}`:"
     )?;
     writeln!(out, "  git fetch --tags && git checkout {checkout_tag}")?;
-    writeln!(out, "  container build --pull -t citadel:latest .")?;
-    writeln!(out, "  container stop citadel && container rm citadel")?;
+    writeln!(out, "  {cli} build --pull -t citadel:latest .")?;
+    writeln!(out, "  {cli} stop citadel && {cli} rm citadel")?;
     writeln!(
         out,
-        "  container run -d --name citadel -p 127.0.0.1:4317:4317 -e CITADEL_HOME=/data \
+        "  {cli} run -d --name citadel -p 127.0.0.1:4317:4317 -e CITADEL_HOME=/data \
          -e CITADEL_CONTAINER=1 -v citadel-data:/data citadel:latest"
     )?;
     writeln!(
         out,
         "Add any other options the container was started with (such as `--dns 1.1.1.1` or \
-         `-v <folder>:/sources/books:ro`), or replace the `container` commands with \
-         `make build && make run`, passing the same FEATURES and BOOKS_DIR."
+         `-v <folder>:/sources/books:ro`), or replace the `{cli}` commands with \
+         `make build && make run`, passing the same FEATURES and BOOKS_DIR (and RUNTIME=container \
+         for Apple's runtime)."
     )?;
     Ok(())
 }
@@ -959,6 +984,31 @@ mod tests {
         );
         assert!(text.contains("-e CITADEL_CONTAINER=1"), "{text}");
         assert!(text.contains("make build && make run"), "{text}");
+    }
+
+    #[test]
+    fn rebuild_steps_name_the_cli_of_the_running_container_runtime() {
+        assert_eq!(container_cli(true), "docker");
+        assert_eq!(container_cli(false), "container");
+
+        let mut out = Vec::new();
+        write_container_rebuild_steps(&mut out, "docker", "v0.2.0").expect("write steps");
+        let text = String::from_utf8(out).expect("utf-8");
+        assert!(
+            text.contains("git fetch --tags && git checkout v0.2.0"),
+            "{text}"
+        );
+        assert!(
+            text.contains("docker build --pull -t citadel:latest ."),
+            "{text}"
+        );
+        assert!(
+            text.contains("docker stop citadel && docker rm citadel"),
+            "{text}"
+        );
+        assert!(text.contains("docker run -d --name citadel"), "{text}");
+        assert!(text.contains("make build && make run"), "{text}");
+        assert!(!text.contains("container build"), "{text}");
     }
 
     #[tokio::test]

@@ -70,15 +70,15 @@ Make sure `~/.local/bin` is on your `$PATH` (on macOS it is not by default: add 
 
 Windows is **not yet tested** and has no prebuilt binary. Install with the `cargo install --git` command above, or build from a checkout (see below). `citadel update` and `citadel daemon install` are not supported on Windows.
 
-## Alternative: Apple `container`
+## Alternative: Container (Docker)
 
-Uses Apple's native macOS OCI runtime ([`apple/container`](https://github.com/apple/container))—no Docker Desktop required.
+The `Makefile` drives Docker by default. Apple's `container` CLI ([`apple/container`](https://github.com/apple/container)) also works: add `RUNTIME=container` to any target (for example `make build RUNTIME=container`). It is still beta and crashed a Mac during an image build, so Docker is the default.
 
 ```bash
 # Build the multi-stage non-root image (includes Chromium for --render-js Sources)
 make build
 
-# Lite image without Chromium (~25–35 MB); --render-js Sources fall back to static HTTP
+# Lite image without Chromium; --render-js Sources fall back to static HTTP
 make build-lite
 
 # Start the container (Web UI + REST API + MCP HTTP on loopback)
@@ -117,7 +117,7 @@ make install-lite     # same, with --no-default-features (no headless-browser su
 - **`query`**: Execute a single read-only SQLite/FTS5 `SELECT` statement against the vault (`v_sources`, `pages`, `sections`, `pages_fts`, `sections_fts`, `v_recent_changes`) with `SQLITE_OPEN_READ_ONLY`, `PRAGMA query_only = ON`, authorizer allowlist, 5-second timeout, and row/byte caps.
 - **`manage`**: Register, inspect, sync, or remove sources (`add`, `list`, `show`, `sync`, `rm`) with directory canonicalization on local paths. Every entry point (CLI, UI, MCP) refuses Private origins (loopback, private network, link-local, `localhost`); set `CITADEL_ALLOW_PRIVATE_ORIGINS=1` to index intranet or `localhost` docs.
 
-### Streamable HTTP (Recommended with `citadel serve` or Apple `container`)
+### Streamable HTTP (Recommended with `citadel serve` or the container)
 
 Point Claude, Antigravity, or any Streamable HTTP MCP client to:
 
@@ -144,18 +144,20 @@ Point Claude, Antigravity, or any Streamable HTTP MCP client to:
 }
 ```
 
-### Apple `container` `stdio` (`container exec -i citadel citadel mcp`)
+### Container `stdio` (`docker exec -i citadel citadel mcp`)
 
 ```json
 {
   "mcpServers": {
     "citadel": {
-      "command": "container",
+      "command": "docker",
       "args": ["exec", "-i", "citadel", "citadel", "mcp"]
     }
   }
 }
 ```
+
+With `RUNTIME=container`, use `"command": "container"` instead.
 
 ## Agent Skill Installation
 

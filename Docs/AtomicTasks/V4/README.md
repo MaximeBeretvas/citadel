@@ -25,6 +25,8 @@ links, but after JavaScript runs the page holds 1,771 unique in-scope `<a href>`
   reading links.
 - **Default features:** `default = ["chrome"]`. Lite builds use `--no-default-features`, through
   `make install-lite` (native) and `make build-lite` (container).
+- **Container runtime:** Docker by default; Apple `container` with `RUNTIME=container`
+  (ADR-0003), after Apple `container` crashed the host during a build.
 - **Release & update:** release tarballs include `chrome`; `citadel update` warns a lite build that
   the update adds JS rendering. Version 0.2.0 is the first published release.
 
@@ -33,11 +35,13 @@ links, but after JavaScript runs the page holds 1,771 unique in-scope `<a href>`
 ```mermaid
 flowchart TD
     T01["01: render_js waits & per-crawl browser"] --> T02["02: chrome by default + lite opt-out"]
-    T02 --> T03["03: bump to 0.2.0"]
+    T02 --> T04["04: Docker default runtime"]
+    T04 --> T03["03: bump to 0.2.0"]
 ```
 
 | # | Task | Commit |
 |---|---|---|
 | 01 | [render_js waits & per-crawl browser](./01-render-js-browser.md) | `feat(ingest): render JS-built links with a per-crawl headless browser` |
 | 02 | [chrome by default + lite opt-out](./02-chrome-default-lite-opt-out.md) | `feat(build): enable chrome by default with make install-lite/build-lite opt-out` |
+| 04 | [Docker default runtime](./04-docker-default-runtime.md) | `feat(build): make Docker the default container runtime, keep Apple container optional` |
 | 03 | [Bump to 0.2.0](./03-bump-0-2-0.md) | `chore(release): bump version to 0.2.0` |

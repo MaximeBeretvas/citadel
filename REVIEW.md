@@ -16,7 +16,7 @@ Never claim a Rust invariant, MCP response, CLI flow, or UI layout works from re
 | MCP (`src/mcp/**`) | `stdio` JSON-RPC Purity + `/mcp` HTTP Probe | `python3` / `jq`, `curl` |
 | Embedded Web UI (`src/ui/**`) | **Portable Headless Chrome Visual Loop** | Chrome / Chromium (`CHROME_BIN`), `curl` |
 | CLI & Skill (`src/cli/**`, `src/skill/**`) | Temp-Vault CLI & Symlink Smoke | `cargo run` |
-| Container (`Dockerfile`, `Makefile`) | Apple `container` Build + Health/MCP Smoke | `container` CLI |
+| Container (`Dockerfile`, `Makefile`) | Docker Build + Health/MCP Smoke | `docker` CLI |
 
 ---
 
@@ -149,12 +149,13 @@ rm -rf /tmp/wv-cli-review
 
 ---
 
-## 5. Apple `container` Loop (`Dockerfile`, `Makefile`)
+## 5. Container Loop (`Dockerfile`, `Makefile`)
 
 ```bash
-container build -t citadel:check .
+docker build -t citadel:check .                    # default image (chrome)
+docker build --build-arg FEATURES= -t citadel:check-lite .   # lite image
 ```
-When testing runtime behavior, start a short-lived container on loopback (`127.0.0.1:4317:4317`), verify `curl -sf http://127.0.0.1:4317/api/health` and `POST /mcp`, then stop and remove the test container. If running on Linux/CI without Apple's `container` CLI, note `Container build: skipped (Apple container CLI unavailable)` in `HumanAudit`.
+When testing runtime behavior, start a short-lived container on loopback (`127.0.0.1:4317:4317`), verify `curl -sf http://127.0.0.1:4317/api/health` and `POST /mcp`, then stop and remove the test container. For `render_js` changes, also run a small `citadel add <url> --render-js --max-pages 25` inside the default image. Do not use Apple `container` for checks (ADR-0003); `make … RUNTIME=container` stays a user option. If Docker is unavailable, note `Container build: skipped (Docker unavailable)` in `HumanAudit`.
 
 ---
 

@@ -27,7 +27,7 @@ a lite build without the browser stack is one Makefile target away.
 
 ## Acceptance Criteria
 - `cargo build` includes `chrome`; `make install-lite` produces a binary without it.
-- `make build` and `make build-lite` both build with Apple `container`.
+- `make build` and `make build-lite` both build (Docker since V4-04).
 
 ## Checks Gate
 ```bash
@@ -35,5 +35,5 @@ cargo fmt --check
 cargo clippy --all-targets -- -D warnings
 cargo test
 cargo test --no-default-features
-container build -t citadel:check .
+docker build -t citadel:check .   # Docker since V4-04 / ADR-0003
 ```
