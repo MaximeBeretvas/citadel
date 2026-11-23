@@ -87,7 +87,6 @@ Resolved via `CITADEL_HOME` env var, `--data-dir` flag, or OS defaults (`directo
 | Logging & Errors | `tracing`, `tracing-subscriber`, `thiserror`, `anyhow` | Structured logs to `stderr` (never `stdout` in MCP mode) |
 
 ### Cargo Feature Flags
-- `default = []` — pure Rust binary, no browser dependencies.
 - `default = ["chrome"]`; `chrome = ["spider/chrome", "dep:tempfile"]` — per-source headless Chrome/CDP rendering for JS-built pages. Lite builds use `--no-default-features` (`make install-lite`, `make build-lite`).
 
 ### Source Layout

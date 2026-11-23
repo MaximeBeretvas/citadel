@@ -12,7 +12,7 @@ COPY . .
 RUN OFFLINE=""; \
     if [ -d vendor ]; then OFFLINE="--offline"; fi; \
     cargo build --release --locked $OFFLINE --no-default-features --features "$FEATURES" \
-    && strip /app/target/release/citadel || true
+    && { strip /app/target/release/citadel || true; }
 
 FROM debian:trixie-slim AS runtime
 
@@ -36,6 +36,9 @@ COPY --from=builder /app/target/release/citadel /usr/local/bin/citadel
 
 USER citadel
 ENV CITADEL_HOME=/data
+# Not every runtime leaves a marker file (Apple `container`, containerd): this tells citadel it
+# runs in a container, so Chrome's sandbox is dropped and self-update is disabled.
+ENV CITADEL_CONTAINER=1
 VOLUME ["/data"]
 EXPOSE 4317
 

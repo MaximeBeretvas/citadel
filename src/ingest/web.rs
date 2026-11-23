@@ -31,8 +31,10 @@ const USER_AGENT: &str = concat!("citadel/", env!("CARGO_PKG_VERSION"));
 ///    reference renders each endpoint this way), so copy every open shadow root, innermost first,
 ///    into a plain element under its host. Styles and scripts are dropped.
 /// 2. Drop navigation: a list or nav block with 30+ links whose text is over 80% link text is a
-///    menu (a script-built sidebar can outweigh the page body a hundred to one). It is removed
-///    only when at least 200 characters of other text remain, so an index page keeps its list.
+///    menu (a script-built sidebar can outweigh the page body a hundred to one). It is wrapped in
+///    a `<nav>`, which the Markdown conversion ignores, rather than removed, because the crawler
+///    reads this same HTML for links to follow. It is dropped only when at least 200 characters
+///    of other text remain, so an index page keeps its list.
 const PREPARE_RENDERED_PAGE_JS: &str = r#"(function () {
   (function flatten(root) {
     root.querySelectorAll('*').forEach(function (el) {
@@ -62,7 +64,14 @@ const PREPARE_RENDERED_PAGE_JS: &str = r#"(function () {
   pageText.querySelectorAll('script, style').forEach(function (n) { n.remove(); });
   var remaining = size(pageText);
   menus.forEach(function (menu) { remaining -= size(menu); });
-  if (remaining >= 200) { menus.forEach(function (menu) { menu.remove(); }); }
+  if (remaining < 200) { return; }
+  menus.forEach(function (menu) {
+    if (menu.tagName === 'NAV' || !menu.parentNode) { return; }
+    var wrapper = document.createElement('nav');
+    wrapper.setAttribute('data-citadel-menu', '');
+    menu.parentNode.insertBefore(wrapper, menu);
+    wrapper.appendChild(menu);
+  });
 })();"#;
 /// A `render_js` crawl is stopped when no page finishes for this long (spider's own per-request
 /// timeout is 120 s, so a healthy crawl always produces pages well within it).
@@ -71,7 +80,7 @@ const RENDER_STALL_LIMIT: Duration = Duration::from_secs(300);
 const RENDER_WAIT_TIMEOUT: Duration = Duration::from_secs(10);
 const SEED_FETCH_TIMEOUT_SECS: u64 = 10;
 const MAX_CHILD_SITEMAPS: usize = 10;
-const NO_CHROME_WARNING: &str = "render_js is enabled, but citadel was built without `--features chrome`; fell back to static HTTP crawl";
+const NO_CHROME_WARNING: &str = "render_js is enabled, but this is a lite citadel build without the `chrome` feature (--no-default-features); fell back to static HTTP crawl";
 
 const STATIC_ASSET_EXTENSIONS: &[&str] = &[
     "png", "jpg", "jpeg", "gif", "webp", "svg", "ico", "bmp", "tiff", "avif", "css", "js", "mjs",
@@ -893,7 +902,7 @@ fn build_seed_http_client(origin: &Url) -> std::result::Result<reqwest::Client, 
 
     reqwest::Client::builder()
         .timeout(Duration::from_secs(SEED_FETCH_TIMEOUT_SECS))
-        .user_agent("citadel/0.1")
+        .user_agent(USER_AGENT)
         .redirect(policy)
         .build()
 }
@@ -1948,8 +1957,9 @@ setTimeout(function () {
         let waited = started.elapsed();
         pages.await.expect("page task");
 
+        // `touch` records whole milliseconds (truncated), so allow 2 ms of rounding.
         assert!(
-            waited >= Duration::from_millis(300 + 150),
+            waited >= Duration::from_millis(300 + 150 - 2),
             "pages kept arriving for 300 ms, so the stall cannot fire before 450 ms: {waited:?}"
         );
     }
@@ -2079,6 +2089,84 @@ setTimeout(function () {
         assert!(
             content.contains("navtoken 59"),
             "an index page keeps its list: {content}"
+        );
+    }
+
+    #[cfg(feature = "chrome")]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn render_js_follows_links_of_a_dropped_navigation_list() {
+        let _chrome = CHROME_TEST_LOCK.lock().await;
+        let state = FixtureState::default();
+        state.set_text("/robots.txt", StatusCode::OK, "User-agent: *\nAllow: /\n");
+        // A script-built sidebar big enough to count as a menu, next to real page content: it
+        // is left out of the stored Markdown but its links must still be crawled.
+        state.set_html(
+            "/docs/",
+            StatusCode::OK,
+            &format!(
+                r#"<!doctype html><html><head><title>Menu Docs</title></head><body>
+<div id="sidebar"></div><main><h1>Menu Docs</h1><p>{}</p></main><script>
+setTimeout(function () {{
+  var list = document.createElement("ul");
+  for (var i = 0; i < 40; i++) {{
+    var item = document.createElement("li");
+    var link = document.createElement("a");
+    link.href = "/docs/p" + i;
+    link.textContent = "Menu entry navtoken " + i;
+    item.appendChild(link);
+    list.appendChild(item);
+  }}
+  document.getElementById("sidebar").appendChild(list);
+}}, 300);
+</script></body></html>"#,
+                "Body text bodytoken with enough explanation to count as content. ".repeat(6)
+            ),
+        );
+        for i in 0..40 {
+            state.set_html(
+                &format!("/docs/p{i}"),
+                StatusCode::OK,
+                &format!(
+                    "<html><head><title>P{i}</title></head><body><main><h1>P{i}</h1><p>Page {i} reached through the sidebar.</p></main></body></html>"
+                ),
+            );
+        }
+        let (addr, server_handle) = spawn_fixture_server(state).await;
+        let vault_dir = tempdir().expect("vault tempdir");
+        let cfg = VaultConfig::new(vault_dir.path()).allowing_private_origins();
+        let Added { summary, .. } = SourceLifecycle::new(cfg.clone())
+            .add(
+                AddSourceParams {
+                    origin: format!("http://{addr}/docs/"),
+                    name: Some("menu".to_string()),
+                    render_js: true,
+                    max_pages: Some(3),
+                    ..Default::default()
+                },
+                true,
+            )
+            .await
+            .expect("add menu source");
+        server_handle.abort();
+        let summary = summary.expect("summary");
+        assert_eq!(
+            summary.pages_added, 3,
+            "sidebar links must still be followed; warnings: {:?}",
+            summary.warnings
+        );
+
+        let conn = open_rw_db(&cfg.db_path()).expect("open vault db");
+        let index: String = conn
+            .query_row(
+                "SELECT content_md FROM pages WHERE uri LIKE '%/docs/'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("stored index");
+        assert!(index.contains("bodytoken"), "{index}");
+        assert!(
+            !index.contains("navtoken"),
+            "the menu must stay out of the Markdown: {index}"
         );
     }
 

@@ -409,17 +409,23 @@ async fn print_container_upgrade_guidance<W: Write>(
 
     write_container_rebuild_steps(
         out,
-        container_cli(Path::new("/.dockerenv").exists()),
+        container_cli(
+            Path::new("/.dockerenv").exists(),
+            Path::new("/run/.containerenv").exists(),
+        ),
         checkout_tag,
     )?;
     Ok(())
 }
 
-/// CLI of the container runtime Citadel runs under: Docker creates `/.dockerenv`, Apple's
-/// `container` creates no marker file (it is detected through `CITADEL_CONTAINER=1`).
-fn container_cli(dockerenv_exists: bool) -> &'static str {
+/// CLI of the container runtime Citadel runs under: Docker creates `/.dockerenv`, Podman
+/// creates `/run/.containerenv`, Apple's `container` creates no marker file (it is detected
+/// through `CITADEL_CONTAINER=1`).
+fn container_cli(dockerenv_exists: bool, containerenv_exists: bool) -> &'static str {
     if dockerenv_exists {
         "docker"
+    } else if containerenv_exists {
+        "podman"
     } else {
         "container"
     }
@@ -988,8 +994,9 @@ mod tests {
 
     #[test]
     fn rebuild_steps_name_the_cli_of_the_running_container_runtime() {
-        assert_eq!(container_cli(true), "docker");
-        assert_eq!(container_cli(false), "container");
+        assert_eq!(container_cli(true, false), "docker");
+        assert_eq!(container_cli(false, true), "podman");
+        assert_eq!(container_cli(false, false), "container");
 
         let mut out = Vec::new();
         write_container_rebuild_steps(&mut out, "docker", "v0.2.0").expect("write steps");

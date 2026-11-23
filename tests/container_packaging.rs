@@ -60,6 +60,15 @@ fn dockerfile_meets_multi_stage_non_root_spec() {
         "Dockerfile must set ENV CITADEL_HOME=/data"
     );
     assert!(
+        df.contains("ENV CITADEL_CONTAINER=1"),
+        "Dockerfile must set ENV CITADEL_CONTAINER=1 so any runtime (not only Docker/Podman, \
+         which leave marker files) drops Chrome's sandbox and disables self-update"
+    );
+    assert!(
+        df.contains("&& { strip /app/target/release/citadel || true; }"),
+        "only a failed strip may be ignored, never a failed cargo build"
+    );
+    assert!(
         df.contains("VOLUME [\"/data\"]"),
         "Dockerfile must declare VOLUME [\"/data\"]"
     );
