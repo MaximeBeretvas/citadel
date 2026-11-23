@@ -1,3 +1,5 @@
+#[cfg(feature = "chrome")]
+mod browser;
 pub mod local;
 pub mod normalize;
 pub mod sections;

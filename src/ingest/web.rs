@@ -3,7 +3,7 @@ use std::path::Path;
 use std::time::Duration;
 
 use spider::compact_str::CompactString;
-use spider::configuration::RedirectPolicy;
+use spider::configuration::{RedirectPolicy, WaitForIdleNetwork, WaitForSelector};
 use spider::page::Page;
 use spider::website::Website;
 use spider_transformations::transformation::content::{
@@ -24,6 +24,9 @@ use crate::sources::origin::is_private_host;
 
 const DEFAULT_CONCURRENCY: usize = 4;
 const DEFAULT_CRAWL_DELAY_MS: u64 = 100;
+const USER_AGENT: &str = concat!("citadel/", env!("CARGO_PKG_VERSION"));
+/// Per-page cap on waiting for a JS-rendered page to settle before links are read.
+const RENDER_WAIT_TIMEOUT: Duration = Duration::from_secs(10);
 const SEED_FETCH_TIMEOUT_SECS: u64 = 10;
 const MAX_CHILD_SITEMAPS: usize = 10;
 const NO_CHROME_WARNING: &str = "render_js is enabled, but citadel was built without `--features chrome`; fell back to static HTTP crawl";
@@ -289,7 +292,13 @@ async fn execute_web_crawl(
     let mut collected_pages: Vec<Page> = Vec::new();
     let mut visited_keys: HashSet<String> = HashSet::new();
 
-    let mut primary = configure_website(origin, scope, source.max_pages, source.max_depth);
+    let mut primary = configure_website(
+        origin,
+        scope,
+        source.max_pages,
+        source.max_depth,
+        source.render_js,
+    );
     let primary_pages = run_website_crawl(&mut primary, source.render_js).await?;
     for page in primary_pages {
         if let Some(key) = page_dedup_key(&page) {
@@ -313,7 +322,8 @@ async fn execute_web_crawl(
             break;
         }
 
-        let mut seed_site = configure_website(&seed, scope, remaining, source.max_depth);
+        let mut seed_site =
+            configure_website(&seed, scope, remaining, source.max_depth, source.render_js);
         let extra_pages = run_website_crawl(&mut seed_site, source.render_js).await?;
         for page in extra_pages {
             let Some(key) = page_dedup_key(&page) else {
@@ -342,7 +352,13 @@ async fn execute_web_crawl(
     Ok((outcomes, warnings))
 }
 
-fn configure_website(seed: &Url, scope: &WebScope, max_pages: u32, max_depth: u32) -> Website {
+fn configure_website(
+    seed: &Url,
+    scope: &WebScope,
+    max_pages: u32,
+    max_depth: u32,
+    render_js: bool,
+) -> Website {
     let mut website = Website::new_with_firewall(seed.as_str(), false);
     let base_segments = seed.path().split('/').filter(|s| !s.is_empty()).count();
     let effective_depth = base_segments.saturating_add(max_depth as usize).max(1);
@@ -364,12 +380,60 @@ fn configure_website(seed: &Url, scope: &WebScope, max_pages: u32, max_depth: u3
         .with_redirect_policy(redirect_policy)
         .with_whitelist_url(Some(scope.whitelist_regexes()))
         .with_blacklist_url(Some(scope.blacklist_regexes()))
-        .with_user_agent(Some("citadel/0.1"));
+        .with_user_agent(Some(USER_AGENT));
+
+    if render_js {
+        // Script-built navigation (e.g. sidebars rendered from embedded JSON) only exists once
+        // the page settles; read links after the network and DOM go quiet, capped per page.
+        website
+            .with_wait_for_idle_network0(Some(WaitForIdleNetwork::new(Some(RENDER_WAIT_TIMEOUT))))
+            .with_wait_for_idle_dom(Some(WaitForSelector::new(
+                Some(RENDER_WAIT_TIMEOUT),
+                "body".to_string(),
+            )));
+    }
 
     website
 }
 
+/// Fail a `render_js` Sync up front when the configured remote browser cannot be reached: spider
+/// would otherwise fall back to a static fetch per page and silently miss script-built links.
+#[cfg(feature = "chrome")]
+async fn ensure_render_browser(website: &Website) -> Result<()> {
+    match website.setup_browser().await {
+        Some(mut browser) => {
+            browser.dispose();
+            Ok(())
+        }
+        None => Err(VaultError::Other(
+            super::browser::NO_BROWSER_ERROR.to_string(),
+        )),
+    }
+}
+
+/// Give a `render_js` crawl its own browser: a remote one from `CHROME_URL` when set (checked
+/// up front), otherwise a private headless Chrome launched for this crawl only.
+#[cfg(feature = "chrome")]
+async fn prepare_render_browser(
+    website: &mut Website,
+) -> Result<Option<super::browser::RenderBrowser>> {
+    if std::env::var_os(super::browser::CHROME_URL_ENV).is_some() {
+        ensure_render_browser(website).await?;
+        return Ok(None);
+    }
+    let browser = super::browser::RenderBrowser::launch().await?;
+    website.with_chrome_connection(Some(browser.websocket_url()));
+    Ok(Some(browser))
+}
+
 async fn run_website_crawl(website: &mut Website, render_js: bool) -> Result<Vec<Page>> {
+    #[cfg(feature = "chrome")]
+    let render_browser = if render_js {
+        prepare_render_browser(website).await?
+    } else {
+        None
+    };
+
     let mut rx = website.subscribe(256);
     let collector = tokio::spawn(async move {
         let mut pages = Vec::new();
@@ -391,6 +455,11 @@ async fn run_website_crawl(website: &mut Website, render_js: bool) -> Result<Vec
         website.crawl_raw().await;
     }
     website.unsubscribe();
+
+    #[cfg(feature = "chrome")]
+    if let Some(browser) = render_browser {
+        browser.shutdown().await;
+    }
 
     collector
         .await
@@ -1513,6 +1582,110 @@ mod tests {
                 "warning must explain chrome feature requirement, got: {combined}"
             );
         }
+    }
+
+    /// Fixture site whose only links to `/docs/a` and `/docs/b` are added by JavaScript after a
+    /// short delay, like DevNet PubHub builds its sidebar from embedded JSON.
+    fn js_links_fixture() -> FixtureState {
+        let state = FixtureState::default();
+        state.set_text("/robots.txt", StatusCode::OK, "User-agent: *\nAllow: /\n");
+        state.set_html(
+            "/docs/",
+            StatusCode::OK,
+            r#"<!doctype html><html><head><title>JS Docs</title></head><body><main>
+<h1>JS Docs</h1><p>Index whose navigation is rendered by script.</p><nav id="sidebar"></nav>
+</main><script>
+setTimeout(function () {
+  var toc = [{ title: "Alpha", url: "a" }, { title: "Beta", url: "b" }];
+  var nav = document.getElementById("sidebar");
+  toc.forEach(function (item) {
+    var link = document.createElement("a");
+    link.href = "/docs/" + item.url;
+    link.textContent = item.title;
+    nav.appendChild(link);
+  });
+}, 300);
+</script></body></html>"#,
+        );
+        for (path, title) in [("/docs/a", "Alpha"), ("/docs/b", "Beta")] {
+            state.set_html(
+                path,
+                StatusCode::OK,
+                &format!(
+                    "<html><head><title>{title}</title></head><body><main><h1>{title}</h1><p>{title} page reached through a script-built link.</p></main></body></html>"
+                ),
+            );
+        }
+        state
+    }
+
+    async fn add_js_links_source(render_js: bool) -> crate::ingest::SyncSummary {
+        let (addr, server_handle) = spawn_fixture_server(js_links_fixture()).await;
+        let vault_dir = tempdir().expect("vault tempdir");
+        let cfg = VaultConfig::new(vault_dir.path()).allowing_private_origins();
+        let Added { summary, .. } = SourceLifecycle::new(cfg)
+            .add(
+                AddSourceParams {
+                    origin: format!("http://{addr}/docs/"),
+                    name: Some("js-links".to_string()),
+                    render_js,
+                    ..Default::default()
+                },
+                true,
+            )
+            .await
+            .expect("add js-links source");
+        server_handle.abort();
+        summary.expect("summary")
+    }
+
+    #[tokio::test]
+    async fn static_crawl_cannot_see_script_built_links() {
+        let summary = add_js_links_source(false).await;
+        assert_eq!(
+            summary.pages_added, 1,
+            "only the index is reachable without JS"
+        );
+    }
+
+    #[cfg(feature = "chrome")]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn render_js_crawl_follows_script_built_links() {
+        let summary = add_js_links_source(true).await;
+        assert_eq!(
+            summary.pages_added, 3,
+            "render_js must wait for script-built links; warnings: {:?}",
+            summary.warnings
+        );
+    }
+
+    #[cfg(feature = "chrome")]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn concurrent_render_js_syncs_each_get_their_own_browser() {
+        let (first, second) = tokio::join!(add_js_links_source(true), add_js_links_source(true));
+        assert_eq!(first.pages_added, 3, "first sync: {:?}", first.warnings);
+        assert_eq!(second.pages_added, 3, "second sync: {:?}", second.warnings);
+    }
+
+    #[cfg(feature = "chrome")]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn render_js_without_reachable_browser_is_an_actionable_error() {
+        use super::{configure_website, ensure_render_browser, WebScope};
+        use url::Url;
+
+        let origin = Url::parse("https://example.com/docs/").expect("url");
+        let scope = WebScope::new(&origin, &[], &[]).expect("scope");
+        let mut website = configure_website(&origin, &scope, 5, 1, true);
+        website.with_chrome_connection(Some("http://127.0.0.1:9".to_string()));
+
+        let err = ensure_render_browser(&website)
+            .await
+            .expect_err("an unreachable browser must fail the Sync, not degrade silently");
+        let message = err.to_string();
+        assert!(
+            message.contains("Chrome") && message.contains("CHROME_URL"),
+            "error must say how to fix it, got: {message}"
+        );
     }
 
     #[tokio::test]
