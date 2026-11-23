@@ -26,7 +26,7 @@ links, but after JavaScript runs the page holds 1,771 unique in-scope `<a href>`
 - **Default features:** `default = ["chrome"]`. Lite builds use `--no-default-features`, through
   `make install-lite` (native) and `make build-lite` (container).
 - **Container runtime:** Docker by default; Apple `container` with `RUNTIME=container`
-  (ADR-0003), after Apple `container` crashed the host during a build.
+  (ADR-0003), after Apple `container`'s build cache filled the host disk.
 - **Release & update:** release tarballs include `chrome`; `citadel update` warns a lite build that
   the update adds JS rendering. Version 0.2.0 is the first published release.
 

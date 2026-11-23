@@ -72,7 +72,7 @@ Windows is **not yet tested** and has no prebuilt binary. Install with the `carg
 
 ## Alternative: Container (Docker)
 
-The `Makefile` drives Docker by default. Apple's `container` CLI ([`apple/container`](https://github.com/apple/container)) also works: add `RUNTIME=container` to any target (for example `make build RUNTIME=container`). It is still beta and crashed a Mac during an image build, so Docker is the default.
+The `Makefile` drives Docker by default. Apple's `container` CLI ([`apple/container`](https://github.com/apple/container)) also works: add `RUNTIME=container` to any target (for example `make build RUNTIME=container`). It is still beta, and its build VM cache once grew to 98 GB and filled the disk (clear it with `container builder delete`), so Docker is the default.
 
 ```bash
 # Build the multi-stage non-root image (includes Chromium for --render-js Sources)

@@ -35,7 +35,7 @@ Follow `AtomicTasks -> LLMCode -> Checks -> HumanAudit` for every change:
    cargo clippy --all-targets -- -D warnings
    cargo test
    ```
-   When `Dockerfile` or `Makefile` changes, also build the image with Docker (the default runtime; ADR-0003). Never run Apple `container` as a check: it is beta and has crashed a host.
+   When `Dockerfile` or `Makefile` changes, also build the image with Docker (the default runtime; ADR-0003). Never run Apple `container` as a check: it is beta, and its build VM cache grew to 98 GB and filled the host disk.
    ```bash
    docker build -t citadel:check .
    ```

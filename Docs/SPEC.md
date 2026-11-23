@@ -513,7 +513,7 @@ Running `citadel setup` in an interactive TTY launches a guided `cliclack` wizar
 ## 8. Deployment & Background Lifecycle
 
 ### 8.1 Default Deployment: OCI container (`Dockerfile`)
-The `Makefile` drives Docker by default (`RUNTIME ?= docker`); Apple's macOS OCI runtime (**`container`**, `https://github.com/apple/container`) remains supported with `RUNTIME=container`, which also runs `container system start` and vendors crates for its builder. Apple `container` is beta and crashed a host during an image build, hence the default (ADR-0003).
+The `Makefile` drives Docker by default (`RUNTIME ?= docker`); Apple's macOS OCI runtime (**`container`**, `https://github.com/apple/container`) remains supported with `RUNTIME=container`, which also runs `container system start` and vendors crates for its builder. Apple `container` is beta and its build VM cache filled a host disk, hence the default (ADR-0003).
 - **Multi-stage `Dockerfile` (OCI-standard):**
   - Builder stage: `rust:1-slim` compiling `--release` binary (`linux/arm64` native on Apple Silicon, `linux/amd64` portable).
   - Runtime stage: `debian:bookworm-slim` (or `gcr.io/distroless/cc-debian12`) running as non-root user `citadel`, lite image ~25–35 MB with `make build-lite` / `--build-arg FEATURES=`; the default `FEATURES=chrome` image installs headless Chromium (~1.2 GB).
