@@ -25,6 +25,9 @@ use crate::sources::origin::is_private_host;
 const DEFAULT_CONCURRENCY: usize = 4;
 const DEFAULT_CRAWL_DELAY_MS: u64 = 100;
 const USER_AGENT: &str = concat!("citadel/", env!("CARGO_PKG_VERSION"));
+/// A `render_js` crawl is stopped when no page finishes for this long (spider's own per-request
+/// timeout is 120 s, so a healthy crawl always produces pages well within it).
+const RENDER_STALL_LIMIT: Duration = Duration::from_secs(300);
 /// Per-page cap on waiting for a JS-rendered page to settle before links are read.
 const RENDER_WAIT_TIMEOUT: Duration = Duration::from_secs(10);
 const SEED_FETCH_TIMEOUT_SECS: u64 = 10;
@@ -336,6 +339,10 @@ async fn execute_web_crawl(
         visited_keys.insert(seed_key);
     }
 
+    if source.render_js && cfg!(feature = "chrome") {
+        confirm_render_failures(&mut collected_pages, origin).await;
+    }
+
     let (outcomes, ok_count, transport_failures) = build_page_outcomes(collected_pages, scope);
 
     if ok_count == 0 && (outcomes.is_empty() || transport_failures == outcomes.len()) {
@@ -386,6 +393,10 @@ fn configure_website(
         // Script-built navigation (e.g. sidebars rendered from embedded JSON) only exists once
         // the page settles; read links after the network and DOM go quiet, capped per page.
         website
+            // Citadel seeds from sitemaps itself (`discover_seed_urls`). spider's own sitemap
+            // pass reconnects to the browser after the crawl; that pass can hang forever and
+            // can report its sitemap 404 against the origin page.
+            .with_ignore_sitemap(true)
             .with_wait_for_idle_network0(Some(WaitForIdleNetwork::new(Some(RENDER_WAIT_TIMEOUT))))
             .with_wait_for_idle_dom(Some(WaitForSelector::new(
                 Some(RENDER_WAIT_TIMEOUT),
@@ -426,6 +437,42 @@ async fn prepare_render_browser(
     Ok(Some(browser))
 }
 
+/// When a crawl last produced a page, shared between the page collector and the stall watchdog.
+#[derive(Clone)]
+struct CrawlActivity {
+    started: tokio::time::Instant,
+    last_page_ms: std::sync::Arc<std::sync::atomic::AtomicU64>,
+}
+
+impl CrawlActivity {
+    fn start() -> Self {
+        Self {
+            started: tokio::time::Instant::now(),
+            last_page_ms: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
+        }
+    }
+
+    /// Record that a page just finished.
+    fn touch(&self) {
+        let elapsed = u64::try_from(self.started.elapsed().as_millis()).unwrap_or(u64::MAX);
+        self.last_page_ms
+            .store(elapsed, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Resolve once no page has finished (and the crawl has not started one) for `limit`.
+    async fn stalled_for(&self, limit: Duration) {
+        loop {
+            let last =
+                Duration::from_millis(self.last_page_ms.load(std::sync::atomic::Ordering::Relaxed));
+            let idle = self.started.elapsed().saturating_sub(last);
+            if idle >= limit {
+                return;
+            }
+            tokio::time::sleep(limit - idle).await;
+        }
+    }
+}
+
 async fn run_website_crawl(website: &mut Website, render_js: bool) -> Result<Vec<Page>> {
     #[cfg(feature = "chrome")]
     let render_browser = if render_js {
@@ -435,11 +482,16 @@ async fn run_website_crawl(website: &mut Website, render_js: bool) -> Result<Vec
     };
 
     let mut rx = website.subscribe(256);
+    let activity = CrawlActivity::start();
+    let collector_activity = activity.clone();
     let collector = tokio::spawn(async move {
         let mut pages = Vec::new();
         loop {
             match rx.recv().await {
-                Ok(page) => pages.push(page),
+                Ok(page) => {
+                    collector_activity.touch();
+                    pages.push(page);
+                }
                 Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
                     tracing::warn!(skipped, "spider broadcast channel lagged during crawl");
                 }
@@ -449,8 +501,14 @@ async fn run_website_crawl(website: &mut Website, render_js: bool) -> Result<Vec
         pages
     });
 
+    let mut stalled = false;
     if render_js && cfg!(feature = "chrome") {
-        website.crawl().await;
+        // A browser crawl can wait forever on a page or connection that never answers. Stop it
+        // once no page has finished for `RENDER_STALL_LIMIT` instead of hanging the Sync.
+        tokio::select! {
+            () = website.crawl() => {}
+            () = activity.stalled_for(RENDER_STALL_LIMIT) => stalled = true,
+        }
     } else {
         website.crawl_raw().await;
     }
@@ -461,9 +519,75 @@ async fn run_website_crawl(website: &mut Website, render_js: bool) -> Result<Vec
         browser.shutdown().await;
     }
 
+    if stalled {
+        collector.abort();
+        tracing::warn!(url = %website.get_url(), "render_js crawl stalled; Sync stopped");
+        return Err(VaultError::Other(format!(
+            "render_js crawl stalled: no page finished for {} minutes, so the Sync was stopped \
+             and the previously stored pages were kept",
+            RENDER_STALL_LIMIT.as_secs() / 60
+        )));
+    }
+
     collector
         .await
         .map_err(|err| VaultError::Other(format!("crawler collector task panicked: {err}")))
+}
+
+/// Re-check rendered pages that the browser reported as HTTP 4xx. A browser crawl occasionally
+/// reports another response's status for a page (seen: the 404 of the browser's own
+/// `/favicon.ico` request recorded against a page served with 200), so a client error is only
+/// kept when a direct request to the server agrees.
+async fn confirm_render_failures(pages: &mut [Page], origin: &Url) {
+    let suspects = pages.iter().any(is_unconfirmed_client_error);
+    if !suspects {
+        return;
+    }
+    let client = match build_seed_http_client(origin) {
+        Ok(client) => client,
+        Err(err) => {
+            tracing::warn!(error = %err, "failed to build HTTP client to confirm page errors");
+            return;
+        }
+    };
+    for page in pages
+        .iter_mut()
+        .filter(|page| is_unconfirmed_client_error(page))
+    {
+        let server_status = match client.get(page.get_url()).send().await {
+            Ok(response) => Some(response.status()),
+            Err(_) => None,
+        };
+        let confirmed = confirmed_status(page.status_code, server_status);
+        if confirmed != page.status_code {
+            tracing::debug!(
+                url = page.get_url(),
+                browser_status = page.status_code.as_u16(),
+                server_status = confirmed.as_u16(),
+                "browser-reported page error not confirmed by the server"
+            );
+            page.status_code = confirmed;
+        }
+    }
+}
+
+/// A rendered page with content whose only problem is a browser-reported 4xx status.
+fn is_unconfirmed_client_error(page: &Page) -> bool {
+    page.status_code.is_client_error()
+        && page.error_status.is_none()
+        && !page.get_html_bytes_u8().is_empty()
+}
+
+/// The status to record for a page the browser reported as a client error: the server's own
+/// answer when it says the page is fine, otherwise the browser's.
+fn confirmed_status(
+    browser: reqwest::StatusCode,
+    server: Option<reqwest::StatusCode>,
+) -> reqwest::StatusCode {
+    match server {
+        Some(status) if status.is_success() => status,
+        _ => browser,
+    }
 }
 
 fn count_scoped_pages(pages: &[Page], scope: &WebScope) -> usize {
@@ -1065,7 +1189,9 @@ mod tests {
     use axum::response::{Html, IntoResponse, Response};
     use axum::routing::get;
     use axum::Router;
+    use std::time::Duration;
     use tempfile::tempdir;
+
     use tokio::net::TcpListener;
 
     use crate::config::VaultConfig;
@@ -1078,6 +1204,8 @@ mod tests {
     #[derive(Clone, Default)]
     struct FixtureState {
         routes: FixtureRouteMap,
+        /// Every request served, as (path, status, user-agent), for diagnosing failures.
+        requests: Arc<RwLock<Vec<(String, u16, String)>>>,
     }
 
     impl FixtureState {
@@ -1126,12 +1254,25 @@ mod tests {
     async fn serve_fixture_route(
         State(state): State<FixtureState>,
         uri: axum::http::Uri,
+        headers: axum::http::HeaderMap,
     ) -> Response {
         let path = uri.path().to_string();
         let entry = {
             let guard = state.routes.read().expect("lock routes");
             guard.get(&path).cloned()
         };
+        let agent = headers
+            .get(header::USER_AGENT)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or_default()
+            .chars()
+            .take(40)
+            .collect::<String>();
+        state.requests.write().expect("lock requests").push((
+            uri.to_string(),
+            entry.as_ref().map_or(404, |(status, _, _)| status.as_u16()),
+            agent,
+        ));
         match entry {
             Some((status, content_type, body)) => (
                 status,
@@ -1627,7 +1768,11 @@ setTimeout(function () {
     }
 
     async fn add_js_links_source(render_js: bool) -> crate::ingest::SyncSummary {
-        let (addr, server_handle) = spawn_fixture_server(js_links_fixture()).await;
+        add_source_on(js_links_fixture(), render_js).await
+    }
+
+    async fn add_source_on(fixture: FixtureState, render_js: bool) -> crate::ingest::SyncSummary {
+        let (addr, server_handle) = spawn_fixture_server(fixture.clone()).await;
         let vault_dir = tempdir().expect("vault tempdir");
         let cfg = VaultConfig::new(vault_dir.path()).allowing_private_origins();
         let Added { summary, .. } = SourceLifecycle::new(cfg)
@@ -1643,7 +1788,24 @@ setTimeout(function () {
             .await
             .expect("add js-links source");
         server_handle.abort();
-        summary.expect("summary")
+        let summary = summary.expect("summary");
+        if summary.pages_failed > 0 {
+            let conn = open_rw_db(&vault_dir.path().join("vault.db")).expect("open vault db");
+            let mut stmt = conn
+                .prepare("SELECT uri, http_status, error_message FROM pages WHERE status = 'error'")
+                .expect("prepare");
+            let failed: Vec<(String, Option<i64>, Option<String>)> = stmt
+                .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+                .expect("query")
+                .collect::<std::result::Result<_, _>>()
+                .expect("rows");
+            eprintln!("failed pages: {failed:?}");
+            eprintln!(
+                "fixture requests: {:#?}",
+                fixture.requests.read().expect("lock requests")
+            );
+        }
+        summary
     }
 
     #[tokio::test]
@@ -1667,13 +1829,95 @@ setTimeout(function () {
         );
     }
 
+    #[test]
+    fn browser_client_error_is_kept_only_when_the_server_agrees() {
+        use super::confirmed_status;
+        use reqwest::StatusCode;
+
+        let not_found = StatusCode::NOT_FOUND;
+        assert_eq!(
+            confirmed_status(not_found, Some(StatusCode::OK)),
+            StatusCode::OK
+        );
+        assert_eq!(confirmed_status(not_found, Some(not_found)), not_found);
+        assert_eq!(
+            confirmed_status(not_found, Some(StatusCode::FORBIDDEN)),
+            not_found
+        );
+        assert_eq!(confirmed_status(not_found, None), not_found);
+    }
+
+    #[tokio::test]
+    async fn misreported_page_error_is_corrected_from_the_server() {
+        use super::confirm_render_failures;
+        use spider::page::build;
+        use spider::utils::PageResponse;
+
+        let state = FixtureState::default();
+        state.set_html("/docs/", StatusCode::OK, "<html><body>fine</body></html>");
+        let (addr, server_handle) = spawn_fixture_server(state).await;
+        let origin = url::Url::parse(&format!("http://{addr}/docs/")).expect("origin");
+
+        let page_with = |path: &str| {
+            let mut page = build(
+                &format!("http://{addr}{path}"),
+                PageResponse {
+                    content: Some(b"<html><body>rendered</body></html>".to_vec()),
+                    ..Default::default()
+                },
+            );
+            page.status_code = reqwest::StatusCode::NOT_FOUND;
+            page
+        };
+        let mut pages = vec![page_with("/docs/"), page_with("/docs/missing")];
+        confirm_render_failures(&mut pages, &origin).await;
+        server_handle.abort();
+
+        assert_eq!(
+            pages[0].status_code,
+            reqwest::StatusCode::OK,
+            "server says 200"
+        );
+        assert_eq!(
+            pages[1].status_code,
+            reqwest::StatusCode::NOT_FOUND,
+            "a real 404 stays a 404"
+        );
+    }
+
+    #[tokio::test]
+    async fn stall_watchdog_fires_only_after_pages_stop_arriving() {
+        use super::CrawlActivity;
+
+        let activity = CrawlActivity::start();
+        let limit = Duration::from_millis(150);
+        let keep_alive = activity.clone();
+        let pages = tokio::spawn(async move {
+            for _ in 0..6 {
+                tokio::time::sleep(Duration::from_millis(50)).await;
+                keep_alive.touch();
+            }
+        });
+
+        let started = std::time::Instant::now();
+        activity.stalled_for(limit).await;
+        let waited = started.elapsed();
+        pages.await.expect("page task");
+
+        assert!(
+            waited >= Duration::from_millis(300 + 150),
+            "pages kept arriving for 300 ms, so the stall cannot fire before 450 ms: {waited:?}"
+        );
+    }
+
     #[cfg(feature = "chrome")]
     #[tokio::test(flavor = "multi_thread")]
     async fn concurrent_render_js_syncs_each_get_their_own_browser() {
         let _chrome = CHROME_TEST_LOCK.lock().await;
+        crate::init_tracing();
         let (first, second) = tokio::join!(add_js_links_source(true), add_js_links_source(true));
-        assert_eq!(first.pages_added, 3, "first sync: {:?}", first.warnings);
-        assert_eq!(second.pages_added, 3, "second sync: {:?}", second.warnings);
+        assert_eq!(first.pages_added, 3, "first sync: {first:?}");
+        assert_eq!(second.pages_added, 3, "second sync: {second:?}");
     }
 
     #[cfg(feature = "chrome")]

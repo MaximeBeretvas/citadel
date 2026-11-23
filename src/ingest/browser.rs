@@ -10,6 +10,7 @@ use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use spider::chromiumoxide::error::CdpError;
 use spider::chromiumoxide::{Browser, BrowserConfig};
 use spider::tokio_stream::StreamExt;
 use tempfile::TempDir;
@@ -29,6 +30,9 @@ const BROWSER_NAMES: &[&str] = &[
     "google-chrome",
     "chrome",
 ];
+
+/// Cap on each step of closing the browser (close request, kill, process exit).
+const SHUTDOWN_STEP_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Environment variable spider reads to reach an already-running browser.
 pub(crate) const CHROME_URL_ENV: &str = "CHROME_URL";
@@ -71,8 +75,17 @@ impl RenderBrowser {
             .await
             .map_err(|err| browser_error(&err))?;
         let handler = tokio::spawn(async move {
+            // Keep driving the connection through ordinary protocol errors: once this loop ends
+            // no command (including the final close) is ever answered. Only a dead connection
+            // or browser process ends it.
             while let Some(event) = handler.next().await {
-                if event.is_err() {
+                if let Err(
+                    CdpError::Ws(_)
+                    | CdpError::LaunchExit(_, _)
+                    | CdpError::LaunchTimeout(_)
+                    | CdpError::LaunchIo(_, _),
+                ) = event
+                {
                     break;
                 }
             }
@@ -91,10 +104,13 @@ impl RenderBrowser {
 
     /// Close Chrome and wait for its process to exit.
     pub(crate) async fn shutdown(mut self) {
-        if self.browser.close().await.is_err() {
-            let _ = self.browser.kill().await;
+        // Every step is bounded: an unresponsive browser must not hang the Sync. Dropping
+        // `browser` afterwards kills the process if it is somehow still alive.
+        let closed = tokio::time::timeout(SHUTDOWN_STEP_TIMEOUT, self.browser.close()).await;
+        if !matches!(closed, Ok(Ok(_))) {
+            let _ = tokio::time::timeout(SHUTDOWN_STEP_TIMEOUT, self.browser.kill()).await;
         }
-        let _ = self.browser.wait().await;
+        let _ = tokio::time::timeout(SHUTDOWN_STEP_TIMEOUT, self.browser.wait()).await;
         self.handler.abort();
     }
 }

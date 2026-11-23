@@ -24,6 +24,19 @@ do not collide, and a missing browser fails the Sync with an actionable error.
   - User-Agent `citadel/<CARGO_PKG_VERSION>` instead of the hard-coded `citadel/0.1`.
 - `Cargo.toml`: `tempfile` becomes an optional dependency enabled by `chrome`.
 
+### Reliability (found by looping the concurrent test)
+- **No Sync may hang:** the browser event loop keeps running through ordinary protocol errors
+  (ending it left the final close request unanswered forever); each shutdown step is capped at
+  5 s; `CrawlActivity::stalled_for` stops a `render_js` crawl when no page finishes for
+  `RENDER_STALL_LIMIT` (5 min) and fails the Sync with previous pages kept.
+- **spider's sitemap pass is off for `render_js`** (`with_ignore_sitemap(true)`): Citadel seeds
+  from sitemaps itself (`discover_seed_urls`), and spider's pass reconnects to the browser after
+  the crawl.
+- **Browser-reported 4xx is confirmed with the server** (`confirm_render_failures`): about 1 run
+  in 50, spider reports a page with the right URL and full rendered content but status 404 (the
+  only 404 the browser received was its own `/favicon.ico` request). A client error is kept only
+  when a direct request agrees.
+
 ## Red-First Test Cases
 1. `ingest::web::tests::static_crawl_cannot_see_script_built_links`: `render_js: false` stores 1 page.
 2. `ingest::web::tests::render_js_crawl_follows_script_built_links` (`chrome`): index + 2
@@ -37,6 +50,10 @@ do not collide, and a missing browser fails the Sync with an actionable error.
 6. `ingest::browser::tests::chrome_sandbox_is_kept_natively_and_dropped_only_in_containers`.
 7. `ingest::browser::tests::launch_error_keeps_the_fix_hint_and_the_cause`.
 
+8. `ingest::web::tests::stall_watchdog_fires_only_after_pages_stop_arriving`.
+9. `ingest::web::tests::browser_client_error_is_kept_only_when_the_server_agrees` /
+   `misreported_page_error_is_corrected_from_the_server`.
+
 Chrome-launching tests share `CHROME_TEST_LOCK` so browsers start one test at a time and do not
 starve timing-sensitive tests (e.g. `dropped_sync_future_still_finishes_in_background`).
 
@@ -45,6 +62,8 @@ starve timing-sensitive tests (e.g. `dropped_sync_future_still_finishes_in_backg
 - Non-`render_js` Sources never start a browser.
 - Inside the default Docker image, `citadel add <meraki api-v1> --render-js --max-pages 25` stores
   25 pages (was 2).
+- 60 consecutive runs of `concurrent_render_js_syncs_each_get_their_own_browser`: no hang, no
+  failure.
 - Lite build (`--no-default-features`) compiles and passes its tests.
 
 ## Checks Gate
