@@ -25,6 +25,45 @@ use crate::sources::origin::is_private_host;
 const DEFAULT_CONCURRENCY: usize = 4;
 const DEFAULT_CRAWL_DELAY_MS: u64 = 100;
 const USER_AGENT: &str = concat!("citadel/", env!("CARGO_PKG_VERSION"));
+/// Run on every rendered page (path `/` matches all) after it settles and before its HTML is
+/// read. Two steps:
+/// 1. Web components draw into shadow DOM, which a page's HTML does not include (DevNet's API
+///    reference renders each endpoint this way), so copy every open shadow root, innermost first,
+///    into a plain element under its host. Styles and scripts are dropped.
+/// 2. Drop navigation: a list or nav block with 30+ links whose text is over 80% link text is a
+///    menu (a script-built sidebar can outweigh the page body a hundred to one). It is removed
+///    only when at least 200 characters of other text remain, so an index page keeps its list.
+const PREPARE_RENDERED_PAGE_JS: &str = r#"(function () {
+  (function flatten(root) {
+    root.querySelectorAll('*').forEach(function (el) {
+      if (!el.shadowRoot) { return; }
+      flatten(el.shadowRoot);
+      var copy = document.createElement('div');
+      copy.setAttribute('data-shadow-content', '');
+      copy.innerHTML = el.shadowRoot.innerHTML;
+      copy.querySelectorAll('style, script, link, template').forEach(function (n) { n.remove(); });
+      el.appendChild(copy);
+    });
+  })(document);
+
+  if (!document.body) { return; }
+  var size = function (el) { return (el.textContent || '').trim().length; };
+  var menus = [];
+  document.body.querySelectorAll('nav, aside, ul, ol').forEach(function (el) {
+    if (menus.some(function (menu) { return menu.contains(el); })) { return; }
+    var links = el.querySelectorAll('a');
+    var total = size(el);
+    if (links.length < 30 || total === 0) { return; }
+    var linked = 0;
+    links.forEach(function (a) { linked += size(a); });
+    if (linked / total > 0.8) { menus.push(el); }
+  });
+  var pageText = document.body.cloneNode(true);
+  pageText.querySelectorAll('script, style').forEach(function (n) { n.remove(); });
+  var remaining = size(pageText);
+  menus.forEach(function (menu) { remaining -= size(menu); });
+  if (remaining >= 200) { menus.forEach(function (menu) { menu.remove(); }); }
+})();"#;
 /// A `render_js` crawl is stopped when no page finishes for this long (spider's own per-request
 /// timeout is 120 s, so a healthy crawl always produces pages well within it).
 const RENDER_STALL_LIMIT: Duration = Duration::from_secs(300);
@@ -397,6 +436,11 @@ fn configure_website(
             // pass reconnects to the browser after the crawl; that pass can hang forever and
             // can report its sitemap 404 against the origin page.
             .with_ignore_sitemap(true)
+            .with_execution_scripts(Some(
+                [("/".to_string(), PREPARE_RENDERED_PAGE_JS.to_string())]
+                    .into_iter()
+                    .collect(),
+            ))
             .with_wait_for_idle_network0(Some(WaitForIdleNetwork::new(Some(RENDER_WAIT_TIMEOUT))))
             .with_wait_for_idle_dom(Some(WaitForSelector::new(
                 Some(RENDER_WAIT_TIMEOUT),
@@ -1907,6 +1951,134 @@ setTimeout(function () {
         assert!(
             waited >= Duration::from_millis(300 + 150),
             "pages kept arriving for 300 ms, so the stall cannot fire before 450 ms: {waited:?}"
+        );
+    }
+
+    #[cfg(feature = "chrome")]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn render_js_stores_content_drawn_inside_shadow_dom() {
+        let _chrome = CHROME_TEST_LOCK.lock().await;
+        let state = FixtureState::default();
+        state.set_text("/robots.txt", StatusCode::OK, "User-agent: *\nAllow: /\n");
+        // Like DevNet's API reference: the body is rendered by a web component into shadow DOM,
+        // nested one level, which a plain HTML read of the page does not include.
+        state.set_html(
+            "/docs/",
+            StatusCode::OK,
+            r#"<!doctype html><html><head><title>Shadow Docs</title></head><body>
+<h1>Shadow Docs</h1><p>Light text lighttoken.</p><api-ref></api-ref>
+<script>
+setTimeout(function () {
+  var outer = document.querySelector("api-ref").attachShadow({ mode: "open" });
+  outer.innerHTML = "<style>p{color:red}</style><h2>Endpoint</h2><p>Outer body outertoken.</p><api-params></api-params>";
+  var inner = outer.querySelector("api-params").attachShadow({ mode: "open" });
+  inner.innerHTML = "<p>Nested parameter innertoken.</p>";
+}, 200);
+</script></body></html>"#,
+        );
+        let (addr, server_handle) = spawn_fixture_server(state).await;
+        let vault_dir = tempdir().expect("vault tempdir");
+        let cfg = VaultConfig::new(vault_dir.path()).allowing_private_origins();
+        SourceLifecycle::new(cfg.clone())
+            .add(
+                AddSourceParams {
+                    origin: format!("http://{addr}/docs/"),
+                    name: Some("shadow".to_string()),
+                    render_js: true,
+                    ..Default::default()
+                },
+                true,
+            )
+            .await
+            .expect("add shadow source");
+        server_handle.abort();
+
+        let conn = open_rw_db(&cfg.db_path()).expect("open vault db");
+        let content: String = conn
+            .query_row("SELECT content_md FROM pages LIMIT 1", [], |row| row.get(0))
+            .expect("stored page");
+        for token in ["outertoken", "innertoken"] {
+            assert!(content.contains(token), "missing {token} in: {content}");
+        }
+        assert!(
+            !content.contains("color:red"),
+            "styles must not be stored: {content}"
+        );
+    }
+
+    /// Sync a one-page `render_js` Source serving `body` and return the stored Markdown.
+    #[cfg(feature = "chrome")]
+    async fn rendered_markdown(body: &str) -> String {
+        let state = FixtureState::default();
+        state.set_text(
+            "/robots.txt",
+            StatusCode::OK,
+            "User-agent: *\nDisallow: /docs/x\n",
+        );
+        state.set_html("/docs/", StatusCode::OK, body);
+        let (addr, server_handle) = spawn_fixture_server(state).await;
+        let vault_dir = tempdir().expect("vault tempdir");
+        let cfg = VaultConfig::new(vault_dir.path()).allowing_private_origins();
+        SourceLifecycle::new(cfg.clone())
+            .add(
+                AddSourceParams {
+                    origin: format!("http://{addr}/docs/"),
+                    name: Some("rendered".to_string()),
+                    render_js: true,
+                    max_pages: Some(1),
+                    ..Default::default()
+                },
+                true,
+            )
+            .await
+            .expect("add rendered source");
+        server_handle.abort();
+        let conn = open_rw_db(&cfg.db_path()).expect("open vault db");
+        conn.query_row(
+            "SELECT content_md FROM pages WHERE uri LIKE '%/docs/'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("stored page")
+    }
+
+    #[cfg(feature = "chrome")]
+    fn link_list(count: usize) -> String {
+        (0..count)
+            .map(|i| format!(r#"<li><a href="/docs/x{i}">Menu entry navtoken {i}</a></li>"#))
+            .collect()
+    }
+
+    #[cfg(feature = "chrome")]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn render_js_drops_a_big_navigation_list_next_to_real_content() {
+        let _chrome = CHROME_TEST_LOCK.lock().await;
+        let body = format!(
+            "<html><head><title>Endpoint</title></head><body><div><ul>{}</ul></div>\
+             <div><h1>Get Things</h1><p>{}</p></div></body></html>",
+            link_list(60),
+            "Returns the things bodytoken with enough explanation to count as content. ".repeat(6)
+        );
+        let content = rendered_markdown(&body).await;
+        assert!(content.contains("bodytoken"), "{content}");
+        assert!(
+            !content.contains("navtoken"),
+            "navigation must be dropped: {content}"
+        );
+    }
+
+    #[cfg(feature = "chrome")]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn render_js_keeps_a_link_list_that_is_the_page_content() {
+        let _chrome = CHROME_TEST_LOCK.lock().await;
+        let body = format!(
+            "<html><head><title>Index</title></head><body><h1>Index</h1><ul>{}</ul></body></html>",
+            link_list(60)
+        );
+        let content = rendered_markdown(&body).await;
+        assert!(
+            content.contains("navtoken 59"),
+            "an index page keeps its list: {content}"
         );
     }
 
