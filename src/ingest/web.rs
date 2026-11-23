@@ -1538,6 +1538,8 @@ mod tests {
 
     #[tokio::test]
     async fn render_js_without_chrome_feature_returns_clear_warning() {
+        #[cfg(feature = "chrome")]
+        let _chrome = CHROME_TEST_LOCK.lock().await;
         let state = FixtureState::default();
         state.set_html(
             "/docs/",
@@ -1583,6 +1585,11 @@ mod tests {
             );
         }
     }
+
+    /// Held by every test that launches Chrome, so browsers start one test at a time and do not
+    /// starve timing-sensitive tests running in parallel.
+    #[cfg(feature = "chrome")]
+    static CHROME_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
     /// Fixture site whose only links to `/docs/a` and `/docs/b` are added by JavaScript after a
     /// short delay, like DevNet PubHub builds its sidebar from embedded JSON.
@@ -1651,6 +1658,7 @@ setTimeout(function () {
     #[cfg(feature = "chrome")]
     #[tokio::test(flavor = "multi_thread")]
     async fn render_js_crawl_follows_script_built_links() {
+        let _chrome = CHROME_TEST_LOCK.lock().await;
         let summary = add_js_links_source(true).await;
         assert_eq!(
             summary.pages_added, 3,
@@ -1662,6 +1670,7 @@ setTimeout(function () {
     #[cfg(feature = "chrome")]
     #[tokio::test(flavor = "multi_thread")]
     async fn concurrent_render_js_syncs_each_get_their_own_browser() {
+        let _chrome = CHROME_TEST_LOCK.lock().await;
         let (first, second) = tokio::join!(add_js_links_source(true), add_js_links_source(true));
         assert_eq!(first.pages_added, 3, "first sync: {:?}", first.warnings);
         assert_eq!(second.pages_added, 3, "second sync: {:?}", second.warnings);
@@ -1670,6 +1679,7 @@ setTimeout(function () {
     #[cfg(feature = "chrome")]
     #[tokio::test(flavor = "multi_thread")]
     async fn render_js_without_reachable_browser_is_an_actionable_error() {
+        let _chrome = CHROME_TEST_LOCK.lock().await;
         use super::{configure_website, ensure_render_browser, WebScope};
         use url::Url;
 
