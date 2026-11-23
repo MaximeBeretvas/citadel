@@ -1,14 +1,14 @@
 [package]
 name = "citadel"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 description = "Local knowledge vault and MCP server for web documentation and Markdown folders"
 license = "Apache-2.0"
 repository = "https://github.com/mberetvas/citadel"
 
 [features]
-default = []
-chrome = ["spider/chrome"]
+default = ["chrome"]
+chrome = ["spider/chrome", "dep:tempfile"]
 
 [dependencies]
 anyhow = "1"
@@ -33,6 +33,7 @@ sha2 = "0.10"
 similar = "2"
 spider = { version = "2.54", default-features = false, features = ["sync", "sitemap", "regex", "headers", "encoding", "time", "reqwest_rustls_tls", "string_interner_buffer_backend"] }
 spider_transformations = "2.39"
+tempfile = { version = "3", optional = true }
 tar = "0.4"
 thiserror = "2"
 tokio = { version = "1", features = ["full"] }

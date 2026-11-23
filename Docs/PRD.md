@@ -106,7 +106,7 @@ Data and software engineers rely heavily on external documentation (APIs, framew
 ## 5. Non-Functional Requirements
 
 - **Resource Efficiency (Rust):** Implemented in Rust as a lightweight native binary; idle background service must consume minimal RAM and negligible CPU.
-- **Deployment Flexibility (Container Default + Native Option):** Default deployment as a lightweight OCI container via Apple's **`container`** CLI (`https://github.com/apple/container`) with persistent volume storage and optional host Markdown bind mounts, while also supporting direct native installation on macOS/Linux.
+- **Deployment Flexibility (Container Default + Native Option):** Default deployment as a lightweight OCI container run with Docker (Apple's **`container`** CLI, `https://github.com/apple/container`, remains a supported option) with persistent volume storage and optional host Markdown bind mounts, while also supporting direct native installation on macOS/Linux.
 - **Fast Startup & Query Latency:** CLI commands, `ui` launch, and MCP queries should feel instantaneous for local knowledge bases spanning thousands of pages.
 - **Distribution & Release Quality:** Every release ships prebuilt binaries for macOS (Apple Silicon and Intel) and Linux (x86_64 and ARM64) so users can install and self-update without a Rust toolchain. Every change passes an automated checks gate before it can be merged. Windows is not yet tested; Windows users install with `cargo install` or build from source.
 - **Local-First & Portable:** All stored knowledge and configuration live locally on disk in predictable user directories with no external service dependencies; automatic update checks are lightweight, cached, non-blocking, fail silently when offline, and can be opted out of.

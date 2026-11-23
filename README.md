@@ -34,9 +34,11 @@ Install the `citadel` binary straight from GitHub with Cargo. Requires a Rust to
 ```bash
 cargo install --git https://github.com/mberetvas/citadel --locked
 
-# Optional: include headless Chromium support for JS-rendered sites
-cargo install --git https://github.com/mberetvas/citadel --locked --features chrome
+# Lite build: no headless-browser support (smaller binary, no Chrome needed)
+cargo install --git https://github.com/mberetvas/citadel --locked --no-default-features
 ```
+
+The default build includes the `chrome` feature, so Sources added with `--render-js` can crawl sites whose navigation is built by JavaScript. Those crawls need Google Chrome or Chromium installed (or `CHROME_URL` pointing at a running instance); Citadel launches a private headless browser only while such a crawl runs, so other Sources and the idle daemon never start one.
 
 This builds the `main` branch; add `--tag <tag>` or `--branch <name>` to pin another ref, and re-run with `--force` to upgrade. Ensure `~/.cargo/bin` is on your `$PATH`, then verify and optionally register the background service:
 
@@ -50,7 +52,7 @@ citadel daemon install
 
 ### Prebuilt Binaries (macOS & Linux)
 
-Every [GitHub Release](https://github.com/mberetvas/citadel/releases) ships a `citadel` binary for macOS (Apple Silicon `aarch64-apple-darwin`, Intel `x86_64-apple-darwin`) and Linux (`x86_64-unknown-linux-gnu`, `aarch64-unknown-linux-gnu`; glibc 2.35+), plus a `checksums.sha256` manifest. No Rust toolchain needed:
+Every [GitHub Release](https://github.com/mberetvas/citadel/releases) ships a `citadel` binary built with the default features (including `chrome`) for macOS (Apple Silicon `aarch64-apple-darwin`, Intel `x86_64-apple-darwin`) and Linux (`x86_64-unknown-linux-gnu`, `aarch64-unknown-linux-gnu`; glibc 2.35+), plus a `checksums.sha256` manifest. No Rust toolchain needed:
 
 ```bash
 V=v0.2.0                  # release tag
@@ -68,16 +70,16 @@ Make sure `~/.local/bin` is on your `$PATH` (on macOS it is not by default: add 
 
 Windows is **not yet tested** and has no prebuilt binary. Install with the `cargo install --git` command above, or build from a checkout (see below). `citadel update` and `citadel daemon install` are not supported on Windows.
 
-## Alternative: Apple `container`
+## Alternative: Container (Docker)
 
-Uses Apple's native macOS OCI runtime ([`apple/container`](https://github.com/apple/container))—no Docker Desktop required.
+The `Makefile` drives Docker by default. Apple's `container` CLI ([`apple/container`](https://github.com/apple/container)) also works: add `RUNTIME=container` to any target (for example `make build RUNTIME=container`). It is still beta, and its build VM cache once grew to 98 GB and filled the disk (clear it with `container builder delete`), so Docker is the default.
 
 ```bash
-# Build the multi-stage non-root image (~25–35 MB)
+# Build the multi-stage non-root image (includes Chromium for --render-js Sources)
 make build
 
-# Optional: build with headless Chromium support for JS-rendered sites
-FEATURES=chrome make build
+# Lite image without Chromium; --render-js Sources fall back to static HTTP
+make build-lite
 
 # Start the container (Web UI + REST API + MCP HTTP on loopback)
 make run
@@ -103,10 +105,9 @@ make clean                     # Stop and remove the container (preserves data v
 For development, install from a cloned repository instead:
 
 ```bash
-cargo install --path . --locked
+make install          # cargo install --path . --locked --force (default features, includes chrome)
 
-# Optional: include headless Chromium support for JS-rendered sites
-cargo install --path . --locked --features chrome
+make install-lite     # same, with --no-default-features (no headless-browser support)
 ```
 
 ## MCP Client Configuration
@@ -116,7 +117,7 @@ cargo install --path . --locked --features chrome
 - **`query`**: Execute a single read-only SQLite/FTS5 `SELECT` statement against the vault (`v_sources`, `pages`, `sections`, `pages_fts`, `sections_fts`, `v_recent_changes`) with `SQLITE_OPEN_READ_ONLY`, `PRAGMA query_only = ON`, authorizer allowlist, 5-second timeout, and row/byte caps.
 - **`manage`**: Register, inspect, sync, or remove sources (`add`, `list`, `show`, `sync`, `rm`) with directory canonicalization on local paths. Every entry point (CLI, UI, MCP) refuses Private origins (loopback, private network, link-local, `localhost`); set `CITADEL_ALLOW_PRIVATE_ORIGINS=1` to index intranet or `localhost` docs.
 
-### Streamable HTTP (Recommended with `citadel serve` or Apple `container`)
+### Streamable HTTP (Recommended with `citadel serve` or the container)
 
 Point Claude, Antigravity, or any Streamable HTTP MCP client to:
 
@@ -143,18 +144,20 @@ Point Claude, Antigravity, or any Streamable HTTP MCP client to:
 }
 ```
 
-### Apple `container` `stdio` (`container exec -i citadel citadel mcp`)
+### Container `stdio` (`docker exec -i citadel citadel mcp`)
 
 ```json
 {
   "mcpServers": {
     "citadel": {
-      "command": "container",
+      "command": "docker",
       "args": ["exec", "-i", "citadel", "citadel", "mcp"]
     }
   }
 }
 ```
+
+With `RUNTIME=container`, use `"command": "container"` instead.
 
 ## Agent Skill Installation
 

@@ -9,7 +9,7 @@
 ## 1. Architecture Overview
 
 **Citadel** is built as a **single native Rust binary** (`citadel`) backed by a local **SQLite (WAL mode) + FTS5** database.
-- **Default deployment (Apple `container`):** Runs `citadel serve` inside a minimal OCI Linux container managed by Apple's **`container`** CLI (`https://github.com/apple/container`, built from `Containerfile`/`Dockerfile`), combining the background scheduler/watcher, embedded Web UI (`/`), REST API (`/api/*`), and MCP Streamable HTTP endpoint (`/mcp`) in one low-resource process (`serve` and the container are not yet measured; the native macOS `daemon` uses ~5 MB idle with an empty vault, ~25–35 MB idle after Syncs, and up to ~120 MB briefly during a 500-page Sync; see [resource-usage.md](./resource-usage.md)).
+- **Default deployment (OCI container):** Runs `citadel serve` inside a minimal OCI Linux container built from the `Dockerfile` and managed by Docker by default, or by Apple's **`container`** CLI (`https://github.com/apple/container`) with `RUNTIME=container` (ADR-0003), combining the background scheduler/watcher, embedded Web UI (`/`), REST API (`/api/*`), and MCP Streamable HTTP endpoint (`/mcp`) in one low-resource process (`serve` and the container are not yet measured; the native macOS `daemon` uses ~5 MB idle with an empty vault, ~25–35 MB idle after Syncs, and up to ~120 MB briefly during a 500-page Sync; see [resource-usage.md](./resource-usage.md)).
 - **Native installation (macOS/Linux):** Install the same binary locally; `cli`, `mcp` (`stdio`), `ui`, and `daemon` share `vault.db` directly in WAL mode so `mcp` and `cli` work even when the daemon is stopped.
 
 ```mermaid
@@ -19,7 +19,7 @@ flowchart TB
         User["Engineer (Terminal / Browser)"]
     end
 
-    subgraph Binary["Single Rust Binary: citadel (Apple container default or Native)"]
+    subgraph Binary["Single Rust Binary: citadel (OCI container default or Native)"]
         Serve["citadel serve (Container default: Daemon + UI + MCP HTTP /mcp)"]
         MCP["citadel mcp (stdio JSON-RPC)"]
         CLI["citadel CLI (add / sync / query / setup / update / skill)"]
@@ -76,7 +76,7 @@ Resolved via `CITADEL_HOME` env var, `--data-dir` flag, or OS defaults (`directo
 | Async runtime | `tokio` (multi-thread, `rt-multi-thread`, `macros`, `signal`, `time`) | Required by `spider` and `axum` |
 | CLI | `clap` (derive) | Type-safe subcommands, help, shell completions |
 | Storage & FTS | `rusqlite` (`bundled`, `modern_sqlite`, `hooks`, `functions`) | Zero system SQLite dependency, FTS5 + authorizer + progress handler |
-| Web crawling | `spider` + `spider_transformations` (MIT) | Async crawler, sitemap, politeness, readability + HTML-to-MD, optional `chrome` feature |
+| Web crawling | `spider` + `spider_transformations` (MIT) | Async crawler, sitemap, politeness, readability + HTML-to-MD, `chrome` feature (default) |
 | Markdown parsing | `pulldown-cmark` | Fast AST heading splitter for `sections` |
 | Hashing & Diffing | `sha2`, `similar` | Normalized SHA-256 content hashes + unified diffs |
 | File watching | `notify` + `notify-debouncer-mini` | Cross-platform FS events for local Markdown folders |
@@ -87,8 +87,7 @@ Resolved via `CITADEL_HOME` env var, `--data-dir` flag, or OS defaults (`directo
 | Logging & Errors | `tracing`, `tracing-subscriber`, `thiserror`, `anyhow` | Structured logs to `stderr` (never `stdout` in MCP mode) |
 
 ### Cargo Feature Flags
-- `default = []` — pure Rust binary, no browser dependencies.
-- `chrome = ["spider/chrome"]` — enables optional per-source headless Chrome/CDP rendering for JS-only SPAs.
+- `default = ["chrome"]`; `chrome = ["spider/chrome", "dep:tempfile"]` — per-source headless Chrome/CDP rendering for JS-built pages. Lite builds use `--no-default-features` (`make install-lite`, `make build-lite`).
 
 ### Source Layout
 ```text
@@ -267,7 +266,7 @@ Every SQL statement executed through MCP passes **four layers of defense**:
    - Scope restricted to `origin` host + path prefix (unless overridden by `include_patterns`).
    - `respect_robots_txt(true)`, configurable `max_pages` and `max_depth`, polite concurrency cap (default 4 concurrent requests, 100 ms delay).
    - Automatic `sitemap.xml` discovery; if `llms.txt` exists at root, include its linked URLs in the seed queue.
-   - If `source.render_js == 1` and binary is built with `--features chrome`, use `spider`'s Chrome headless mode; otherwise return a clear warning if `chrome` feature is absent.
+   - If `source.render_js == 1` and the binary has the `chrome` feature, launch a private headless Chrome for this crawl (temporary profile, `src/ingest/browser.rs`) — or use `CHROME_URL` when set — and hand it to `spider` via `with_chrome_connection`; wait for idle network + idle DOM (10 s cap per page) before reading links, then run a page script that copies open shadow-DOM content into the page and removes large link-only navigation lists. No reachable browser fails the Sync with an actionable error. spider's own sitemap pass is disabled for these crawls (Citadel seeds from sitemaps itself); a crawl in which no page finishes for 5 minutes is stopped and fails the Sync with previous pages kept; and a browser-reported HTTP 4xx is recorded only when a direct request to the server agrees. Without the `chrome` feature, crawl over static HTTP and return a clear warning.
 2. **Extraction:** Transform raw HTML with `spider_transformations::transformation::content` (`ReturnFormat::Markdown`, `readability: true`, stripping `<nav>`, `<footer>`, `<script>`, `<style>`).
 3. **Stale Detection:** Track the set of URIs seen during a full sync run. Any previously `active` page for that source **not** seen in the completed crawl is marked `status = 'stale'` (never silently deleted). Pages returning 4xx/5xx are marked `status = 'error'` with `http_status` and `error_message` while preserving their last good `content_md`.
 
@@ -298,7 +297,7 @@ To eliminate false-positive diffs (such as volatile `created:` / `updated:` / `c
 
 ### Transports
 - **Streamable HTTP (Container default):** Mounted at `POST/GET /mcp` on `citadel serve` (default `http://127.0.0.1:4317/mcp` on the host). Lets any MCP client connect directly to the running container without spawning extra processes.
-- **Stdio (Native & `container exec`):** `citadel mcp` speaks newline-delimited JSON-RPC 2.0 on `stdin`/`stdout` (also usable via `container exec -i citadel citadel mcp`).
+- **Stdio (Native & container exec):** `citadel mcp` speaks newline-delimited JSON-RPC 2.0 on `stdin`/`stdout` (also usable via `docker exec -i citadel citadel mcp`, or `container exec -i …` with Apple's runtime).
 - **Logging rule:** In `stdio` mode, all logs MUST go to `stderr` or file—never `stdout`.
 
 ### Tool Surface (2 Minimal Composable Tools)
@@ -512,21 +511,20 @@ Running `citadel setup` in an interactive TTY launches a guided `cliclack` wizar
 
 ## 8. Deployment & Background Lifecycle
 
-### 8.1 Default Deployment: Apple `container` (`Dockerfile`)
-Uses Apple's native macOS OCI runtime (**`container`**, `https://github.com/apple/container`)—no Docker Desktop required.
+### 8.1 Default Deployment: OCI container (`Dockerfile`)
+The `Makefile` drives Docker by default (`RUNTIME ?= docker`); Apple's macOS OCI runtime (**`container`**, `https://github.com/apple/container`) remains supported with `RUNTIME=container`, which also runs `container system start` and vendors crates for its builder. Apple `container` is beta and its build VM cache filled a host disk, hence the default (ADR-0003).
 - **Multi-stage `Dockerfile` (OCI-standard):**
   - Builder stage: `rust:1-slim` compiling `--release` binary (`linux/arm64` native on Apple Silicon, `linux/amd64` portable).
-  - Runtime stage: `debian:bookworm-slim` (or `gcr.io/distroless/cc-debian12`) running as non-root user `citadel`, final image ~25–35 MB (optional `--build-arg FEATURES=chrome` variant installs headless Chromium).
+  - Runtime stage: `debian:bookworm-slim` (or `gcr.io/distroless/cc-debian12`) running as non-root user `citadel`, lite image ~173 MB with `make build-lite` / `--build-arg FEATURES=`; the default `FEATURES=chrome` image installs headless Chromium (~1.2 GB). Sizes measured with Docker on arm64, v0.2.0.
 - **Container entrypoint:** `citadel serve --bind 0.0.0.0:4317` (runs the background scheduler, local folder watcher, embedded Web UI on `/`, REST API on `/api/*`, and MCP Streamable HTTP on `/mcp`).
-- **Standard `container` CLI workflow:**
+- **Standard workflow (`make build` / `make run` wrap this; replace `docker` with `container` and start `container system start` first for Apple's runtime):**
   ```bash
   # One-time setup & build
-  container system start
-  container volume create citadel-data
-  container build -t citadel:latest .
+  docker volume create citadel-data
+  docker build -t citadel:latest .
 
   # Run detached with loopback port publish, persistent volume, and optional local Markdown mount
-  container run -d --name citadel \
+  docker run -d --name citadel \
     -p 127.0.0.1:4317:4317 \
     -e CITADEL_HOME=/data \
     -e CITADEL_CONTAINER=1 \
@@ -534,10 +532,10 @@ Uses Apple's native macOS OCI runtime (**`container`**, `https://github.com/appl
     -v /Users/maxime/Dev/books/markdown:/sources/books:ro \
     citadel:latest
   ```
-- **CLI & operations with `container`:**
-  - Run CLI commands inside the container: `container exec citadel citadel <cmd>` (e.g., `add`, `sync`, `query`), or manage via the Web UI at `http://127.0.0.1:4317`.
-  - Inspect status/logs: `container ls`, `container logs citadel`, `container stop citadel`.
-  - A small `Makefile` (or `justfile`) wraps `container build`, `run`, `stop`, `logs`, and `exec` for one-command ergonomics.
+- **CLI & operations:**
+  - Run CLI commands inside the container: `docker exec citadel citadel <cmd>` (e.g., `add`, `sync`, `query`), or manage via the Web UI at `http://127.0.0.1:4317`.
+  - Inspect status/logs: `docker ps`, `docker logs citadel`, `docker stop citadel`.
+  - The `Makefile` wraps `build`, `run`, `stop`, `logs`, and `exec` for both runtimes (`RUNTIME=docker|container`).
 
 ### 8.2 Optional Native Install (macOS / Linux)
 - **Install:** `cargo install --path .` (or prebuilt GitHub Release binary) puts `citadel` on `$PATH`.
@@ -592,4 +590,4 @@ Uses Apple's native macOS OCI runtime (**`container`**, `https://github.com/appl
 3. Check the Release page lists the four tarballs and `checksums.sha256`; `citadel update --check` on an older build reports the new version.
 
 ### Out of Scope
-Windows CI, binaries, self-update and daemon (Windows is not yet tested); container image builds in CI (no Apple `container` on GitHub runners); `--features chrome` release builds; macOS signing/notarization; dependency auditing; automated version bumps.
+Windows CI, binaries, self-update and daemon (Windows is not yet tested); container image builds in CI (no Apple `container` on GitHub runners); macOS signing/notarization; dependency auditing; automated version bumps.

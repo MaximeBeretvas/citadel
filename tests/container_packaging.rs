@@ -24,12 +24,12 @@ fn dockerfile_meets_multi_stage_non_root_spec() {
         "Dockerfile must use debian:trixie-slim AS runtime"
     );
     assert!(
-        df.contains("ARG FEATURES=\"\""),
-        "Dockerfile must declare ARG FEATURES=\"\""
+        df.contains("ARG FEATURES=\"chrome\""),
+        "Dockerfile must default ARG FEATURES=\"chrome\" (JS rendering on by default)"
     );
     assert!(
-        df.contains("--features"),
-        "Dockerfile must support conditional --features build arg"
+        df.contains("--no-default-features --features \"$FEATURES\""),
+        "Dockerfile must let FEATURES fully control the build so an empty value builds lite"
     );
     assert!(
         df.contains("ca-certificates"),
@@ -58,6 +58,15 @@ fn dockerfile_meets_multi_stage_non_root_spec() {
     assert!(
         df.contains("ENV CITADEL_HOME=/data"),
         "Dockerfile must set ENV CITADEL_HOME=/data"
+    );
+    assert!(
+        df.contains("ENV CITADEL_CONTAINER=1"),
+        "Dockerfile must set ENV CITADEL_CONTAINER=1 so any runtime (not only Docker/Podman, \
+         which leave marker files) drops Chrome's sandbox and disables self-update"
+    );
+    assert!(
+        df.contains("&& { strip /app/target/release/citadel || true; }"),
+        "only a failed strip may be ignored, never a failed cargo build"
     );
     assert!(
         df.contains("VOLUME [\"/data\"]"),
@@ -99,7 +108,7 @@ fn dockerignore_excludes_build_and_runtime_artifacts() {
 }
 
 #[test]
-fn makefile_uses_strictly_apple_container_cli() {
+fn makefile_defaults_to_docker_and_supports_apple_container() {
     let mk = read_repo_file("Makefile");
 
     // Check required variables
@@ -109,9 +118,24 @@ fn makefile_uses_strictly_apple_container_cli() {
         "VOLUME ?=",
         "PORT ?=",
         "BOOKS_DIR ?=",
-        "FEATURES ?=",
+        "FEATURES ?= chrome",
     ] {
         assert!(mk.contains(var), "Makefile must define {var}");
+    }
+
+    for (target, command) in [
+        ("install:", "cargo install --path . --locked --force"),
+        (
+            "install-lite:",
+            "cargo install --path . --locked --force --no-default-features",
+        ),
+        ("build-lite:", "FEATURES="),
+    ] {
+        assert!(mk.contains(target), "Makefile must define target {target}");
+        assert!(
+            mk.contains(command),
+            "Makefile {target} must run `{command}`"
+        );
     }
 
     assert!(mk.contains(".PHONY:"), "Makefile must declare .PHONY");
@@ -122,7 +146,14 @@ fn makefile_uses_strictly_apple_container_cli() {
         let header = lines.next();
         assert!(header.is_some(), "Makefile must define target {target}");
         let has_tab_recipe = lines
-            .take_while(|l| l.starts_with('\t') || l.trim().is_empty())
+            .take_while(|l| {
+                let trimmed = l.trim();
+                l.starts_with('\t')
+                    || trimmed.is_empty()
+                    || trimmed.starts_with("ifeq")
+                    || trimmed == "else"
+                    || trimmed == "endif"
+            })
             .any(|l| l.starts_with('\t'));
         assert!(
             has_tab_recipe,
@@ -130,41 +161,56 @@ fn makefile_uses_strictly_apple_container_cli() {
         );
     }
 
-    // Check Apple container CLI commands
+    // Docker is the default runtime; Apple `container` (beta) stays available via RUNTIME=container.
     for cmd in [
-        "container build",
-        "container system start",
-        "container volume create",
-        "container run -d",
+        "RUNTIME ?= docker",
+        "$(RUNTIME) build --build-arg FEATURES=\"$(FEATURES)\" -t $(IMAGE) .",
+        "$(RUNTIME) volume create",
+        "$(RUNTIME) run -d",
         "127.0.0.1:$(PORT):4317",
         "/sources/books:ro",
         // Apple `container` creates no /.dockerenv, so `citadel update` relies on this.
         "-e CITADEL_CONTAINER=1",
-        "container stop",
-        "container logs",
-        "container exec",
-        "container rm",
+        "$(RUNTIME) stop",
+        "$(RUNTIME) logs",
+        "$(RUNTIME) exec",
+        "$(RUNTIME) rm",
     ] {
-        assert!(
-            mk.contains(cmd),
-            "Makefile must include Apple container command/flag: {cmd}"
-        );
+        assert!(mk.contains(cmd), "Makefile must include: {cmd}");
     }
 
-    // Assert zero docker CLI invocations on any non-comment line
-    for (idx, line) in mk.lines().enumerate() {
-        let trimmed = line.trim();
-        if trimmed.is_empty() || trimmed.starts_with('#') {
-            continue;
-        }
-        for token in trimmed.split(|c: char| c.is_whitespace() || matches!(c, ';' | '|' | '&')) {
-            let lower = token.to_ascii_lowercase();
-            assert!(
-                lower != "docker" && lower != "docker-compose" && !lower.starts_with("docker."),
-                "Makefile line {} must not invoke docker CLI (found token '{token}'): {line}",
-                idx + 1
-            );
-        }
+    // Apple-only steps (service start, offline vendoring) run only when RUNTIME=container.
+    let apple_branches: Vec<&str> = mk
+        .split("ifeq ($(RUNTIME),container)")
+        .skip(1)
+        .map(|rest| rest.split("endif").next().unwrap_or_default())
+        .collect();
+    assert!(
+        !apple_branches.is_empty(),
+        "Makefile must guard Apple container steps with ifeq ($(RUNTIME),container)"
+    );
+    for apple_only in ["container system start", "cargo vendor"] {
+        assert!(
+            apple_branches
+                .iter()
+                .any(|branch| branch.contains(apple_only)),
+            "`{apple_only}` must run only inside an ifeq ($(RUNTIME),container) branch"
+        );
+        let outside: String = mk
+            .split("ifeq ($(RUNTIME),container)")
+            .enumerate()
+            .map(|(i, part)| {
+                if i == 0 {
+                    part
+                } else {
+                    part.split_once("endif").map_or("", |(_, after)| after)
+                }
+            })
+            .collect();
+        assert!(
+            !outside.contains(apple_only),
+            "`{apple_only}` must not run for the default docker runtime"
+        );
     }
 }
 
@@ -181,7 +227,8 @@ fn readme_documents_quickstart_native_mcp_and_skill() {
         "citadel daemon install",
         "http://127.0.0.1:4317/mcp",
         "citadel mcp",
-        "container exec -i citadel citadel mcp",
+        "docker exec -i citadel citadel mcp",
+        "RUNTIME=container",
         "`query`",
         "`manage`",
         "citadel skill install",

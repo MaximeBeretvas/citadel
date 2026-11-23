@@ -3,7 +3,7 @@ use std::path::Path;
 use std::time::Duration;
 
 use spider::compact_str::CompactString;
-use spider::configuration::RedirectPolicy;
+use spider::configuration::{RedirectPolicy, WaitForIdleNetwork, WaitForSelector};
 use spider::page::Page;
 use spider::website::Website;
 use spider_transformations::transformation::content::{
@@ -24,9 +24,63 @@ use crate::sources::origin::is_private_host;
 
 const DEFAULT_CONCURRENCY: usize = 4;
 const DEFAULT_CRAWL_DELAY_MS: u64 = 100;
+const USER_AGENT: &str = concat!("citadel/", env!("CARGO_PKG_VERSION"));
+/// Run on every rendered page (path `/` matches all) after it settles and before its HTML is
+/// read. Two steps:
+/// 1. Web components draw into shadow DOM, which a page's HTML does not include (DevNet's API
+///    reference renders each endpoint this way), so copy every open shadow root, innermost first,
+///    into a plain element under its host. Styles and scripts are dropped.
+/// 2. Drop navigation: a list or nav block with 30+ links whose text is over 80% link text is a
+///    menu (a script-built sidebar can outweigh the page body a hundred to one). It is wrapped in
+///    a `<nav>`, which the Markdown conversion ignores, rather than removed, because the crawler
+///    reads this same HTML for links to follow. It is dropped only when at least 200 characters
+///    of other text remain, so an index page keeps its list.
+const PREPARE_RENDERED_PAGE_JS: &str = r#"(function () {
+  (function flatten(root) {
+    root.querySelectorAll('*').forEach(function (el) {
+      if (!el.shadowRoot) { return; }
+      flatten(el.shadowRoot);
+      var copy = document.createElement('div');
+      copy.setAttribute('data-shadow-content', '');
+      copy.innerHTML = el.shadowRoot.innerHTML;
+      copy.querySelectorAll('style, script, link, template').forEach(function (n) { n.remove(); });
+      el.appendChild(copy);
+    });
+  })(document);
+
+  if (!document.body) { return; }
+  var size = function (el) { return (el.textContent || '').trim().length; };
+  var menus = [];
+  document.body.querySelectorAll('nav, aside, ul, ol').forEach(function (el) {
+    if (menus.some(function (menu) { return menu.contains(el); })) { return; }
+    var links = el.querySelectorAll('a');
+    var total = size(el);
+    if (links.length < 30 || total === 0) { return; }
+    var linked = 0;
+    links.forEach(function (a) { linked += size(a); });
+    if (linked / total > 0.8) { menus.push(el); }
+  });
+  var pageText = document.body.cloneNode(true);
+  pageText.querySelectorAll('script, style').forEach(function (n) { n.remove(); });
+  var remaining = size(pageText);
+  menus.forEach(function (menu) { remaining -= size(menu); });
+  if (remaining < 200) { return; }
+  menus.forEach(function (menu) {
+    if (menu.tagName === 'NAV' || !menu.parentNode) { return; }
+    var wrapper = document.createElement('nav');
+    wrapper.setAttribute('data-citadel-menu', '');
+    menu.parentNode.insertBefore(wrapper, menu);
+    wrapper.appendChild(menu);
+  });
+})();"#;
+/// A `render_js` crawl is stopped when no page finishes for this long (spider's own per-request
+/// timeout is 120 s, so a healthy crawl always produces pages well within it).
+const RENDER_STALL_LIMIT: Duration = Duration::from_secs(300);
+/// Per-page cap on waiting for a JS-rendered page to settle before links are read.
+const RENDER_WAIT_TIMEOUT: Duration = Duration::from_secs(10);
 const SEED_FETCH_TIMEOUT_SECS: u64 = 10;
 const MAX_CHILD_SITEMAPS: usize = 10;
-const NO_CHROME_WARNING: &str = "render_js is enabled, but citadel was built without `--features chrome`; fell back to static HTTP crawl";
+const NO_CHROME_WARNING: &str = "render_js is enabled, but this is a lite citadel build without the `chrome` feature (--no-default-features); fell back to static HTTP crawl";
 
 const STATIC_ASSET_EXTENSIONS: &[&str] = &[
     "png", "jpg", "jpeg", "gif", "webp", "svg", "ico", "bmp", "tiff", "avif", "css", "js", "mjs",
@@ -289,7 +343,13 @@ async fn execute_web_crawl(
     let mut collected_pages: Vec<Page> = Vec::new();
     let mut visited_keys: HashSet<String> = HashSet::new();
 
-    let mut primary = configure_website(origin, scope, source.max_pages, source.max_depth);
+    let mut primary = configure_website(
+        origin,
+        scope,
+        source.max_pages,
+        source.max_depth,
+        source.render_js,
+    );
     let primary_pages = run_website_crawl(&mut primary, source.render_js).await?;
     for page in primary_pages {
         if let Some(key) = page_dedup_key(&page) {
@@ -313,7 +373,8 @@ async fn execute_web_crawl(
             break;
         }
 
-        let mut seed_site = configure_website(&seed, scope, remaining, source.max_depth);
+        let mut seed_site =
+            configure_website(&seed, scope, remaining, source.max_depth, source.render_js);
         let extra_pages = run_website_crawl(&mut seed_site, source.render_js).await?;
         for page in extra_pages {
             let Some(key) = page_dedup_key(&page) else {
@@ -324,6 +385,10 @@ async fn execute_web_crawl(
             }
         }
         visited_keys.insert(seed_key);
+    }
+
+    if source.render_js && cfg!(feature = "chrome") {
+        confirm_render_failures(&mut collected_pages, origin).await;
     }
 
     let (outcomes, ok_count, transport_failures) = build_page_outcomes(collected_pages, scope);
@@ -342,7 +407,13 @@ async fn execute_web_crawl(
     Ok((outcomes, warnings))
 }
 
-fn configure_website(seed: &Url, scope: &WebScope, max_pages: u32, max_depth: u32) -> Website {
+fn configure_website(
+    seed: &Url,
+    scope: &WebScope,
+    max_pages: u32,
+    max_depth: u32,
+    render_js: bool,
+) -> Website {
     let mut website = Website::new_with_firewall(seed.as_str(), false);
     let base_segments = seed.path().split('/').filter(|s| !s.is_empty()).count();
     let effective_depth = base_segments.saturating_add(max_depth as usize).max(1);
@@ -364,18 +435,116 @@ fn configure_website(seed: &Url, scope: &WebScope, max_pages: u32, max_depth: u3
         .with_redirect_policy(redirect_policy)
         .with_whitelist_url(Some(scope.whitelist_regexes()))
         .with_blacklist_url(Some(scope.blacklist_regexes()))
-        .with_user_agent(Some("citadel/0.1"));
+        .with_user_agent(Some(USER_AGENT));
+
+    if render_js {
+        // Script-built navigation (e.g. sidebars rendered from embedded JSON) only exists once
+        // the page settles; read links after the network and DOM go quiet, capped per page.
+        website
+            // Citadel seeds from sitemaps itself (`discover_seed_urls`). spider's own sitemap
+            // pass reconnects to the browser after the crawl; that pass can hang forever and
+            // can report its sitemap 404 against the origin page.
+            .with_ignore_sitemap(true)
+            .with_execution_scripts(Some(
+                [("/".to_string(), PREPARE_RENDERED_PAGE_JS.to_string())]
+                    .into_iter()
+                    .collect(),
+            ))
+            .with_wait_for_idle_network0(Some(WaitForIdleNetwork::new(Some(RENDER_WAIT_TIMEOUT))))
+            .with_wait_for_idle_dom(Some(WaitForSelector::new(
+                Some(RENDER_WAIT_TIMEOUT),
+                "body".to_string(),
+            )));
+    }
 
     website
 }
 
+/// Fail a `render_js` Sync up front when the configured remote browser cannot be reached: spider
+/// would otherwise fall back to a static fetch per page and silently miss script-built links.
+#[cfg(feature = "chrome")]
+async fn ensure_render_browser(website: &Website) -> Result<()> {
+    match website.setup_browser().await {
+        Some(mut browser) => {
+            browser.dispose();
+            Ok(())
+        }
+        None => Err(VaultError::Other(
+            super::browser::NO_BROWSER_ERROR.to_string(),
+        )),
+    }
+}
+
+/// Give a `render_js` crawl its own browser: a remote one from `CHROME_URL` when set (checked
+/// up front), otherwise a private headless Chrome launched for this crawl only.
+#[cfg(feature = "chrome")]
+async fn prepare_render_browser(
+    website: &mut Website,
+) -> Result<Option<super::browser::RenderBrowser>> {
+    if std::env::var_os(super::browser::CHROME_URL_ENV).is_some() {
+        ensure_render_browser(website).await?;
+        return Ok(None);
+    }
+    let browser = super::browser::RenderBrowser::launch().await?;
+    website.with_chrome_connection(Some(browser.websocket_url()));
+    Ok(Some(browser))
+}
+
+/// When a crawl last produced a page, shared between the page collector and the stall watchdog.
+#[derive(Clone)]
+struct CrawlActivity {
+    started: tokio::time::Instant,
+    last_page_ms: std::sync::Arc<std::sync::atomic::AtomicU64>,
+}
+
+impl CrawlActivity {
+    fn start() -> Self {
+        Self {
+            started: tokio::time::Instant::now(),
+            last_page_ms: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
+        }
+    }
+
+    /// Record that a page just finished.
+    fn touch(&self) {
+        let elapsed = u64::try_from(self.started.elapsed().as_millis()).unwrap_or(u64::MAX);
+        self.last_page_ms
+            .store(elapsed, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Resolve once no page has finished (and the crawl has not started one) for `limit`.
+    async fn stalled_for(&self, limit: Duration) {
+        loop {
+            let last =
+                Duration::from_millis(self.last_page_ms.load(std::sync::atomic::Ordering::Relaxed));
+            let idle = self.started.elapsed().saturating_sub(last);
+            if idle >= limit {
+                return;
+            }
+            tokio::time::sleep(limit - idle).await;
+        }
+    }
+}
+
 async fn run_website_crawl(website: &mut Website, render_js: bool) -> Result<Vec<Page>> {
+    #[cfg(feature = "chrome")]
+    let render_browser = if render_js {
+        prepare_render_browser(website).await?
+    } else {
+        None
+    };
+
     let mut rx = website.subscribe(256);
+    let activity = CrawlActivity::start();
+    let collector_activity = activity.clone();
     let collector = tokio::spawn(async move {
         let mut pages = Vec::new();
         loop {
             match rx.recv().await {
-                Ok(page) => pages.push(page),
+                Ok(page) => {
+                    collector_activity.touch();
+                    pages.push(page);
+                }
                 Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
                     tracing::warn!(skipped, "spider broadcast channel lagged during crawl");
                 }
@@ -385,16 +554,93 @@ async fn run_website_crawl(website: &mut Website, render_js: bool) -> Result<Vec
         pages
     });
 
+    let mut stalled = false;
     if render_js && cfg!(feature = "chrome") {
-        website.crawl().await;
+        // A browser crawl can wait forever on a page or connection that never answers. Stop it
+        // once no page has finished for `RENDER_STALL_LIMIT` instead of hanging the Sync.
+        tokio::select! {
+            () = website.crawl() => {}
+            () = activity.stalled_for(RENDER_STALL_LIMIT) => stalled = true,
+        }
     } else {
         website.crawl_raw().await;
     }
     website.unsubscribe();
 
+    #[cfg(feature = "chrome")]
+    if let Some(browser) = render_browser {
+        browser.shutdown().await;
+    }
+
+    if stalled {
+        collector.abort();
+        tracing::warn!(url = %website.get_url(), "render_js crawl stalled; Sync stopped");
+        return Err(VaultError::Other(format!(
+            "render_js crawl stalled: no page finished for {} minutes, so the Sync was stopped \
+             and the previously stored pages were kept",
+            RENDER_STALL_LIMIT.as_secs() / 60
+        )));
+    }
+
     collector
         .await
         .map_err(|err| VaultError::Other(format!("crawler collector task panicked: {err}")))
+}
+
+/// Re-check rendered pages that the browser reported as HTTP 4xx. A browser crawl occasionally
+/// reports another response's status for a page (seen: the 404 of the browser's own
+/// `/favicon.ico` request recorded against a page served with 200), so a client error is only
+/// kept when a direct request to the server agrees.
+async fn confirm_render_failures(pages: &mut [Page], origin: &Url) {
+    let suspects = pages.iter().any(is_unconfirmed_client_error);
+    if !suspects {
+        return;
+    }
+    let client = match build_seed_http_client(origin) {
+        Ok(client) => client,
+        Err(err) => {
+            tracing::warn!(error = %err, "failed to build HTTP client to confirm page errors");
+            return;
+        }
+    };
+    for page in pages
+        .iter_mut()
+        .filter(|page| is_unconfirmed_client_error(page))
+    {
+        let server_status = match client.get(page.get_url()).send().await {
+            Ok(response) => Some(response.status()),
+            Err(_) => None,
+        };
+        let confirmed = confirmed_status(page.status_code, server_status);
+        if confirmed != page.status_code {
+            tracing::debug!(
+                url = page.get_url(),
+                browser_status = page.status_code.as_u16(),
+                server_status = confirmed.as_u16(),
+                "browser-reported page error not confirmed by the server"
+            );
+            page.status_code = confirmed;
+        }
+    }
+}
+
+/// A rendered page with content whose only problem is a browser-reported 4xx status.
+fn is_unconfirmed_client_error(page: &Page) -> bool {
+    page.status_code.is_client_error()
+        && page.error_status.is_none()
+        && !page.get_html_bytes_u8().is_empty()
+}
+
+/// The status to record for a page the browser reported as a client error: the server's own
+/// answer when it says the page is fine, otherwise the browser's.
+fn confirmed_status(
+    browser: reqwest::StatusCode,
+    server: Option<reqwest::StatusCode>,
+) -> reqwest::StatusCode {
+    match server {
+        Some(status) if status.is_success() => status,
+        _ => browser,
+    }
 }
 
 fn count_scoped_pages(pages: &[Page], scope: &WebScope) -> usize {
@@ -656,7 +902,7 @@ fn build_seed_http_client(origin: &Url) -> std::result::Result<reqwest::Client, 
 
     reqwest::Client::builder()
         .timeout(Duration::from_secs(SEED_FETCH_TIMEOUT_SECS))
-        .user_agent("citadel/0.1")
+        .user_agent(USER_AGENT)
         .redirect(policy)
         .build()
 }
@@ -996,7 +1242,9 @@ mod tests {
     use axum::response::{Html, IntoResponse, Response};
     use axum::routing::get;
     use axum::Router;
+    use std::time::Duration;
     use tempfile::tempdir;
+
     use tokio::net::TcpListener;
 
     use crate::config::VaultConfig;
@@ -1009,6 +1257,8 @@ mod tests {
     #[derive(Clone, Default)]
     struct FixtureState {
         routes: FixtureRouteMap,
+        /// Every request served, as (path, status, user-agent), for diagnosing failures.
+        requests: Arc<RwLock<Vec<(String, u16, String)>>>,
     }
 
     impl FixtureState {
@@ -1057,12 +1307,25 @@ mod tests {
     async fn serve_fixture_route(
         State(state): State<FixtureState>,
         uri: axum::http::Uri,
+        headers: axum::http::HeaderMap,
     ) -> Response {
         let path = uri.path().to_string();
         let entry = {
             let guard = state.routes.read().expect("lock routes");
             guard.get(&path).cloned()
         };
+        let agent = headers
+            .get(header::USER_AGENT)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or_default()
+            .chars()
+            .take(40)
+            .collect::<String>();
+        state.requests.write().expect("lock requests").push((
+            uri.to_string(),
+            entry.as_ref().map_or(404, |(status, _, _)| status.as_u16()),
+            agent,
+        ));
         match entry {
             Some((status, content_type, body)) => (
                 status,
@@ -1469,6 +1732,8 @@ mod tests {
 
     #[tokio::test]
     async fn render_js_without_chrome_feature_returns_clear_warning() {
+        #[cfg(feature = "chrome")]
+        let _chrome = CHROME_TEST_LOCK.lock().await;
         let state = FixtureState::default();
         state.set_html(
             "/docs/",
@@ -1513,6 +1778,428 @@ mod tests {
                 "warning must explain chrome feature requirement, got: {combined}"
             );
         }
+    }
+
+    /// Held by every test that launches Chrome, so browsers start one test at a time and do not
+    /// starve timing-sensitive tests running in parallel.
+    #[cfg(feature = "chrome")]
+    static CHROME_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+    /// Fixture site whose only links to `/docs/a` and `/docs/b` are added by JavaScript after a
+    /// short delay, like DevNet PubHub builds its sidebar from embedded JSON.
+    fn js_links_fixture() -> FixtureState {
+        let state = FixtureState::default();
+        state.set_text("/robots.txt", StatusCode::OK, "User-agent: *\nAllow: /\n");
+        state.set_html(
+            "/docs/",
+            StatusCode::OK,
+            r#"<!doctype html><html><head><title>JS Docs</title></head><body><main>
+<h1>JS Docs</h1><p>Index whose navigation is rendered by script.</p><nav id="sidebar"></nav>
+</main><script>
+setTimeout(function () {
+  var toc = [{ title: "Alpha", url: "a" }, { title: "Beta", url: "b" }];
+  var nav = document.getElementById("sidebar");
+  toc.forEach(function (item) {
+    var link = document.createElement("a");
+    link.href = "/docs/" + item.url;
+    link.textContent = item.title;
+    nav.appendChild(link);
+  });
+}, 300);
+</script></body></html>"#,
+        );
+        for (path, title) in [("/docs/a", "Alpha"), ("/docs/b", "Beta")] {
+            state.set_html(
+                path,
+                StatusCode::OK,
+                &format!(
+                    "<html><head><title>{title}</title></head><body><main><h1>{title}</h1><p>{title} page reached through a script-built link.</p></main></body></html>"
+                ),
+            );
+        }
+        state
+    }
+
+    async fn add_js_links_source(render_js: bool) -> crate::ingest::SyncSummary {
+        add_source_on(js_links_fixture(), render_js).await
+    }
+
+    async fn add_source_on(fixture: FixtureState, render_js: bool) -> crate::ingest::SyncSummary {
+        let (addr, server_handle) = spawn_fixture_server(fixture.clone()).await;
+        let vault_dir = tempdir().expect("vault tempdir");
+        let cfg = VaultConfig::new(vault_dir.path()).allowing_private_origins();
+        let Added { summary, .. } = SourceLifecycle::new(cfg)
+            .add(
+                AddSourceParams {
+                    origin: format!("http://{addr}/docs/"),
+                    name: Some("js-links".to_string()),
+                    render_js,
+                    ..Default::default()
+                },
+                true,
+            )
+            .await
+            .expect("add js-links source");
+        server_handle.abort();
+        let summary = summary.expect("summary");
+        if summary.pages_failed > 0 {
+            let conn = open_rw_db(&vault_dir.path().join("vault.db")).expect("open vault db");
+            let mut stmt = conn
+                .prepare("SELECT uri, http_status, error_message FROM pages WHERE status = 'error'")
+                .expect("prepare");
+            let failed: Vec<(String, Option<i64>, Option<String>)> = stmt
+                .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+                .expect("query")
+                .collect::<std::result::Result<_, _>>()
+                .expect("rows");
+            eprintln!("failed pages: {failed:?}");
+            eprintln!(
+                "fixture requests: {:#?}",
+                fixture.requests.read().expect("lock requests")
+            );
+        }
+        summary
+    }
+
+    #[tokio::test]
+    async fn static_crawl_cannot_see_script_built_links() {
+        let summary = add_js_links_source(false).await;
+        assert_eq!(
+            summary.pages_added, 1,
+            "only the index is reachable without JS"
+        );
+    }
+
+    #[cfg(feature = "chrome")]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn render_js_crawl_follows_script_built_links() {
+        let _chrome = CHROME_TEST_LOCK.lock().await;
+        let summary = add_js_links_source(true).await;
+        assert_eq!(
+            summary.pages_added, 3,
+            "render_js must wait for script-built links; warnings: {:?}",
+            summary.warnings
+        );
+    }
+
+    #[test]
+    fn browser_client_error_is_kept_only_when_the_server_agrees() {
+        use super::confirmed_status;
+        use reqwest::StatusCode;
+
+        let not_found = StatusCode::NOT_FOUND;
+        assert_eq!(
+            confirmed_status(not_found, Some(StatusCode::OK)),
+            StatusCode::OK
+        );
+        assert_eq!(confirmed_status(not_found, Some(not_found)), not_found);
+        assert_eq!(
+            confirmed_status(not_found, Some(StatusCode::FORBIDDEN)),
+            not_found
+        );
+        assert_eq!(confirmed_status(not_found, None), not_found);
+    }
+
+    #[tokio::test]
+    async fn misreported_page_error_is_corrected_from_the_server() {
+        use super::confirm_render_failures;
+        use spider::page::build;
+        use spider::utils::PageResponse;
+
+        let state = FixtureState::default();
+        state.set_html("/docs/", StatusCode::OK, "<html><body>fine</body></html>");
+        let (addr, server_handle) = spawn_fixture_server(state).await;
+        let origin = url::Url::parse(&format!("http://{addr}/docs/")).expect("origin");
+
+        let page_with = |path: &str| {
+            let mut page = build(
+                &format!("http://{addr}{path}"),
+                PageResponse {
+                    content: Some(b"<html><body>rendered</body></html>".to_vec()),
+                    ..Default::default()
+                },
+            );
+            page.status_code = reqwest::StatusCode::NOT_FOUND;
+            page
+        };
+        let mut pages = vec![page_with("/docs/"), page_with("/docs/missing")];
+        confirm_render_failures(&mut pages, &origin).await;
+        server_handle.abort();
+
+        assert_eq!(
+            pages[0].status_code,
+            reqwest::StatusCode::OK,
+            "server says 200"
+        );
+        assert_eq!(
+            pages[1].status_code,
+            reqwest::StatusCode::NOT_FOUND,
+            "a real 404 stays a 404"
+        );
+    }
+
+    #[tokio::test]
+    async fn stall_watchdog_fires_only_after_pages_stop_arriving() {
+        use super::CrawlActivity;
+
+        let activity = CrawlActivity::start();
+        let limit = Duration::from_millis(150);
+        let keep_alive = activity.clone();
+        let pages = tokio::spawn(async move {
+            for _ in 0..6 {
+                tokio::time::sleep(Duration::from_millis(50)).await;
+                keep_alive.touch();
+            }
+        });
+
+        let started = std::time::Instant::now();
+        activity.stalled_for(limit).await;
+        let waited = started.elapsed();
+        pages.await.expect("page task");
+
+        // `touch` records whole milliseconds (truncated), so allow 2 ms of rounding.
+        assert!(
+            waited >= Duration::from_millis(300 + 150 - 2),
+            "pages kept arriving for 300 ms, so the stall cannot fire before 450 ms: {waited:?}"
+        );
+    }
+
+    #[cfg(feature = "chrome")]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn render_js_stores_content_drawn_inside_shadow_dom() {
+        let _chrome = CHROME_TEST_LOCK.lock().await;
+        let state = FixtureState::default();
+        state.set_text("/robots.txt", StatusCode::OK, "User-agent: *\nAllow: /\n");
+        // Like DevNet's API reference: the body is rendered by a web component into shadow DOM,
+        // nested one level, which a plain HTML read of the page does not include.
+        state.set_html(
+            "/docs/",
+            StatusCode::OK,
+            r#"<!doctype html><html><head><title>Shadow Docs</title></head><body>
+<h1>Shadow Docs</h1><p>Light text lighttoken.</p><api-ref></api-ref>
+<script>
+setTimeout(function () {
+  var outer = document.querySelector("api-ref").attachShadow({ mode: "open" });
+  outer.innerHTML = "<style>p{color:red}</style><h2>Endpoint</h2><p>Outer body outertoken.</p><api-params></api-params>";
+  var inner = outer.querySelector("api-params").attachShadow({ mode: "open" });
+  inner.innerHTML = "<p>Nested parameter innertoken.</p>";
+}, 200);
+</script></body></html>"#,
+        );
+        let (addr, server_handle) = spawn_fixture_server(state).await;
+        let vault_dir = tempdir().expect("vault tempdir");
+        let cfg = VaultConfig::new(vault_dir.path()).allowing_private_origins();
+        SourceLifecycle::new(cfg.clone())
+            .add(
+                AddSourceParams {
+                    origin: format!("http://{addr}/docs/"),
+                    name: Some("shadow".to_string()),
+                    render_js: true,
+                    ..Default::default()
+                },
+                true,
+            )
+            .await
+            .expect("add shadow source");
+        server_handle.abort();
+
+        let conn = open_rw_db(&cfg.db_path()).expect("open vault db");
+        let content: String = conn
+            .query_row("SELECT content_md FROM pages LIMIT 1", [], |row| row.get(0))
+            .expect("stored page");
+        for token in ["outertoken", "innertoken"] {
+            assert!(content.contains(token), "missing {token} in: {content}");
+        }
+        assert!(
+            !content.contains("color:red"),
+            "styles must not be stored: {content}"
+        );
+    }
+
+    /// Sync a one-page `render_js` Source serving `body` and return the stored Markdown.
+    #[cfg(feature = "chrome")]
+    async fn rendered_markdown(body: &str) -> String {
+        let state = FixtureState::default();
+        state.set_text(
+            "/robots.txt",
+            StatusCode::OK,
+            "User-agent: *\nDisallow: /docs/x\n",
+        );
+        state.set_html("/docs/", StatusCode::OK, body);
+        let (addr, server_handle) = spawn_fixture_server(state).await;
+        let vault_dir = tempdir().expect("vault tempdir");
+        let cfg = VaultConfig::new(vault_dir.path()).allowing_private_origins();
+        SourceLifecycle::new(cfg.clone())
+            .add(
+                AddSourceParams {
+                    origin: format!("http://{addr}/docs/"),
+                    name: Some("rendered".to_string()),
+                    render_js: true,
+                    max_pages: Some(1),
+                    ..Default::default()
+                },
+                true,
+            )
+            .await
+            .expect("add rendered source");
+        server_handle.abort();
+        let conn = open_rw_db(&cfg.db_path()).expect("open vault db");
+        conn.query_row(
+            "SELECT content_md FROM pages WHERE uri LIKE '%/docs/'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("stored page")
+    }
+
+    #[cfg(feature = "chrome")]
+    fn link_list(count: usize) -> String {
+        (0..count)
+            .map(|i| format!(r#"<li><a href="/docs/x{i}">Menu entry navtoken {i}</a></li>"#))
+            .collect()
+    }
+
+    #[cfg(feature = "chrome")]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn render_js_drops_a_big_navigation_list_next_to_real_content() {
+        let _chrome = CHROME_TEST_LOCK.lock().await;
+        let body = format!(
+            "<html><head><title>Endpoint</title></head><body><div><ul>{}</ul></div>\
+             <div><h1>Get Things</h1><p>{}</p></div></body></html>",
+            link_list(60),
+            "Returns the things bodytoken with enough explanation to count as content. ".repeat(6)
+        );
+        let content = rendered_markdown(&body).await;
+        assert!(content.contains("bodytoken"), "{content}");
+        assert!(
+            !content.contains("navtoken"),
+            "navigation must be dropped: {content}"
+        );
+    }
+
+    #[cfg(feature = "chrome")]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn render_js_keeps_a_link_list_that_is_the_page_content() {
+        let _chrome = CHROME_TEST_LOCK.lock().await;
+        let body = format!(
+            "<html><head><title>Index</title></head><body><h1>Index</h1><ul>{}</ul></body></html>",
+            link_list(60)
+        );
+        let content = rendered_markdown(&body).await;
+        assert!(
+            content.contains("navtoken 59"),
+            "an index page keeps its list: {content}"
+        );
+    }
+
+    #[cfg(feature = "chrome")]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn render_js_follows_links_of_a_dropped_navigation_list() {
+        let _chrome = CHROME_TEST_LOCK.lock().await;
+        let state = FixtureState::default();
+        state.set_text("/robots.txt", StatusCode::OK, "User-agent: *\nAllow: /\n");
+        // A script-built sidebar big enough to count as a menu, next to real page content: it
+        // is left out of the stored Markdown but its links must still be crawled.
+        state.set_html(
+            "/docs/",
+            StatusCode::OK,
+            &format!(
+                r#"<!doctype html><html><head><title>Menu Docs</title></head><body>
+<div id="sidebar"></div><main><h1>Menu Docs</h1><p>{}</p></main><script>
+setTimeout(function () {{
+  var list = document.createElement("ul");
+  for (var i = 0; i < 40; i++) {{
+    var item = document.createElement("li");
+    var link = document.createElement("a");
+    link.href = "/docs/p" + i;
+    link.textContent = "Menu entry navtoken " + i;
+    item.appendChild(link);
+    list.appendChild(item);
+  }}
+  document.getElementById("sidebar").appendChild(list);
+}}, 300);
+</script></body></html>"#,
+                "Body text bodytoken with enough explanation to count as content. ".repeat(6)
+            ),
+        );
+        for i in 0..40 {
+            state.set_html(
+                &format!("/docs/p{i}"),
+                StatusCode::OK,
+                &format!(
+                    "<html><head><title>P{i}</title></head><body><main><h1>P{i}</h1><p>Page {i} reached through the sidebar.</p></main></body></html>"
+                ),
+            );
+        }
+        let (addr, server_handle) = spawn_fixture_server(state).await;
+        let vault_dir = tempdir().expect("vault tempdir");
+        let cfg = VaultConfig::new(vault_dir.path()).allowing_private_origins();
+        let Added { summary, .. } = SourceLifecycle::new(cfg.clone())
+            .add(
+                AddSourceParams {
+                    origin: format!("http://{addr}/docs/"),
+                    name: Some("menu".to_string()),
+                    render_js: true,
+                    max_pages: Some(3),
+                    ..Default::default()
+                },
+                true,
+            )
+            .await
+            .expect("add menu source");
+        server_handle.abort();
+        let summary = summary.expect("summary");
+        assert_eq!(
+            summary.pages_added, 3,
+            "sidebar links must still be followed; warnings: {:?}",
+            summary.warnings
+        );
+
+        let conn = open_rw_db(&cfg.db_path()).expect("open vault db");
+        let index: String = conn
+            .query_row(
+                "SELECT content_md FROM pages WHERE uri LIKE '%/docs/'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("stored index");
+        assert!(index.contains("bodytoken"), "{index}");
+        assert!(
+            !index.contains("navtoken"),
+            "the menu must stay out of the Markdown: {index}"
+        );
+    }
+
+    #[cfg(feature = "chrome")]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn concurrent_render_js_syncs_each_get_their_own_browser() {
+        let _chrome = CHROME_TEST_LOCK.lock().await;
+        crate::init_tracing();
+        let (first, second) = tokio::join!(add_js_links_source(true), add_js_links_source(true));
+        assert_eq!(first.pages_added, 3, "first sync: {first:?}");
+        assert_eq!(second.pages_added, 3, "second sync: {second:?}");
+    }
+
+    #[cfg(feature = "chrome")]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn render_js_without_reachable_browser_is_an_actionable_error() {
+        let _chrome = CHROME_TEST_LOCK.lock().await;
+        use super::{configure_website, ensure_render_browser, WebScope};
+        use url::Url;
+
+        let origin = Url::parse("https://example.com/docs/").expect("url");
+        let scope = WebScope::new(&origin, &[], &[]).expect("scope");
+        let mut website = configure_website(&origin, &scope, 5, 1, true);
+        website.with_chrome_connection(Some("http://127.0.0.1:9".to_string()));
+
+        let err = ensure_render_browser(&website)
+            .await
+            .expect_err("an unreachable browser must fail the Sync, not degrade silently");
+        let message = err.to_string();
+        assert!(
+            message.contains("Chrome") && message.contains("CHROME_URL"),
+            "error must say how to fix it, got: {message}"
+        );
     }
 
     #[tokio::test]

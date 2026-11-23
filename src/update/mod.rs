@@ -165,13 +165,14 @@ pub fn atomic_replace_binary(new_bin: &Path, current_bin: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Warning to show before replacing a binary built with Cargo features that release binaries lack.
-fn feature_loss_warning(built_with_chrome: bool) -> Option<&'static str> {
-    built_with_chrome.then_some(
-        "this citadel was built with the `chrome` feature, but release binaries are not: \
-         after the update, Sources added with --render-js fall back to a static HTTP crawl. \
-         To keep JavaScript rendering, reinstall from source with \
-         `cargo install --path . --locked --features chrome` instead.",
+/// Note to show before replacing a binary whose Cargo features differ from release binaries,
+/// which are built with the default features (including `chrome`).
+fn feature_build_warning(built_with_chrome: bool) -> Option<&'static str> {
+    (!built_with_chrome).then_some(
+        "this citadel is a lite build without the `chrome` feature, but release binaries \
+         include it: after the update, Sources added with --render-js use JavaScript rendering \
+         (Chrome or Chromium required). To stay lite, skip this update and run \
+         `make install-lite` from a source checkout instead.",
     )
 }
 
@@ -224,7 +225,7 @@ pub async fn run_update<W: Write>(opts: UpdateOpts, out: &mut W) -> Result<()> {
         return Ok(());
     }
 
-    if let Some(warning) = feature_loss_warning(cfg!(feature = "chrome")) {
+    if let Some(warning) = feature_build_warning(cfg!(feature = "chrome")) {
         writeln!(out, "Warning: {warning}")?;
     }
 
@@ -406,25 +407,56 @@ async fn print_container_upgrade_guidance<W: Write>(
     }
     let checkout_tag = newer.map_or("<latest release tag>", |release| release.tag.as_str());
 
+    write_container_rebuild_steps(
+        out,
+        container_cli(
+            Path::new("/.dockerenv").exists(),
+            Path::new("/run/.containerenv").exists(),
+        ),
+        checkout_tag,
+    )?;
+    Ok(())
+}
+
+/// CLI of the container runtime Citadel runs under: Docker creates `/.dockerenv`, Podman
+/// creates `/run/.containerenv`, Apple's `container` creates no marker file (it is detected
+/// through `CITADEL_CONTAINER=1`).
+fn container_cli(dockerenv_exists: bool, containerenv_exists: bool) -> &'static str {
+    if dockerenv_exists {
+        "docker"
+    } else if containerenv_exists {
+        "podman"
+    } else {
+        "container"
+    }
+}
+
+/// Steps to rebuild and recreate the container from the release source on the host.
+fn write_container_rebuild_steps<W: Write>(
+    out: &mut W,
+    cli: &str,
+    checkout_tag: &str,
+) -> Result<()> {
     writeln!(
         out,
         "Self-updating in place is disabled inside containers. To upgrade, check out the release \
          in your Citadel source checkout on the host, then rebuild and recreate the container \
-         with Apple `container`:"
+         with `{cli}`:"
     )?;
     writeln!(out, "  git fetch --tags && git checkout {checkout_tag}")?;
-    writeln!(out, "  container build --pull -t citadel:latest .")?;
-    writeln!(out, "  container stop citadel && container rm citadel")?;
+    writeln!(out, "  {cli} build --pull -t citadel:latest .")?;
+    writeln!(out, "  {cli} stop citadel && {cli} rm citadel")?;
     writeln!(
         out,
-        "  container run -d --name citadel -p 127.0.0.1:4317:4317 -e CITADEL_HOME=/data \
+        "  {cli} run -d --name citadel -p 127.0.0.1:4317:4317 -e CITADEL_HOME=/data \
          -e CITADEL_CONTAINER=1 -v citadel-data:/data citadel:latest"
     )?;
     writeln!(
         out,
         "Add any other options the container was started with (such as `--dns 1.1.1.1` or \
-         `-v <folder>:/sources/books:ro`), or replace the `container` commands with \
-         `make build && make run`, passing the same FEATURES and BOOKS_DIR."
+         `-v <folder>:/sources/books:ro`), or replace the `{cli}` commands with \
+         `make build && make run`, passing the same FEATURES and BOOKS_DIR (and RUNTIME=container \
+         for Apple's runtime)."
     )?;
     Ok(())
 }
@@ -561,11 +593,11 @@ mod tests {
     }
 
     #[test]
-    fn updating_a_chrome_build_warns_that_js_rendering_is_lost() {
-        assert_eq!(feature_loss_warning(false), None);
-        let warning = feature_loss_warning(true).expect("a chrome build must be warned");
-        assert!(warning.contains("--render-js"), "{warning}");
-        assert!(warning.contains("--features chrome"), "{warning}");
+    fn updating_a_lite_build_says_the_release_adds_js_rendering() {
+        assert_eq!(feature_build_warning(true), None);
+        let warning = feature_build_warning(false).expect("a lite build must be told");
+        assert!(warning.contains("JavaScript rendering"), "{warning}");
+        assert!(warning.contains("make install-lite"), "{warning}");
     }
 
     #[test]
@@ -958,6 +990,32 @@ mod tests {
         );
         assert!(text.contains("-e CITADEL_CONTAINER=1"), "{text}");
         assert!(text.contains("make build && make run"), "{text}");
+    }
+
+    #[test]
+    fn rebuild_steps_name_the_cli_of_the_running_container_runtime() {
+        assert_eq!(container_cli(true, false), "docker");
+        assert_eq!(container_cli(false, true), "podman");
+        assert_eq!(container_cli(false, false), "container");
+
+        let mut out = Vec::new();
+        write_container_rebuild_steps(&mut out, "docker", "v0.2.0").expect("write steps");
+        let text = String::from_utf8(out).expect("utf-8");
+        assert!(
+            text.contains("git fetch --tags && git checkout v0.2.0"),
+            "{text}"
+        );
+        assert!(
+            text.contains("docker build --pull -t citadel:latest ."),
+            "{text}"
+        );
+        assert!(
+            text.contains("docker stop citadel && docker rm citadel"),
+            "{text}"
+        );
+        assert!(text.contains("docker run -d --name citadel"), "{text}");
+        assert!(text.contains("make build && make run"), "{text}");
+        assert!(!text.contains("container build"), "{text}");
     }
 
     #[tokio::test]

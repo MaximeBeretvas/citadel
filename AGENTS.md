@@ -3,7 +3,7 @@
 ## Context Pointers
 Read the authoritative doc before acting on its branch; never duplicate its details here:
 - [Docs/PRD.md](./Docs/PRD.md) — product scope, user journeys, functional & non-functional requirements.
-- [Docs/SPEC.md](./Docs/SPEC.md) — Rust crate stack, module layout, SQLite + FTS5 schema, MCP `query`/`manage` contracts, CLI, embedded UI, and Apple `container`/native deployment.
+- [Docs/SPEC.md](./Docs/SPEC.md) — Rust crate stack, module layout, SQLite + FTS5 schema, MCP `query`/`manage` contracts, CLI, embedded UI, and container (Docker default, Apple `container` optional)/native deployment.
 - [REVIEW.md](./REVIEW.md) — grounded verification & visual feedback loops (headless Chrome UI screenshots, MCP JSON-RPC probes, container smoke tests) and `HumanAudit` evidence format.
 - `Docs/AtomicTasks/` *(created in AtomicTasks)* — ordered atomic task specs and acceptance criteria.
 - [CONTEXT.md](./CONTEXT.md) — domain glossary (Source, Origin, Sync, Sync claim…); use these terms.
@@ -35,9 +35,9 @@ Follow `AtomicTasks -> LLMCode -> Checks -> HumanAudit` for every change:
    cargo clippy --all-targets -- -D warnings
    cargo test
    ```
-   When `Dockerfile` changes, also verify using Apple's `container` CLI (never `docker`):
+   When `Dockerfile` or `Makefile` changes, also build the image with Docker (the default runtime; ADR-0003). Never run Apple `container` as a check: it is beta, and its build VM cache grew to 98 GB and filled the host disk.
    ```bash
-   container build -t citadel:check .
+   docker build -t citadel:check .
    ```
    If any check fails, fix the root cause and re-run the full gate.
 4. **HumanAudit handoff:** Summarize changed files, exact command results, and any risks or assumptions; wait for human review before merging.
@@ -49,7 +49,7 @@ Follow `AtomicTasks -> LLMCode -> Checks -> HumanAudit` for every change:
 - **Source lifecycle validation:** Every entry point (CLI, UI, MCP, daemon) changes Sources only through `SourceLifecycle` in `src/sources/`, which enforces `http(s)://` URL checks, the Private-origin rule (loopback/RFC1918/link-local/CGNAT/local hostnames, refused unless `CITADEL_ALLOW_PRIVATE_ORIGINS=1`) on `add` and before every web Sync, and directory canonicalization for local Markdown folders. Keep that rule only in `src/sources/origin.rs`; re-run `cargo test sources` after any `src/sources/`, `src/mcp/` or `src/ingest/` change.
 - **FTS5 consistency:** Maintain `pages_fts` and `sections_fts` via SQLite triggers inside the same transaction as `pages`/`sections` writes. Keep `src/db/schema.sql` and `Docs/SPEC.md` in sync.
 - **Diff hygiene:** Normalize line endings and strip volatile frontmatter timestamps before SHA-256 hashing; mark missing/failing pages `stale`/`error` rather than silently deleting them.
-- **Zero-runtime footprint:** Keep the binary self-contained (`rusqlite` bundled, `rust-embed` offline UI assets, zero external CDNs, minimal idle RAM in `serve`/`daemon`).
+- **Zero-runtime footprint:** Keep the binary self-contained (`rusqlite` bundled, `rust-embed` offline UI assets, zero external CDNs, minimal idle RAM in `serve`/`daemon`). Chrome is the only external runtime: launch it solely through `RenderBrowser` in `src/ingest/browser.rs`, one private instance per `render_js` crawl, closed when the crawl ends; keep `--no-default-features` (lite) compiling and passing.
 
 ## Lessons
 *(Updated via `Telemetry -> learn -> AgentRules`: add one crisp, positive rule per real check failure, audit finding, or runtime bug; prune entries once obsolete.)*

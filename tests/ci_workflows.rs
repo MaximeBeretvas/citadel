@@ -18,7 +18,12 @@ fn ci_workflow_runs_the_checks_gate_on_prs() {
         "cargo fmt --check",
         "cargo clippy --all-targets --locked -- -D warnings",
         "cargo test --locked",
+        "cargo clippy --all-targets --locked --no-default-features -- -D warnings",
+        "cargo test --locked --no-default-features",
         "contents: read",
+        // Ubuntu 23.10+ blocks the user namespaces Chrome's sandbox needs; the
+        // render_js tests keep the sandbox on, so CI lifts that restriction.
+        "kernel.apparmor_restrict_unprivileged_userns=0",
     ] {
         assert!(ci.contains(needle), "ci.yml must contain {needle:?}");
     }
