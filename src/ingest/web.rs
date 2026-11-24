@@ -273,12 +273,66 @@ impl WebScope {
     }
 }
 
+/// Counts of one web Sync, logged as one `web_sync_summary` line when the Sync ends.
+#[derive(Debug, Default)]
+pub(crate) struct WebSyncAccounting {
+    pub results_stored: usize,
+    pub results_failed: usize,
+    pub unparsable_url: usize,
+    pub redirected_out_of_scope: usize,
+    pub url_not_storable: usize,
+    pub duplicate_result: usize,
+    pub binary_file: usize,
+    pub cut_off: bool,
+}
+
 /// Synchronize a web documentation source using `spider` and `spider_transformations`.
 pub async fn sync_web_source(
     db_path: &Path,
     source: &SourceRecord,
     prune: bool,
 ) -> Result<SyncSummary> {
+    sync_web_source_with_accounting(db_path, source, prune)
+        .await
+        .0
+}
+
+/// Run a web Sync and return its accounting record with the result. Every Sync whose Origin
+/// passes the checks logs one `web_sync_summary` line, whether it succeeds or fails.
+pub(crate) async fn sync_web_source_with_accounting(
+    db_path: &Path,
+    source: &SourceRecord,
+    prune: bool,
+) -> (Result<SyncSummary>, WebSyncAccounting) {
+    let mut acc = WebSyncAccounting::default();
+    let (origin, scope) = match web_origin_and_scope(source) {
+        Ok(checked) => checked,
+        Err(err) => return (Err(err), acc),
+    };
+    let result = sync_checked_web_source(db_path, source, prune, &origin, &scope, &mut acc).await;
+    log_web_sync_summary(source, result.is_ok(), &acc);
+    (result, acc)
+}
+
+fn log_web_sync_summary(source: &SourceRecord, ok: bool, acc: &WebSyncAccounting) {
+    tracing::info!(
+        source = ?source.name,
+        origin = ?source.origin,
+        ok,
+        max_pages = source.max_pages,
+        cut_off = acc.cut_off,
+        results_stored = acc.results_stored,
+        results_failed = acc.results_failed,
+        unparsable_url = acc.unparsable_url,
+        redirected_out_of_scope = acc.redirected_out_of_scope,
+        url_not_storable = acc.url_not_storable,
+        duplicate_result = acc.duplicate_result,
+        binary_file = acc.binary_file,
+        "web_sync_summary"
+    );
+}
+
+fn web_origin_and_scope(source: &SourceRecord) -> Result<(Url, WebScope)> {
     let origin = Url::parse(&source.origin).map_err(|err| {
         VaultError::Validation(format!("invalid web source URL '{}': {err}", source.origin))
     })?;
@@ -292,20 +346,31 @@ pub async fn sync_web_source(
     let scope = WebScope::new(&origin, &source.include_patterns, &source.exclude_patterns)?;
     // Touch matcher field to verify pattern compilation cleanly up front.
     let _ = &scope.matcher;
+    Ok((origin, scope))
+}
 
+async fn sync_checked_web_source(
+    db_path: &Path,
+    source: &SourceRecord,
+    prune: bool,
+    origin: &Url,
+    scope: &WebScope,
+    acc: &mut WebSyncAccounting,
+) -> Result<SyncSummary> {
     let run_id = {
         let conn = open_rw_db(db_path)?;
         start_sync_run(&conn, source.id)?
     };
 
-    let crawl_res = execute_web_crawl(source, &origin, &scope).await;
+    let crawl_res = execute_web_crawl(source, origin, scope, acc).await;
 
     let mut conn = open_rw_db(db_path)?;
     match crawl_res {
         Ok((outcomes, warnings)) => {
+            acc.cut_off = outcomes.len() >= source.max_pages as usize;
             let missing_policy = if prune {
                 MissingPagePolicy::Prune
-            } else if outcomes.len() >= source.max_pages as usize {
+            } else if acc.cut_off {
                 MissingPagePolicy::Preserve
             } else {
                 MissingPagePolicy::MarkStale
@@ -331,6 +396,7 @@ async fn execute_web_crawl(
     source: &SourceRecord,
     origin: &Url,
     scope: &WebScope,
+    acc: &mut WebSyncAccounting,
 ) -> Result<(Vec<PageIngestOutcome>, Vec<String>)> {
     let mut warnings = Vec::new();
     if source.render_js && !cfg!(feature = "chrome") {
@@ -391,7 +457,7 @@ async fn execute_web_crawl(
         confirm_render_failures(&mut collected_pages, origin).await;
     }
 
-    let (outcomes, ok_count, transport_failures) = build_page_outcomes(collected_pages, scope);
+    let (outcomes, ok_count, transport_failures) = build_page_outcomes(collected_pages, scope, acc);
 
     if ok_count == 0 && (outcomes.is_empty() || transport_failures == outcomes.len()) {
         let reason = outcomes
@@ -656,9 +722,12 @@ fn count_scoped_pages(pages: &[Page], scope: &WebScope) -> usize {
     unique.len()
 }
 
+/// Turn collected pages into results, counting each page that gets none in `acc` under the first
+/// reason it meets.
 fn build_page_outcomes(
     pages: Vec<Page>,
     scope: &WebScope,
+    acc: &mut WebSyncAccounting,
 ) -> (Vec<PageIngestOutcome>, usize, usize) {
     let mut outcomes = Vec::new();
     let mut seen_uris = HashSet::new();
@@ -667,23 +736,27 @@ fn build_page_outcomes(
 
     for page in pages {
         let Some(canonical_url) = canonicalize_page_url(page.get_url()) else {
+            acc.unparsable_url += 1;
             continue;
         };
 
         if let Some(final_dest) = page.final_redirect_destination.as_deref() {
             if let Some(dest_url) = canonicalize_page_url(final_dest) {
                 if !scope.should_crawl(&dest_url) {
+                    acc.redirected_out_of_scope += 1;
                     continue;
                 }
             }
         }
 
         if !scope.should_store(&canonical_url) {
+            acc.url_not_storable += 1;
             continue;
         }
 
         let uri = canonical_url.to_string();
         if !seen_uris.insert(uri.clone()) {
+            acc.duplicate_result += 1;
             continue;
         }
 
@@ -700,10 +773,12 @@ fn build_page_outcomes(
                 error_message,
                 insert_if_missing: true,
             });
+            acc.results_failed += 1;
             continue;
         }
 
         if page.binary_file {
+            acc.binary_file += 1;
             continue;
         }
 
@@ -717,6 +792,7 @@ fn build_page_outcomes(
         let (etag, last_modified) = extract_http_validators(&page);
 
         ok_count += 1;
+        acc.results_stored += 1;
         outcomes.push(PageIngestOutcome::Ready {
             uri,
             doc,
@@ -2300,6 +2376,51 @@ setTimeout(function () {{
             .expect("query validators");
         assert_eq!(etag.as_deref(), Some("\"etag-/docs/from-sitemap\""));
         assert_eq!(last_mod.as_deref(), Some("Wed, 21 Oct 2026 07:28:00 GMT"));
+    }
+
+    fn hand_made_page(url: &str) -> super::Page {
+        let mut page = super::Page::default();
+        page.set_url(url.to_string());
+        page.status_code = StatusCode::OK;
+        page
+    }
+
+    #[test]
+    fn dropped_pages_are_counted_by_reason() {
+        use super::{build_page_outcomes, Url, WebScope, WebSyncAccounting};
+
+        let origin = Url::parse("https://docs.example/docs/").expect("origin");
+        let scope = WebScope::new(&origin, &[], &[]).expect("scope");
+
+        let mut redirected = hand_made_page("https://docs.example/docs/moved");
+        redirected.final_redirect_destination = Some("https://elsewhere.example/x".to_string());
+        let mut binary = hand_made_page("https://docs.example/docs/file");
+        binary.binary_file = true;
+        let mut missing = hand_made_page("https://docs.example/docs/missing");
+        missing.status_code = StatusCode::NOT_FOUND;
+
+        let pages = vec![
+            hand_made_page("ftp://docs.example/docs/unparsable"),
+            redirected,
+            hand_made_page("https://docs.example/blog/outside"),
+            hand_made_page("https://docs.example/docs/stored"),
+            hand_made_page("https://docs.example/docs/stored"),
+            binary,
+            missing,
+        ];
+
+        let mut acc = WebSyncAccounting::default();
+        let (outcomes, ok_count, _) = build_page_outcomes(pages, &scope, &mut acc);
+
+        assert_eq!(outcomes.len(), 2);
+        assert_eq!(ok_count, 1);
+        assert_eq!(acc.unparsable_url, 1);
+        assert_eq!(acc.redirected_out_of_scope, 1);
+        assert_eq!(acc.url_not_storable, 1);
+        assert_eq!(acc.duplicate_result, 1);
+        assert_eq!(acc.binary_file, 1);
+        assert_eq!(acc.results_stored, 1);
+        assert_eq!(acc.results_failed, 1);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
