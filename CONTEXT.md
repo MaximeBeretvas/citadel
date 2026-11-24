@@ -37,12 +37,16 @@ The vault-wide exclusive right to Sync one Source; at most one holder at a time,
 _Avoid_: lock, lease, in-flight
 
 **Cut-off Sync**:
-A Sync whose first crawl used up the page budget (`max_pages`), or whose distinct storable pages collected, or pages recorded, reach it, whether or not those pages were stored.
+A Sync whose first crawl used up the page budget (`max_pages`), or that collected as many distinct storable pages as the budget, or recorded as many results. A result is a stored Page, an Error page, or a copy merged into another Page (a Markdown twin or Canonical duplicate). Pages count whether or not they were stored.
 
 ### Pages
 
 **Page**:
 One document from a Source, identified by its URI.
+
+**Collected page**:
+A page any crawl of a web Sync delivered. It becomes a Page, an Error page or a copy merged into another Page, or it is dropped, for exactly one reason.
+_Avoid_: crawled page, raw page
 
 **Stale page**:
 A Page that was present before but missing from a complete Sync, or that a Sync merged into another copy of its document; kept, not deleted. A cut-off Sync leaves unvisited Pages as they were.
