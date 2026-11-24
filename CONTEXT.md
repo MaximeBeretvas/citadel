@@ -45,7 +45,14 @@ A Sync whose first crawl used up the page budget (`max_pages`), or whose distinc
 One document from a Source, identified by its URI.
 
 **Stale page**:
-A Page that was present before but missing from a complete Sync; kept, not deleted. A cut-off Sync leaves unvisited Pages as they were.
+A Page that was present before but missing from a complete Sync, or that a Sync merged into another copy of its document; kept, not deleted. A cut-off Sync leaves unvisited Pages as they were.
+
+**Markdown twin**:
+The raw Markdown copy a site serves of one of its HTML pages (`X.md` next to `X`, or the target of `<link rel="alternate" type="text/markdown">`). A Sync stores the pair as one Page, at the HTML page's URI, with the twin's content.
+_Avoid_: md copy, duplicate page
+
+**Canonical duplicate**:
+A page whose `rel=canonical` names another collected page with the same path, differing only by query string or trailing slash (`/guide?version=2` for `/guide`). Stored only as the canonical page.
 
 **Error page**:
 A Page whose latest fetch or parse failed.
