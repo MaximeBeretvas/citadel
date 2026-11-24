@@ -265,10 +265,26 @@ Every SQL statement executed through MCP passes **four layers of defense**:
 1. **Discovery:** Initialize `spider::website::Website` on `source.origin` with:
    - Scope restricted to `origin` host + path prefix (unless overridden by `include_patterns`).
    - `respect_robots_txt(true)`, configurable `max_pages` and `max_depth`, polite concurrency cap (default 4 concurrent requests, 100 ms delay).
-   - Automatic `sitemap.xml` discovery; if `llms.txt` exists at root, include its linked URLs in the seed queue.
+   - **robots.txt today:** spider parses `robots.txt`. Its parser ends a rule group at an empty line, so on sites such as `docs.aws.amazon.com` the `Disallow` and `Crawl-delay` lines after one are ignored. When the parser keeps a `Crawl-delay`, it replaces Citadel's 100 ms delay (`Crawl-delay: 0` removes it).
+   - **Discovery and later crawls:** Citadel reads `sitemap.xml` and `llms.txt` itself (`discover_seed_urls`). After the first crawl, it starts one new crawler per discovered URL that no earlier crawl collected, one after another, each with the remaining page budget (the later-crawl loop in `src/ingest/web.rs`).
+   - **Page budget:** `max_pages` counts every page spider admits, including pages that redirect out of the Source and are not stored.
+   - **Requests with no `fetch` log line:** Citadel's discovery requests, spider's own sitemap pass (static crawls only, no delay), its re-fetch of a crawler's start URL after a 404 sitemap probe, redirect hops and `robots.txt`.
    - If `source.render_js == 1` and the binary has the `chrome` feature, launch a private headless Chrome for this crawl (temporary profile, `src/ingest/browser.rs`) — or use `CHROME_URL` when set — and hand it to `spider` via `with_chrome_connection`; wait for idle network + idle DOM (10 s cap per page) before reading links, then run a page script that copies open shadow-DOM content into the page and removes large link-only navigation lists. No reachable browser fails the Sync with an actionable error. spider's own sitemap pass is disabled for these crawls (Citadel seeds from sitemaps itself); a crawl in which no page finishes for 5 minutes is stopped and fails the Sync with previous pages kept; and a browser-reported HTTP 4xx is recorded only when a direct request to the server agrees. Without the `chrome` feature, crawl over static HTTP and return a clear warning.
 2. **Extraction:** Transform raw HTML with `spider_transformations::transformation::content` (`ReturnFormat::Markdown`, `readability: true`, stripping `<nav>`, `<footer>`, `<script>`, `<style>`).
 3. **Stale Detection:** Track the set of URIs seen during a full sync run. Any previously `active` page for that source **not** seen in the completed crawl is marked `status = 'stale'` (never silently deleted). Pages returning 4xx/5xx are marked `status = 'error'` with `http_status` and `error_message` while preserving their last good `content_md`.
+   - **Today's cut-off rule:** without `--prune`, a Sync whose results reach `max_pages` leaves unvisited pages as they were; otherwise it marks them stale.
+   - **Known defect:** pages fetched but not stored (for example, redirected out of the Source) are not counted, so a Sync that ran out of its page budget can still mark stored pages stale (`dlthub`, 2026-11-23: 197 pages). Fixed by the planned cut-off rule below.
+   - **Known, not fixed:** a page can be stored twice when its URL appears with and without a trailing slash.
+
+**Planned: Sync accounting** ([design](./egm/2026-11-24-sync-measurement-one-request-per-url-design.md), tasks 2-4; this block becomes current text in those commits):
+- Every web Sync whose Origin is a valid URL logs one `web_sync_summary` line at `info`, whether it succeeds or fails. The line carries step durations, pages received, results stored and failed, lost pages, six drop counters (`unparsable_url`, `already_collected`, `redirected_out_of_scope`, `url_not_storable`, `duplicate_result`, `binary_file`), later crawls started, `delay_ms`, `max_pages` and `cut_off`.
+- A Sync is **cut off** when its first crawl used up `max_pages`, or when the distinct storable pages it collected, or the pages it recorded, reach `max_pages`, whether or not those pages were stored. A cut-off Sync marks no page stale, unless run with `--prune`.
+- A cut-off Sync warns when at least 5 pages, and more than 10 % of the pages received, redirected outside the Source. The thresholds are open (design Q2).
+
+**Planned: robots.txt** (later design, not yet drafted; decided in [concepts_brief.md](./egm/concepts_brief.md), "Direction from the author"):
+- Obey `Disallow` with a parser that skips empty lines (candidate: `texting_robots`, used by Firecrawl). Apply it to the Origin, the final URL after redirects, followed links, and sitemap and `llms.txt` URLs.
+- Do not apply `Crawl-delay`; log it when a site sets one, as Firecrawl and crawl4ai do.
+- Rollout risk: pages under a newly obeyed `Disallow` rule become stale.
 
 ### 4.2 Local Markdown Folder Ingestion
 1. Recursively walk `source.origin` for `*.md` and `*.markdown` files (ignoring `.git`, `node_modules`, hidden dirs).
@@ -546,7 +562,7 @@ The `Makefile` drives Docker by default (`RUNTIME ?= docker`); Apple's macOS OCI
   - **Linux:** Generates `~/.config/systemd/user/citadel.service` and enables via `systemctl --user`.
 
 ### 8.3 Shared Scheduler & Watcher Behavior (Container & Native)
-- **Web scheduler loop:** Ticks every 60 seconds; selects `web` sources where `refresh_interval_secs > 0` and `last_synced_at + refresh_interval_secs <= now`; runs up to 2 source syncs concurrently with small random jitter (0–30s).
+- **Web scheduler loop:** Ticks every 60 seconds; selects `web` sources where `refresh_interval_secs > 0` and `last_synced_at + refresh_interval_secs <= now`; runs up to 2 source syncs concurrently with small random jitter (0–30s). *Planned* ([design](./egm/2026-11-24-sync-measurement-one-request-per-url-design.md)): the "starting scheduled web sync" line carries `origin=`, and the daemon logs each Sync warning at `warn` (today it logs none).
 - **Local folder watcher:** Registers a `notify` debounced watcher (2-second debounce) on each `local` source directory; triggers incremental re-indexing of changed `.md` files only.
 - **Graceful shutdown:** Handles `SIGINT`/`SIGTERM`, finishes in-flight DB transactions cleanly, removes `daemon.pid`.
 
@@ -558,8 +574,8 @@ The `Makefile` drives Docker by default (`RUNTIME ?= docker`); Apple's macOS OCI
 |---|---|
 | **Unit tests** | Frontmatter/noise stripping & SHA-256 stability; `pulldown-cmark` H1–H3 section splitting & breadcrumbs; unified diff generation; `skill install` path resolution & symlinks; `setup` JSON/TOML MCP config merging, Antigravity local plugin scaffolding, and `--force` overwrite guards; `update` semver comparison, `update-check.json` 24h TTL, and SHA-256 verification. |
 | **SQLite safety tests** | Verify MCP `query` rejects `INSERT`, `UPDATE`, `DELETE`, `DROP`, `ATTACH`, `PRAGMA`, multi-statements, and enforces timeout + row/byte caps. |
-| **Integration tests** | Local `wiremock`/Axum fixture site crawled via `spider` -> stored -> modified -> re-crawled (verifying `pages_updated`, `page_revisions`, and `stale` marking on removed URL); temp Markdown folder sync; end-to-end `citadel mcp` `stdio` JSON-RPC round-trip (verifying zero update-notice pollution on `stdout`); mock GitHub Release download/verify/swap test for `citadel update`. |
-| **Resource budget check** | Verify idle `citadel daemon` RSS stays under ~25 MB on a 1,000-page vault. Last measurement and method: [resource-usage.md](./resource-usage.md) (reached ~25 MB RSS only ~10 min after a Sync). |
+| **Integration tests** | Local `wiremock`/Axum fixture site crawled via `spider` -> stored -> modified -> re-crawled (verifying `pages_updated`, `page_revisions`, and `stale` marking on removed URL); temp Markdown folder sync; end-to-end `citadel mcp` `stdio` JSON-RPC round-trip (verifying zero update-notice pollution on `stdout`); mock GitHub Release download/verify/swap test for `citadel update`. *Planned:* Sync accounting (drop counters, `is_cut_off`, `budget_warning`, a cut-off Sync that drops a page marks nothing stale). |
+| **Resource budget check** | Verify idle `citadel daemon` RSS stays under ~25 MB on a 1,000-page vault. Last measurement and method: [resource-usage.md](./resource-usage.md) (reached ~25 MB RSS only ~10 min after a Sync). *Planned:* a "Where a web Sync spends its time" scenario in the same file. |
 
 ---
 
