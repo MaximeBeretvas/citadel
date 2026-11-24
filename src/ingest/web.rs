@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::time::Duration;
 
@@ -297,6 +297,10 @@ pub(crate) struct WebSyncAccounting {
     pub url_not_storable: usize,
     pub duplicate_result: usize,
     pub binary_file: usize,
+    /// Markdown copies of a collected HTML page, stored as that page (issue #4).
+    pub markdown_twin: usize,
+    /// Pages whose `rel=canonical` names another collected page with the same path.
+    pub canonical_duplicate: usize,
     /// The requested URLs of the first pages dropped as `redirected_out_of_scope`. Not printed.
     pub redirect_examples: Vec<String>,
     pub cut_off: bool,
@@ -420,6 +424,8 @@ fn log_web_sync_summary(source: &SourceRecord, ok: bool, acc: &WebSyncAccounting
         redirected_out_of_scope = acc.redirected_out_of_scope,
         url_not_storable = acc.url_not_storable,
         duplicate_result = acc.duplicate_result,
+        markdown_twin = acc.markdown_twin,
+        canonical_duplicate = acc.canonical_duplicate,
         binary_file = acc.binary_file,
         later_crawls_started = acc.later_crawls_started,
         discovery_ms = %StepMs(acc.discovery_ms),
@@ -560,7 +566,7 @@ async fn execute_web_crawl(
     )
     .await;
     finish_step(&mut acc.later_crawls_ms, later_crawls_start, later_crawls)?;
-    acc.collected_storable_urls = count_scoped_pages(&collected_pages, scope);
+    acc.collected_storable_urls = count_scoped_urls(&collected_pages, scope);
 
     if source.render_js && cfg!(feature = "chrome") {
         confirm_render_failures(&mut collected_pages, origin).await;
@@ -571,7 +577,8 @@ async fn execute_web_crawl(
     let (outcomes, ok_count, transport_failures) =
         finish_step(&mut acc.conversion_ms, conversion_start, converted);
 
-    if ok_count == 0 && (outcomes.is_empty() || transport_failures == outcomes.len()) {
+    let results = result_count(&outcomes);
+    if ok_count == 0 && (results == 0 || transport_failures == results) {
         let reason = outcomes
             .iter()
             .find_map(|o| match o {
@@ -585,6 +592,14 @@ async fn execute_web_crawl(
     Ok((outcomes, warnings))
 }
 
+/// Results that stand for a page of their own (stored or failed), leaving out superseded copies.
+fn result_count(outcomes: &[PageIngestOutcome]) -> usize {
+    outcomes
+        .iter()
+        .filter(|o| !matches!(o, PageIngestOutcome::Superseded { .. }))
+        .count()
+}
+
 /// Start one more crawler per discovered URL that no earlier crawl collected, one after another,
 /// each limited to what is left of the page budget.
 async fn run_later_crawls(
@@ -596,7 +611,7 @@ async fn run_later_crawls(
     acc: &mut WebSyncAccounting,
 ) -> Result<()> {
     for seed in seed_urls {
-        let used_budget = count_scoped_pages(collected_pages, scope);
+        let used_budget = count_scoped_documents(collected_pages, scope);
         if used_budget >= source.max_pages as usize {
             break;
         }
@@ -872,47 +887,63 @@ fn confirmed_status(
     }
 }
 
-fn count_scoped_pages(pages: &[Page], scope: &WebScope) -> usize {
-    let mut unique = HashSet::new();
-    for page in pages {
-        let Some(url) = canonicalize_page_url(page.get_url()) else {
-            continue;
-        };
-        if scope.should_store(&url) {
-            unique.insert(canonical_dedup_key(&url));
-        }
-    }
-    unique.len()
+/// Distinct storable URLs among the collected pages. The cut-off rule uses this count: spider's
+/// limit counts every fetch, Markdown twins included, so it must not be lowered by pairing.
+fn count_scoped_urls(pages: &[Page], scope: &WebScope) -> usize {
+    scoped_keys(pages, scope).len()
+}
+
+/// Distinct documents among the storable collected pages: a Markdown URL whose HTML page was also
+/// collected (`X` and `X.md`) counts once. Sizes the budget of later crawls only, so twins do not
+/// take the place of other documents; never feed it to `is_cut_off`.
+fn count_scoped_documents(pages: &[Page], scope: &WebScope) -> usize {
+    let keys = scoped_keys(pages, scope);
+    keys.iter()
+        .filter(|key| {
+            Url::parse(key).map_or(true, |url| {
+                !html_keys_for_markdown(&url)
+                    .iter()
+                    .any(|html| keys.contains(html))
+            })
+        })
+        .count()
+}
+
+fn scoped_keys(pages: &[Page], scope: &WebScope) -> HashSet<String> {
+    pages
+        .iter()
+        .filter_map(|page| canonicalize_page_url(page.get_url()))
+        .filter(|url| scope.should_store(url))
+        .map(|url| canonical_dedup_key(&url))
+        .collect()
 }
 
 /// Turn collected pages into results, counting each page that gets none in `acc` under the first
-/// reason it meets.
+/// reason it meets. Copies of one document (see [`pair_documents`]) become one result at the
+/// document's URI plus a `Superseded` result per copy.
 fn build_page_outcomes(
     pages: Vec<Page>,
     scope: &WebScope,
     acc: &mut WebSyncAccounting,
 ) -> (Vec<PageIngestOutcome>, usize, usize) {
+    let pairs = pair_documents(&pages, scope);
     let mut outcomes = Vec::new();
     let mut seen_uris = HashSet::new();
     let mut ok_count = 0usize;
     let mut transport_failures = 0usize;
 
-    for page in pages {
+    for (index, page) in pages.iter().enumerate() {
         let Some(canonical_url) = canonicalize_page_url(page.get_url()) else {
             acc.unparsable_url += 1;
             continue;
         };
 
-        if let Some(final_dest) = page.final_redirect_destination.as_deref() {
-            if let Some(dest_url) = canonicalize_page_url(final_dest) {
-                if !scope.should_crawl(&dest_url) {
-                    acc.redirected_out_of_scope += 1;
-                    if acc.redirect_examples.len() < MAX_REDIRECT_EXAMPLES {
-                        acc.redirect_examples.push(page.get_url().to_string());
-                    }
-                    continue;
-                }
+        if redirected_out_of_scope(page, scope) {
+            acc.redirected_out_of_scope += 1;
+            if acc.redirect_examples.len() < MAX_REDIRECT_EXAMPLES {
+                acc.redirect_examples.push(page.get_url().to_string());
             }
+            continue;
         }
 
         if !scope.should_store(&canonical_url) {
@@ -926,13 +957,23 @@ fn build_page_outcomes(
             continue;
         }
 
+        if let Some(kept) = pairs.superseded_by(index) {
+            match kept {
+                Kept::MarkdownTwinOf(_) => acc.markdown_twin += 1,
+                Kept::CanonicalOf(_) => acc.canonical_duplicate += 1,
+            }
+            let by = pages[kept.index()].get_url().to_string();
+            outcomes.push(PageIngestOutcome::Superseded { uri, by });
+            continue;
+        }
+
         let status_u16 = page.status_code.as_u16();
         if status_u16 >= 400 || status_u16 == 0 || page.error_status.is_some() {
             let is_transport = status_u16 == 0 || status_u16 >= 520 || page.error_status.is_some();
             if is_transport {
                 transport_failures += 1;
             }
-            let error_message = format_page_error(&page, status_u16);
+            let error_message = format_page_error(page, status_u16);
             outcomes.push(PageIngestOutcome::Failed {
                 uri,
                 http_status: (status_u16 > 0).then_some(i64::from(status_u16)),
@@ -948,14 +989,20 @@ fn build_page_outcomes(
             continue;
         }
 
-        let (raw_md, html_title) = extract_page_markdown_and_title(&page, &canonical_url);
+        let (raw_md, html_title) = extract_page_markdown_and_title(page, &canonical_url);
+        // A usable Markdown twin replaces the converted HTML; the HTML page keeps its URI, its
+        // `<title>` as the fallback title and its HTTP validators.
+        let raw_md = match pairs.usable_twin(index, &pages) {
+            Some(twin) => twin.get_html(),
+            None => raw_md,
+        };
         let fallback_title = html_title
             .filter(|t| !t.trim().is_empty())
             .unwrap_or_else(|| fallback_title_from_url(&canonical_url));
 
         let doc = normalize_markdown(&raw_md, &fallback_title);
         let chunks = split_sections(&doc.content_md);
-        let (etag, last_modified) = extract_http_validators(&page);
+        let (etag, last_modified) = extract_http_validators(page);
 
         ok_count += 1;
         acc.results_stored += 1;
@@ -970,6 +1017,240 @@ fn build_page_outcomes(
     }
 
     (outcomes, ok_count, transport_failures)
+}
+
+/// Whether a page was redirected to a URL the crawl would not follow.
+fn redirected_out_of_scope(page: &Page, scope: &WebScope) -> bool {
+    page.final_redirect_destination
+        .as_deref()
+        .and_then(canonicalize_page_url)
+        .is_some_and(|dest| !scope.should_crawl(&dest))
+}
+
+/// A page that fetched cleanly with text content.
+fn fetched_ok(page: &Page) -> bool {
+    let status = page.status_code.as_u16();
+    (200..400).contains(&status) && page.error_status.is_none() && !page.binary_file
+}
+
+/// The page whose result a superseded page's document is stored under.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Kept {
+    /// The superseded page is the Markdown twin of the HTML page at this index.
+    MarkdownTwinOf(usize),
+    /// The superseded page is a canonical duplicate of the page at this index.
+    CanonicalOf(usize),
+}
+
+impl Kept {
+    fn index(self) -> usize {
+        match self {
+            Self::MarkdownTwinOf(i) | Self::CanonicalOf(i) => i,
+        }
+    }
+}
+
+/// Which collected pages are copies of one document, by index into the collected pages.
+#[derive(Debug, Default)]
+struct DocumentPairs {
+    /// HTML page index -> index of its Markdown twin.
+    twin_of_html: HashMap<usize, usize>,
+    /// Superseded page index -> the page its document is stored under.
+    superseded: HashMap<usize, Kept>,
+}
+
+impl DocumentPairs {
+    fn superseded_by(&self, index: usize) -> Option<Kept> {
+        self.superseded.get(&index).copied()
+    }
+
+    /// The Markdown twin of the HTML page at `index`, when it fetched cleanly.
+    fn usable_twin<'p>(&self, index: usize, pages: &'p [Page]) -> Option<&'p Page> {
+        let twin = &pages[*self.twin_of_html.get(&index)?];
+        fetched_ok(twin).then_some(twin)
+    }
+}
+
+/// Find the copies of one document among the collected pages:
+/// - **Canonical duplicate:** an HTML page whose `<link rel="canonical">` names another
+///   collected, cleanly fetched page with the same path (only the query string or a trailing
+///   slash differs), e.g. `/guide?version=2` -> `/guide`. Requiring the same path keeps a site
+///   that points every canonical at its home page from collapsing into one page.
+/// - **Markdown twin:** the Markdown copy of a cleanly fetched HTML page `X`: the target of its
+///   `<link rel="alternate" type="text/markdown">`, else `X.md`, else `X/index.md`, when that URL
+///   was collected and is Markdown. A twin whose HTML page failed is not paired, so it is
+///   handled like any other page.
+fn pair_documents(pages: &[Page], scope: &WebScope) -> DocumentPairs {
+    // Only the first page per exact URI takes part, as only it gets a result in
+    // `build_page_outcomes`. Lookups try the exact URI before the dedup key, so the variant a
+    // canonical tag or twin link names wins over whichever of `/p` and `/p/` arrived first.
+    let mut index_by_uri: HashMap<String, usize> = HashMap::new();
+    let mut index_by_key: HashMap<String, usize> = HashMap::new();
+    let mut urls: Vec<Option<Url>> = Vec::with_capacity(pages.len());
+    for (index, page) in pages.iter().enumerate() {
+        let url = canonicalize_page_url(page.get_url())
+            .filter(|url| scope.should_store(url) && !redirected_out_of_scope(page, scope))
+            .filter(|url| !index_by_uri.contains_key(url.as_str()));
+        if let Some(url) = &url {
+            index_by_uri.insert(url.to_string(), index);
+            index_by_key
+                .entry(canonical_dedup_key(url))
+                .or_insert(index);
+        }
+        urls.push(url);
+    }
+    let lookup = |exact: &str, key: &str| {
+        index_by_uri
+            .get(exact)
+            .or_else(|| index_by_key.get(key))
+            .copied()
+    };
+
+    let mut pairs = DocumentPairs::default();
+    let html_pages: Vec<(usize, &Url, HeadLinks)> = pages
+        .iter()
+        .zip(&urls)
+        .enumerate()
+        .filter_map(|(index, (page, url))| {
+            let url = url.as_ref()?;
+            (fetched_ok(page) && !is_markdown_response(page, url))
+                .then(|| (index, url, head_links(&page.get_html(), url)))
+        })
+        .collect();
+
+    for (index, url, links) in &html_pages {
+        let Some(canonical) = &links.canonical else {
+            continue;
+        };
+        let Some(kept) = lookup(canonical.as_str(), &canonical_dedup_key(canonical)) else {
+            continue;
+        };
+        let same_path = canonical.path().trim_end_matches('/') == url.path().trim_end_matches('/');
+        if kept != *index && same_path && fetched_ok(&pages[kept]) {
+            pairs.superseded.insert(*index, Kept::CanonicalOf(kept));
+        }
+    }
+    // A page kept for a duplicate must not itself be superseded (a canonical chain or cycle).
+    let chained: Vec<usize> = pairs
+        .superseded
+        .iter()
+        .filter(|(_, kept)| pairs.superseded.contains_key(&kept.index()))
+        .map(|(index, _)| *index)
+        .collect();
+    for index in chained {
+        pairs.superseded.remove(&index);
+    }
+
+    for (index, url, links) in &html_pages {
+        if pairs.superseded.contains_key(index) {
+            continue;
+        }
+        let candidates = links
+            .markdown_alternate
+            .iter()
+            .map(|alt| (alt.to_string(), canonical_dedup_key(alt)))
+            .chain(markdown_twin_keys(url).into_iter().map(|k| (k.clone(), k)));
+        let twin = candidates
+            .filter_map(|(exact, key)| lookup(&exact, &key))
+            .find(|&twin| {
+                twin != *index
+                    && !pairs.superseded.contains_key(&twin)
+                    && urls[twin]
+                        .as_ref()
+                        .is_some_and(|twin_url| is_markdown_response(&pages[twin], twin_url))
+            });
+        if let Some(twin) = twin {
+            pairs.twin_of_html.insert(*index, twin);
+            pairs.superseded.insert(twin, Kept::MarkdownTwinOf(*index));
+        }
+    }
+
+    pairs
+}
+
+/// The `<link>` targets in a page that name other copies of it.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct HeadLinks {
+    canonical: Option<Url>,
+    markdown_alternate: Option<Url>,
+}
+
+/// Read the first `rel="canonical"` and `rel="alternate" type="text/markdown"` links of an HTML
+/// page, resolved against `base`. Tolerates minified HTML (unquoted attributes).
+fn head_links(html: &str, base: &Url) -> HeadLinks {
+    let mut found = HeadLinks::default();
+    let mut rewriter = lol_html::HtmlRewriter::new(
+        lol_html::Settings {
+            element_content_handlers: vec![lol_html::element!("link[rel][href]", |el| {
+                let rel = el
+                    .get_attribute("rel")
+                    .unwrap_or_default()
+                    .to_ascii_lowercase();
+                let rels: Vec<&str> = rel.split_ascii_whitespace().collect();
+                let href = el.get_attribute("href").unwrap_or_default();
+                if rels.contains(&"canonical") && found.canonical.is_none() {
+                    found.canonical = resolve_seed_url(base, &href);
+                } else if rels.contains(&"alternate") && found.markdown_alternate.is_none() {
+                    let kind = el.get_attribute("type").unwrap_or_default();
+                    let kind = kind.to_ascii_lowercase();
+                    if kind.starts_with("text/markdown") || kind.starts_with("text/x-markdown") {
+                        found.markdown_alternate = resolve_seed_url(base, &href);
+                    }
+                }
+                Ok(())
+            })],
+            ..lol_html::Settings::new()
+        },
+        |_: &[u8]| {},
+    );
+    let parsed = rewriter
+        .write(html.as_bytes())
+        .and_then(|()| rewriter.end());
+    if let Err(err) = parsed {
+        tracing::debug!(url = %base, error = %err, "could not read link tags of page");
+    }
+    found
+}
+
+/// Dedup keys of the URLs a site may serve the Markdown copy of HTML page `url` at: `X.md` and
+/// `X/index.md` (for `X` and `X/`), without the query string.
+fn markdown_twin_keys(url: &Url) -> Vec<String> {
+    let mut base = url.clone();
+    base.set_query(None);
+    base.set_fragment(None);
+    let path = base.path().trim_end_matches('/').to_string();
+    let mut keys = Vec::with_capacity(2);
+    if !path.is_empty() {
+        let mut twin = base.clone();
+        twin.set_path(&format!("{path}.md"));
+        keys.push(canonical_dedup_key(&twin));
+    }
+    let mut index = base;
+    index.set_path(&format!("{path}/index.md"));
+    keys.push(canonical_dedup_key(&index));
+    keys
+}
+
+/// Dedup keys of the HTML pages a Markdown URL (`X.md` or `X/index.md`) may be the twin of;
+/// empty for a URL that does not end in `.md`.
+fn html_keys_for_markdown(url: &Url) -> Vec<String> {
+    let path = url.path();
+    let Some(stem) = path.strip_suffix(".md") else {
+        return Vec::new();
+    };
+    let mut base = url.clone();
+    base.set_query(None);
+    base.set_fragment(None);
+    let mut keys = Vec::with_capacity(2);
+    if !stem.is_empty() && !stem.ends_with('/') {
+        base.set_path(stem);
+        keys.push(canonical_dedup_key(&base));
+    }
+    if let Some(dir) = path.strip_suffix("/index.md") {
+        base.set_path(if dir.is_empty() { "/" } else { dir });
+        keys.push(canonical_dedup_key(&base));
+    }
+    keys
 }
 
 fn format_page_error(page: &Page, status_u16: u16) -> String {
@@ -1497,14 +1778,14 @@ mod tests {
     type FixtureRouteMap = Arc<RwLock<HashMap<String, (StatusCode, String, String)>>>;
 
     #[derive(Clone, Default)]
-    struct FixtureState {
+    pub(super) struct FixtureState {
         routes: FixtureRouteMap,
         /// Every request served, as (path, status, user-agent), for diagnosing failures.
         requests: Arc<RwLock<Vec<(String, u16, String)>>>,
     }
 
     impl FixtureState {
-        fn set_html(&self, path: &str, status: StatusCode, body: &str) {
+        pub(super) fn set_html(&self, path: &str, status: StatusCode, body: &str) {
             let mut guard = self.routes.write().expect("lock routes");
             guard.insert(
                 path.to_string(),
@@ -1516,7 +1797,7 @@ mod tests {
             );
         }
 
-        fn set_text(&self, path: &str, status: StatusCode, body: &str) {
+        pub(super) fn set_text(&self, path: &str, status: StatusCode, body: &str) {
             let mut guard = self.routes.write().expect("lock routes");
             guard.insert(
                 path.to_string(),
@@ -1528,7 +1809,19 @@ mod tests {
             );
         }
 
-        fn set_xml(&self, path: &str, status: StatusCode, body: &str) {
+        pub(super) fn set_markdown(&self, path: &str, status: StatusCode, body: &str) {
+            let mut guard = self.routes.write().expect("lock routes");
+            guard.insert(
+                path.to_string(),
+                (
+                    status,
+                    "text/markdown; charset=utf-8".to_string(),
+                    body.to_string(),
+                ),
+            );
+        }
+
+        pub(super) fn set_xml(&self, path: &str, status: StatusCode, body: &str) {
             let mut guard = self.routes.write().expect("lock routes");
             guard.insert(
                 path.to_string(),
@@ -1586,7 +1879,7 @@ mod tests {
         }
     }
 
-    async fn spawn_fixture_server(
+    pub(super) async fn spawn_fixture_server(
         state: FixtureState,
     ) -> (SocketAddr, tokio::task::JoinHandle<()>) {
         let app = Router::new()
@@ -2699,6 +2992,8 @@ setTimeout(function () {{
                 + acc.redirected_out_of_scope
                 + acc.url_not_storable
                 + acc.duplicate_result
+                + acc.markdown_twin
+                + acc.canonical_duplicate
                 + acc.binary_file,
             "{acc:?}"
         );
@@ -2982,5 +3277,518 @@ setTimeout(function () {{
             recapped.pages_stale, 0,
             "capped crawl must not mark unvisited pages beyond max_pages as stale"
         );
+    }
+}
+
+#[cfg(test)]
+mod markdown_twin_tests {
+    use std::net::SocketAddr;
+
+    use axum::http::StatusCode;
+    use tempfile::tempdir;
+
+    use super::tests::{spawn_fixture_server, FixtureState};
+    use crate::config::VaultConfig;
+    use crate::db::open_rw_db;
+    use crate::sources::{AddSourceParams, Added, SourceLifecycle};
+
+    const BANNER: &str = "This is documentation for an unreleased version banner";
+
+    fn html_page(title: &str, alternate: Option<&str>, links: &[&str], body: &str) -> String {
+        let alt = alternate
+            .map(|href| format!(r#"<link rel="alternate" type="text/markdown" href="{href}">"#))
+            .unwrap_or_default();
+        let anchors: String = links
+            .iter()
+            .map(|href| format!(r#"<a href="{href}">{href}</a> "#))
+            .collect();
+        format!(
+            "<!doctype html><html><head><title>{title} | Site</title>{alt}</head><body>\
+             <main><div class=\"banner\">{BANNER}</div><h1>{title}</h1><p>{body}</p>\
+             <p>{anchors}</p></main></body></html>"
+        )
+    }
+
+    fn markdown_page(title: &str, body: &str) -> String {
+        format!("---\ntitle: {title}\ndescription: about {title}\n---\n\n# {title}\n\n{body}\n")
+    }
+
+    /// A Docusaurus-like site: every HTML page links to its own `.md` copy, `llms.txt` lists the
+    /// `.md` URLs, one `.md` has no HTML page, and one page is also served under `?version=2`.
+    fn twin_site() -> FixtureState {
+        let state = FixtureState::default();
+        state.set_text("/robots.txt", StatusCode::OK, "User-agent: *\nAllow: /\n");
+        state.set_html(
+            "/docs/",
+            StatusCode::OK,
+            &html_page(
+                "Docs Home",
+                None,
+                &[
+                    "/docs/guide",
+                    "/docs/api",
+                    "/docs/orphan.md",
+                    "/docs/plain",
+                    "/docs/plain?version=2",
+                ],
+                "Welcome to the documentation hub.",
+            ),
+        );
+        state.set_html(
+            "/docs/guide",
+            StatusCode::OK,
+            &html_page(
+                "User Guide",
+                Some("/docs/guide.md"),
+                &["/docs/guide.md"],
+                "Getting started steps for the guide.",
+            ),
+        );
+        state.set_markdown(
+            "/docs/guide.md",
+            StatusCode::OK,
+            &markdown_page("User Guide", "Getting started steps for the guide."),
+        );
+        // Minified HTML with unquoted attributes and no link tag: paired by URL suffix only.
+        state.set_html(
+            "/docs/api",
+            StatusCode::OK,
+            &format!(
+                "<html><head><title>API | Site</title><link rel=canonical href=/docs/api></head>\
+                 <body><main><div>{BANNER}</div><h1>API</h1><p>HTTP endpoints reference.</p>\
+                 </main></body></html>"
+            ),
+        );
+        state.set_markdown(
+            "/docs/api.md",
+            StatusCode::OK,
+            &markdown_page("API", "HTTP endpoints reference."),
+        );
+        state.set_markdown(
+            "/docs/orphan.md",
+            StatusCode::OK,
+            &markdown_page("Orphan", "Only published as Markdown."),
+        );
+        // Served for both `/docs/plain` and `/docs/plain?version=2` (routes ignore the query).
+        state.set_html(
+            "/docs/plain",
+            StatusCode::OK,
+            "<html><head><title>Plain</title><link rel=\"canonical\" href=\"/docs/plain\"></head>\
+             <body><main><h1>Plain</h1><p>A page with no Markdown copy.</p></main></body></html>",
+        );
+        state.set_text(
+            "/docs/llms.txt",
+            StatusCode::OK,
+            "# Docs\n\n- [User Guide](/docs/guide.md): guide\n- [API](/docs/api.md): api\n",
+        );
+        state
+    }
+
+    struct Site {
+        addr: SocketAddr,
+        server: tokio::task::JoinHandle<()>,
+        _vault_dir: tempfile::TempDir,
+        cfg: VaultConfig,
+        source_id: i64,
+        name: String,
+    }
+
+    async fn add_site(state: FixtureState, max_pages: Option<u32>) -> Site {
+        let (addr, server) = spawn_fixture_server(state).await;
+        let vault_dir = tempdir().expect("vault tempdir");
+        let cfg = VaultConfig::new(vault_dir.path()).allowing_private_origins();
+        let Added { source, .. } = SourceLifecycle::new(cfg.clone())
+            .add(
+                AddSourceParams {
+                    origin: format!("http://{addr}/docs/"),
+                    name: Some("twins".to_string()),
+                    max_pages,
+                    ..Default::default()
+                },
+                false,
+            )
+            .await
+            .expect("add source");
+        Site {
+            addr,
+            server,
+            _vault_dir: vault_dir,
+            cfg,
+            source_id: source.id,
+            name: source.name,
+        }
+    }
+
+    async fn sync(site: &Site, prune: bool) -> crate::ingest::SyncSummary {
+        SourceLifecycle::new(site.cfg.clone())
+            .sync(&site.name, prune)
+            .await
+            .expect("sync")
+            .synced()
+            .expect("synced")
+    }
+
+    /// (uri relative to the server, status, title, content_md) of every page, by uri.
+    fn pages(site: &Site) -> Vec<(String, String, String, String)> {
+        let base = format!("http://{}", site.addr);
+        open_rw_db(&site.cfg.db_path())
+            .expect("open_rw_db")
+            .prepare(
+                "SELECT uri, status, title, content_md FROM pages WHERE source_id = ?1 ORDER BY uri",
+            )
+            .expect("prepare")
+            .query_map([site.source_id], |r| {
+                let uri: String = r.get(0)?;
+                Ok((
+                    uri.trim_start_matches(&base).to_string(),
+                    r.get(1)?,
+                    r.get(2)?,
+                    r.get(3)?,
+                ))
+            })
+            .expect("query")
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .expect("collect")
+    }
+
+    fn active_uris(site: &Site) -> Vec<String> {
+        pages(site)
+            .into_iter()
+            .filter(|p| p.1 == "active")
+            .map(|p| p.0)
+            .collect()
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn stores_one_page_per_markdown_twin() {
+        let site = add_site(twin_site(), None).await;
+        sync(&site, false).await;
+        site.server.abort();
+
+        assert_eq!(
+            active_uris(&site),
+            vec![
+                "/docs/",
+                "/docs/api",
+                "/docs/guide",
+                "/docs/orphan.md",
+                "/docs/plain"
+            ],
+            "{:#?}",
+            pages(&site)
+        );
+        for (uri, _, title, md) in pages(&site) {
+            if uri == "/docs/guide" || uri == "/docs/api" {
+                assert!(
+                    !md.contains(BANNER),
+                    "{uri} must hold the .md content: {md}"
+                );
+                assert!(
+                    !title.contains("| Site"),
+                    "{uri} title from frontmatter: {title}"
+                );
+            }
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn resync_marks_stored_markdown_twins_stale() {
+        // `Some(7)`: the first crawl reaches all 7 linked URLs, so the Sync is cut off and keeps
+        // unvisited pages, yet the merged copies it did visit still go stale.
+        for max_pages in [None, Some(7)] {
+            let site = add_site(twin_site(), max_pages).await;
+            let conn = open_rw_db(&site.cfg.db_path()).expect("open_rw_db");
+            conn.execute(
+                "INSERT INTO pages (source_id, uri, title, content_md, content_hash, word_count, status)
+                 VALUES (?1, ?2, 'Archived', '# Archived\n', 'hash-old', 1, 'active')",
+                rusqlite::params![site.source_id, format!("http://{}/docs/archived", site.addr)],
+            )
+            .expect("insert unvisited row");
+            for path in ["/docs/guide.md", "/docs/api.md", "/docs/plain?version=2"] {
+                conn.execute(
+                    "INSERT INTO pages (source_id, uri, title, content_md, content_hash, word_count, status)
+                     VALUES (?1, ?2, 'Old', '# Old\n', 'hash-old', 1, 'active')",
+                    rusqlite::params![site.source_id, format!("http://{}{path}", site.addr)],
+                )
+                .expect("insert old twin row");
+            }
+            drop(conn);
+
+            sync(&site, false).await;
+            let after = pages(&site);
+            for path in ["/docs/guide.md", "/docs/api.md", "/docs/plain?version=2"] {
+                let row = after.iter().find(|p| p.0 == path);
+                assert_eq!(
+                    row.map(|p| p.1.as_str()),
+                    Some("stale"),
+                    "max_pages={max_pages:?}: {path} must go stale: {after:#?}"
+                );
+            }
+
+            let archived = after
+                .iter()
+                .find(|p| p.0 == "/docs/archived")
+                .map(|p| p.1.as_str());
+            let expected = if max_pages.is_some() {
+                "active"
+            } else {
+                "stale"
+            };
+            assert_eq!(
+                archived,
+                Some(expected),
+                "max_pages={max_pages:?}: {after:#?}"
+            );
+
+            if max_pages.is_none() {
+                sync(&site, true).await;
+                let pruned = pages(&site);
+                assert!(
+                    !pruned
+                        .iter()
+                        .any(|p| p.0.ends_with("guide.md") || p.0.contains('?')),
+                    "--prune deletes merged pages: {pruned:#?}"
+                );
+            }
+            site.server.abort();
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn markdown_only_site_is_crawled_normally() {
+        let state = FixtureState::default();
+        state.set_text("/robots.txt", StatusCode::OK, "User-agent: *\nAllow: /\n");
+        state.set_html(
+            "/docs/",
+            StatusCode::OK,
+            &html_page(
+                "Index",
+                None,
+                &["/docs/a.md", "/docs/b.md"],
+                "Markdown files.",
+            ),
+        );
+        state.set_markdown("/docs/a.md", StatusCode::OK, &markdown_page("A", "Alpha."));
+        state.set_markdown("/docs/b.md", StatusCode::OK, &markdown_page("B", "Beta."));
+        let site = add_site(state, None).await;
+        sync(&site, false).await;
+        site.server.abort();
+        assert_eq!(
+            active_uris(&site),
+            vec!["/docs/", "/docs/a.md", "/docs/b.md"]
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn failed_twin_falls_back_to_the_other_copy() {
+        let state = FixtureState::default();
+        state.set_text("/robots.txt", StatusCode::OK, "User-agent: *\nAllow: /\n");
+        state.set_html(
+            "/docs/",
+            StatusCode::OK,
+            &html_page(
+                "Index",
+                None,
+                &["/docs/ok-html", "/docs/bad-html.md"],
+                "Two pages.",
+            ),
+        );
+        // HTML fine, .md broken: keep the HTML content, no Error page for the .md.
+        state.set_html(
+            "/docs/ok-html",
+            StatusCode::OK,
+            &html_page(
+                "Ok Html",
+                Some("/docs/ok-html.md"),
+                &["/docs/ok-html.md"],
+                "Html body.",
+            ),
+        );
+        state.set_text(
+            "/docs/ok-html.md",
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "boom",
+        );
+        // HTML broken, .md fine: no pairing, both handled as before.
+        state.set_html("/docs/bad-html", StatusCode::NOT_FOUND, "<h1>gone</h1>");
+        state.set_markdown(
+            "/docs/bad-html.md",
+            StatusCode::OK,
+            &markdown_page("Bad Html", "Markdown survives."),
+        );
+        let site = add_site(state, None).await;
+        sync(&site, false).await;
+        site.server.abort();
+
+        let rows = pages(&site);
+        let status = |uri: &str| rows.iter().find(|p| p.0 == uri).map(|p| p.1.clone());
+        assert_eq!(
+            status("/docs/ok-html").as_deref(),
+            Some("active"),
+            "{rows:#?}"
+        );
+        assert_eq!(status("/docs/ok-html.md"), None, "{rows:#?}");
+        assert_eq!(
+            status("/docs/bad-html.md").as_deref(),
+            Some("active"),
+            "{rows:#?}"
+        );
+        let ok_md = &rows.iter().find(|p| p.0 == "/docs/ok-html").expect("row").3;
+        assert!(ok_md.contains("Html body."), "{ok_md}");
+    }
+
+    fn page(url: &str, content_type: &str, body: &str) -> super::Page {
+        let mut page = super::Page::default();
+        page.set_url(url.to_string());
+        page.status_code = StatusCode::OK;
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert(
+            reqwest::header::CONTENT_TYPE,
+            content_type.parse().expect("content type"),
+        );
+        page.headers = Some(headers);
+        page.set_html_bytes(Some(body.as_bytes().to_vec()));
+        page
+    }
+
+    fn scope() -> super::WebScope {
+        let origin = super::Url::parse("https://docs.example/docs/").expect("origin");
+        super::WebScope::new(&origin, &[], &[]).expect("scope")
+    }
+
+    #[test]
+    fn reads_link_tags_from_minified_html() {
+        let base = super::Url::parse("https://docs.example/docs/guide?version=2").expect("url");
+        let links = super::head_links(
+            "<html><head><link rel=canonical href=/docs/guide><link data-rh=true \
+             rel=alternate type=text/markdown href=guide.md></head><body></body></html>",
+            &base,
+        );
+        assert_eq!(
+            links.canonical.map(|u| u.to_string()).as_deref(),
+            Some("https://docs.example/docs/guide")
+        );
+        assert_eq!(
+            links.markdown_alternate.map(|u| u.to_string()).as_deref(),
+            Some("https://docs.example/docs/guide.md")
+        );
+    }
+
+    #[test]
+    fn canonical_to_another_path_does_not_collapse_pages() {
+        let html = r#"<html><head><link rel="canonical" href="https://docs.example/docs/"></head><body><h1>Page</h1><p>Text.</p></body></html>"#;
+        let pages = vec![
+            page("https://docs.example/docs/", "text/html", html),
+            page("https://docs.example/docs/a", "text/html", html),
+            page("https://docs.example/docs/b", "text/html", html),
+        ];
+        let mut acc = super::WebSyncAccounting::default();
+        let (outcomes, ok_count, _) = super::build_page_outcomes(pages, &scope(), &mut acc);
+        assert_eq!(ok_count, 3);
+        assert_eq!(outcomes.len(), 3);
+        assert_eq!(acc.canonical_duplicate, 0);
+    }
+
+    #[test]
+    fn twins_and_canonical_duplicates_are_counted_and_superseded() {
+        let html = r#"<html><head><link rel="canonical" href="/docs/guide"></head><body><h1>Guide</h1><p>Html text.</p></body></html>"#;
+        let pages = vec![
+            page(
+                "https://docs.example/docs/guide.md",
+                "text/markdown",
+                "# Guide\n\nMd text.\n",
+            ),
+            page("https://docs.example/docs/guide", "text/html", html),
+            page(
+                "https://docs.example/docs/guide?version=2",
+                "text/html",
+                html,
+            ),
+            page(
+                "https://docs.example/docs/index.md",
+                "text/markdown",
+                "# Home\n\nMd home.\n",
+            ),
+            page(
+                "https://docs.example/docs/",
+                "text/html",
+                "<html><body><h1>Home</h1></body></html>",
+            ),
+        ];
+        let mut acc = super::WebSyncAccounting::default();
+        let (outcomes, ok_count, _) = super::build_page_outcomes(pages, &scope(), &mut acc);
+
+        assert_eq!(ok_count, 2);
+        assert_eq!(acc.markdown_twin, 2);
+        assert_eq!(acc.canonical_duplicate, 1);
+        assert_eq!(super::result_count(&outcomes), 2);
+        assert_eq!(
+            5,
+            acc.results_stored + acc.results_failed + acc.markdown_twin + acc.canonical_duplicate,
+            "every page is a result or one drop count: {acc:?}"
+        );
+        for outcome in &outcomes {
+            if let crate::ingest::local::PageIngestOutcome::Ready { uri, doc, .. } = outcome {
+                assert!(!uri.ends_with(".md") && !uri.contains('?'), "{uri}");
+                assert!(doc.content_md.contains("Md "), "{uri}: {}", doc.content_md);
+            }
+        }
+    }
+
+    #[test]
+    fn later_crawl_budget_counts_a_markdown_twin_pair_once() {
+        let pages = vec![
+            page("https://docs.example/docs/guide", "text/html", ""),
+            page("https://docs.example/docs/guide.md", "text/markdown", ""),
+            page("https://docs.example/docs/orphan.md", "text/markdown", ""),
+            page("https://docs.example/docs/", "text/html", ""),
+            page("https://docs.example/docs/index.md", "text/markdown", ""),
+        ];
+        assert_eq!(super::count_scoped_documents(&pages, &scope()), 3);
+        assert_eq!(super::count_scoped_urls(&pages, &scope()), 5);
+    }
+
+    #[test]
+    fn a_failed_first_copy_of_a_page_claims_no_twin() {
+        let mut failed = page("https://docs.example/docs/guide", "text/html", "");
+        failed.status_code = StatusCode::NOT_FOUND;
+        let pages = vec![
+            failed,
+            page(
+                "https://docs.example/docs/guide",
+                "text/html",
+                "<h1>Guide</h1>",
+            ),
+            page(
+                "https://docs.example/docs/guide.md",
+                "text/markdown",
+                "# Guide\n\nMd.\n",
+            ),
+        ];
+        let mut acc = super::WebSyncAccounting::default();
+        let (outcomes, ok_count, _) = super::build_page_outcomes(pages, &scope(), &mut acc);
+        assert_eq!(acc.markdown_twin, 0, "{acc:?}");
+        assert_eq!(ok_count, 1, "the .md is stored on its own");
+        assert_eq!(super::result_count(&outcomes), 2);
+    }
+
+    #[test]
+    fn canonical_names_the_exact_trailing_slash_variant() {
+        let html = r#"<html><head><link rel="canonical" href="/docs/p/"></head><body><h1>P</h1></body></html>"#;
+        let pages = vec![
+            page("https://docs.example/docs/p", "text/html", html),
+            page("https://docs.example/docs/p/", "text/html", html),
+        ];
+        let mut acc = super::WebSyncAccounting::default();
+        let (outcomes, _, _) = super::build_page_outcomes(pages, &scope(), &mut acc);
+        let stored: Vec<&str> = outcomes
+            .iter()
+            .filter_map(|o| match o {
+                crate::ingest::local::PageIngestOutcome::Ready { uri, .. } => Some(uri.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(stored, vec!["https://docs.example/docs/p/"]);
+        assert_eq!(acc.canonical_duplicate, 1);
     }
 }

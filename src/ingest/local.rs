@@ -147,6 +147,10 @@ pub(crate) enum PageIngestOutcome {
         error_message: String,
         insert_if_missing: bool,
     },
+    /// A page visited in this Sync that is a copy of the page at `by` (a Markdown twin or a
+    /// canonical duplicate). Its stored row goes stale (deleted with `--prune`) whatever the
+    /// missing-page policy, because the Sync saw it and merged it; it is never inserted.
+    Superseded { uri: String, by: String },
 }
 
 /// Mark a source as `'syncing'` and insert a new `'running'` row into `sync_runs`.
@@ -294,11 +298,13 @@ pub(crate) fn persist_sync_outcomes(
         ..Default::default()
     };
     let mut seen_uris: HashSet<String> = HashSet::with_capacity(outcomes.len());
+    let mut superseded: Vec<(String, String)> = Vec::new();
 
     let tx = conn.transaction()?;
 
     for outcome in outcomes {
         match outcome {
+            PageIngestOutcome::Superseded { uri, by } => superseded.push((uri, by)),
             PageIngestOutcome::Failed {
                 uri,
                 http_status,
@@ -484,6 +490,15 @@ pub(crate) fn persist_sync_outcomes(
         }
     }
 
+    retire_superseded_pages(
+        &tx,
+        source_id,
+        superseded,
+        &mut seen_uris,
+        missing_policy == MissingPagePolicy::Prune,
+        &mut summary,
+    )?;
+
     match missing_policy {
         MissingPagePolicy::Preserve => {}
         MissingPagePolicy::MarkStale => {
@@ -548,6 +563,48 @@ fn insert_sections(
             chunk.content_md,
             i64::try_from(chunk.word_count).unwrap_or(i64::MAX),
         ])?;
+    }
+    Ok(())
+}
+
+/// Mark each stored superseded page stale (delete it when `prune`), and record it as seen so the
+/// missing-page pass does not count it again. A URI that also got its own result is left alone.
+fn retire_superseded_pages(
+    tx: &rusqlite::Transaction<'_>,
+    source_id: i64,
+    superseded: Vec<(String, String)>,
+    seen_uris: &mut HashSet<String>,
+    prune: bool,
+    summary: &mut SyncSummary,
+) -> Result<()> {
+    for (uri, by) in superseded {
+        if !seen_uris.insert(uri.clone()) {
+            continue;
+        }
+        let existing: Option<(i64, String)> = tx
+            .query_row(
+                "SELECT id, status FROM pages WHERE source_id = ?1 AND uri = ?2",
+                params![source_id, uri],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
+        let Some((page_id, status)) = existing else {
+            continue;
+        };
+        tracing::debug!(uri = %uri, by = %by, "page superseded by another copy of its document");
+        if prune {
+            tx.execute("DELETE FROM pages WHERE id = ?1", [page_id])?;
+            summary.pruned += 1;
+        } else if status == "active" || status == "error" {
+            tx.execute(
+                "UPDATE pages
+                 SET status = 'stale',
+                     last_checked_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now')
+                 WHERE id = ?1",
+                [page_id],
+            )?;
+            summary.pages_stale += 1;
+        }
     }
     Ok(())
 }
