@@ -276,14 +276,43 @@ impl WebScope {
 /// Counts of one web Sync, logged as one `web_sync_summary` line when the Sync ends.
 #[derive(Debug, Default)]
 pub(crate) struct WebSyncAccounting {
+    /// The delay spider reports after the first crawl (`Crawl-delay` in `robots.txt` can change it).
+    pub delay_ms: Option<u64>,
+    /// Every page the receiving task got from any crawler.
+    pub pages_received: usize,
+    /// Pages spider delivered that the receiving task missed because it fell behind.
+    pub lost_by_listener: usize,
+    pub later_crawls_started: usize,
     pub results_stored: usize,
     pub results_failed: usize,
     pub unparsable_url: usize,
+    pub already_collected: usize,
     pub redirected_out_of_scope: usize,
     pub url_not_storable: usize,
     pub duplicate_result: usize,
     pub binary_file: usize,
     pub cut_off: bool,
+    pub discovery_ms: Option<u64>,
+    pub first_crawl_ms: Option<u64>,
+    pub later_crawls_ms: Option<u64>,
+    pub conversion_ms: Option<u64>,
+    pub write_ms: Option<u64>,
+}
+
+/// A step's duration on the summary line: milliseconds, or `-` for a step the Sync never reached.
+struct StepMs(Option<u64>);
+
+impl std::fmt::Display for StepMs {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self.0 {
+            Some(ms) => write!(f, "{ms}"),
+            None => f.write_str("-"),
+        }
+    }
+}
+
+fn elapsed_ms(start: std::time::Instant) -> Option<u64> {
+    Some(u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX))
 }
 
 /// Synchronize a web documentation source using `spider` and `spider_transformations`.
@@ -321,13 +350,23 @@ fn log_web_sync_summary(source: &SourceRecord, ok: bool, acc: &WebSyncAccounting
         ok,
         max_pages = source.max_pages,
         cut_off = acc.cut_off,
+        delay_ms = %StepMs(acc.delay_ms),
+        pages_received = acc.pages_received,
         results_stored = acc.results_stored,
         results_failed = acc.results_failed,
+        lost_by_listener = acc.lost_by_listener,
         unparsable_url = acc.unparsable_url,
+        already_collected = acc.already_collected,
         redirected_out_of_scope = acc.redirected_out_of_scope,
         url_not_storable = acc.url_not_storable,
         duplicate_result = acc.duplicate_result,
         binary_file = acc.binary_file,
+        later_crawls_started = acc.later_crawls_started,
+        discovery_ms = %StepMs(acc.discovery_ms),
+        first_crawl_ms = %StepMs(acc.first_crawl_ms),
+        later_crawls_ms = %StepMs(acc.later_crawls_ms),
+        conversion_ms = %StepMs(acc.conversion_ms),
+        write_ms = %StepMs(acc.write_ms),
         "web_sync_summary"
     );
 }
@@ -375,7 +414,8 @@ async fn sync_checked_web_source(
             } else {
                 MissingPagePolicy::MarkStale
             };
-            persist_sync_outcomes(
+            let write_start = std::time::Instant::now();
+            let persisted = persist_sync_outcomes(
                 &mut conn,
                 source.id,
                 &source.name,
@@ -383,7 +423,9 @@ async fn sync_checked_web_source(
                 outcomes,
                 missing_policy,
                 warnings,
-            )
+            );
+            acc.write_ms = elapsed_ms(write_start);
+            persisted
         }
         Err(err) => {
             fail_sync_run(&conn, source.id, run_id, &err.to_string());
@@ -404,7 +446,9 @@ async fn execute_web_crawl(
         warnings.push(NO_CHROME_WARNING.to_string());
     }
 
+    let discovery_start = std::time::Instant::now();
     let seed_urls = discover_seed_urls(origin, scope).await;
+    acc.discovery_ms = elapsed_ms(discovery_start);
 
     let mut collected_pages: Vec<Page> = Vec::new();
     let mut visited_keys: HashSet<String> = HashSet::new();
@@ -416,7 +460,12 @@ async fn execute_web_crawl(
         source.max_depth,
         source.render_js,
     );
-    let primary_pages = run_website_crawl(&mut primary, source.render_js).await?;
+    let first_crawl_start = std::time::Instant::now();
+    let (primary_pages, primary_lost) = run_website_crawl(&mut primary, source.render_js).await?;
+    acc.first_crawl_ms = elapsed_ms(first_crawl_start);
+    acc.delay_ms = Some(u64::try_from(primary.get_delay().as_millis()).unwrap_or(u64::MAX));
+    acc.pages_received += primary_pages.len();
+    acc.lost_by_listener += primary_lost;
     for page in primary_pages {
         if let Some(key) = page_dedup_key(&page) {
             visited_keys.insert(key);
@@ -424,6 +473,7 @@ async fn execute_web_crawl(
         collected_pages.push(page);
     }
 
+    let later_crawls_start = std::time::Instant::now();
     for seed in seed_urls {
         let used_budget = count_scoped_pages(&collected_pages, scope);
         if used_budget >= source.max_pages as usize {
@@ -441,23 +491,32 @@ async fn execute_web_crawl(
 
         let mut seed_site =
             configure_website(&seed, scope, remaining, source.max_depth, source.render_js);
-        let extra_pages = run_website_crawl(&mut seed_site, source.render_js).await?;
+        acc.later_crawls_started += 1;
+        let (extra_pages, extra_lost) = run_website_crawl(&mut seed_site, source.render_js).await?;
+        acc.pages_received += extra_pages.len();
+        acc.lost_by_listener += extra_lost;
         for page in extra_pages {
             let Some(key) = page_dedup_key(&page) else {
+                acc.unparsable_url += 1;
                 continue;
             };
             if visited_keys.insert(key) {
                 collected_pages.push(page);
+            } else {
+                acc.already_collected += 1;
             }
         }
         visited_keys.insert(seed_key);
     }
+    acc.later_crawls_ms = elapsed_ms(later_crawls_start);
 
     if source.render_js && cfg!(feature = "chrome") {
         confirm_render_failures(&mut collected_pages, origin).await;
     }
 
+    let conversion_start = std::time::Instant::now();
     let (outcomes, ok_count, transport_failures) = build_page_outcomes(collected_pages, scope, acc);
+    acc.conversion_ms = elapsed_ms(conversion_start);
 
     if ok_count == 0 && (outcomes.is_empty() || transport_failures == outcomes.len()) {
         let reason = outcomes
@@ -592,7 +651,9 @@ impl CrawlActivity {
     }
 }
 
-async fn run_website_crawl(website: &mut Website, render_js: bool) -> Result<Vec<Page>> {
+/// Run one crawler and return the pages it delivered with the number the receiving task missed
+/// because it fell behind.
+async fn run_website_crawl(website: &mut Website, render_js: bool) -> Result<(Vec<Page>, usize)> {
     #[cfg(feature = "chrome")]
     let render_browser = if render_js {
         prepare_render_browser(website).await?
@@ -605,6 +666,7 @@ async fn run_website_crawl(website: &mut Website, render_js: bool) -> Result<Vec
     let collector_activity = activity.clone();
     let collector = tokio::spawn(async move {
         let mut pages = Vec::new();
+        let mut lost = 0usize;
         loop {
             match rx.recv().await {
                 Ok(page) => {
@@ -613,11 +675,12 @@ async fn run_website_crawl(website: &mut Website, render_js: bool) -> Result<Vec
                 }
                 Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
                     tracing::warn!(skipped, "spider broadcast channel lagged during crawl");
+                    lost = lost.saturating_add(usize::try_from(skipped).unwrap_or(usize::MAX));
                 }
                 Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
             }
         }
-        pages
+        (pages, lost)
     });
 
     let mut stalled = false;
@@ -2421,6 +2484,90 @@ setTimeout(function () {{
         assert_eq!(acc.binary_file, 1);
         assert_eq!(acc.results_stored, 1);
         assert_eq!(acc.results_failed, 1);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn accounting_times_every_step_and_counts_later_crawls() {
+        use super::sync_web_source_with_accounting;
+
+        let state = FixtureState::default();
+        state.set_html(
+            "/docs/",
+            StatusCode::OK,
+            r#"<html><body><main><h1>Docs</h1><p>Root.</p><a href="/docs/a">A</a><a href="/docs/b">B</a></main></body></html>"#,
+        );
+        for (path, title) in [("/docs/a", "A"), ("/docs/b", "B")] {
+            state.set_html(
+                path,
+                StatusCode::OK,
+                &format!(
+                    "<html><body><main><h1>{title}</h1><p>Linked page.</p></main></body></html>"
+                ),
+            );
+        }
+        for (path, title) in [("/docs/h1", "Hidden 1"), ("/docs/h2", "Hidden 2")] {
+            state.set_html(
+                path,
+                StatusCode::OK,
+                &format!(
+                    r#"<html><body><main><h1>{title}</h1><p>Only in llms.txt.</p><a href="/docs/">Home</a></main></body></html>"#
+                ),
+            );
+        }
+
+        let (addr, server_handle) = spawn_fixture_server(state.clone()).await;
+        state.set_text(
+            "/llms.txt",
+            StatusCode::OK,
+            &format!(
+                "# Docs\n\n- [Hidden 1](http://{addr}/docs/h1)\n- [Hidden 2](http://{addr}/docs/h2)\n"
+            ),
+        );
+        let vault_dir = tempdir().expect("vault tempdir");
+        let cfg = VaultConfig::new(vault_dir.path()).allowing_private_origins();
+        let Added { source, .. } = SourceLifecycle::new(cfg.clone())
+            .add(
+                AddSourceParams {
+                    origin: format!("http://{addr}/docs/"),
+                    name: Some("accounted".to_string()),
+                    ..Default::default()
+                },
+                false,
+            )
+            .await
+            .expect("add without sync");
+
+        let (result, acc) = sync_web_source_with_accounting(&cfg.db_path(), &source, false).await;
+        server_handle.abort();
+        let summary = result.expect("sync succeeds");
+        let requests = state.requests.read().expect("lock requests").clone();
+
+        assert_eq!(acc.later_crawls_started, 2, "{acc:?}\n{requests:?}");
+        assert_eq!(acc.already_collected, 6, "{acc:?}\n{requests:?}");
+        assert_eq!(acc.pages_received, 11, "{acc:?}\n{requests:?}");
+        assert_eq!(acc.lost_by_listener, 0);
+        assert_eq!(acc.results_stored, 5, "{summary:?}");
+        for (step, value) in [
+            ("discovery_ms", acc.discovery_ms),
+            ("first_crawl_ms", acc.first_crawl_ms),
+            ("later_crawls_ms", acc.later_crawls_ms),
+            ("conversion_ms", acc.conversion_ms),
+            ("write_ms", acc.write_ms),
+        ] {
+            assert!(value.is_some(), "{step} not set: {acc:?}");
+        }
+        assert_eq!(
+            acc.pages_received,
+            acc.results_stored
+                + acc.results_failed
+                + acc.unparsable_url
+                + acc.already_collected
+                + acc.redirected_out_of_scope
+                + acc.url_not_storable
+                + acc.duplicate_result
+                + acc.binary_file,
+            "{acc:?}"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
