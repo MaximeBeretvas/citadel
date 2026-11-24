@@ -446,6 +446,7 @@ async fn scheduled_sync(
     }
 
     let name = source.name.clone();
+    let origin = source.origin.clone();
     let claimed = match lifecycle.claim_record(source).await {
         Ok(Some(claimed)) => claimed,
         Ok(None) => {
@@ -457,7 +458,7 @@ async fn scheduled_sync(
             return;
         }
     };
-    tracing::info!(source = %name, "starting scheduled web sync");
+    tracing::info!(source = %name, origin = %origin, "starting scheduled web sync");
     match claimed.run(false).await {
         Ok(summary) => log_sync_summary(&summary, "scheduled web sync complete"),
         Err(err) => {
