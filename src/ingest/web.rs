@@ -363,6 +363,17 @@ fn budget_warning(accounting: &WebSyncAccounting, max_pages: usize) -> Option<St
     ))
 }
 
+/// Record how long a step took, whether it succeeded or failed, and pass its result on: a step
+/// that ran and failed has a duration, so its summary field is not `-`.
+fn finish_step<T>(
+    slot: &mut Option<u64>,
+    start: std::time::Instant,
+    result: Result<T>,
+) -> Result<T> {
+    *slot = elapsed_ms(start);
+    result
+}
+
 fn elapsed_ms(start: std::time::Instant) -> Option<u64> {
     Some(u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX))
 }
@@ -521,8 +532,11 @@ async fn execute_web_crawl(
         source.render_js,
     );
     let first_crawl_start = std::time::Instant::now();
-    let (primary_pages, primary_lost) = run_website_crawl(&mut primary, source.render_js).await?;
-    acc.first_crawl_ms = elapsed_ms(first_crawl_start);
+    let (primary_pages, primary_lost) = finish_step(
+        &mut acc.first_crawl_ms,
+        first_crawl_start,
+        run_website_crawl(&mut primary, source.render_js).await,
+    )?;
     acc.delay_ms = Some(u64::try_from(primary.get_delay().as_millis()).unwrap_or(u64::MAX));
     acc.first_crawl_received = primary_pages.len();
     acc.first_crawl_lost = primary_lost;
@@ -554,7 +568,12 @@ async fn execute_web_crawl(
         let mut seed_site =
             configure_website(&seed, scope, remaining, source.max_depth, source.render_js);
         acc.later_crawls_started += 1;
-        let (extra_pages, extra_lost) = run_website_crawl(&mut seed_site, source.render_js).await?;
+        let (extra_pages, extra_lost) = match run_website_crawl(&mut seed_site, source.render_js)
+            .await
+        {
+            Ok(crawled) => crawled,
+            Err(err) => return finish_step(&mut acc.later_crawls_ms, later_crawls_start, Err(err)),
+        };
         acc.pages_received += extra_pages.len();
         acc.lost_by_listener += extra_lost;
         for page in extra_pages {
@@ -2691,6 +2710,21 @@ setTimeout(function () {{
         assert_eq!(
             super::budget_warning(&redirect_accounting(5, 20, false), 20),
             None
+        );
+    }
+
+    #[test]
+    fn failed_step_keeps_its_duration() {
+        let mut slot = None;
+        let result: crate::error::Result<()> = super::finish_step(
+            &mut slot,
+            std::time::Instant::now(),
+            Err(crate::error::VaultError::Other("crawl stalled".to_string())),
+        );
+        assert!(result.is_err());
+        assert!(
+            slot.is_some(),
+            "a step that ran and failed still has a duration"
         );
     }
 
