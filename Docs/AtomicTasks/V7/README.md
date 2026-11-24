@@ -24,6 +24,7 @@ Settled in a grilling session with the owner on 2026-11-24.
 - **Render status confirmation moves to the rendered crawl path.** It now runs per crawl, before the pages are handed over, so the collector stays pure. Outcomes and counts stay the same. Two things change slightly:
   - A 4xx page that a later crawl then drops as already collected is also re-checked (one extra GET, render_js only).
   - The confirmation time is now inside `first_crawl_ms` / `later_crawls_ms`. Before, it wasn't timed at all.
+- **The "nothing reachable" fallback message prints the parsed Origin.** `finish` has no `SourceRecord`, so it reads the Origin from the scope. Every Origin stored through the Source lifecycle is already a normalized URL, so the text is the same. Only a row stored in another form would print differently.
 - **Who owns which fields.**
   - The collector counts every page: `pages_received`, `lost_by_listener`, `later_crawls_started`, the eight drop reasons, `results_stored`, `results_failed` and `cut_off`.
   - The caller keeps the clock: `delay_ms` and the five step durations. `conversion_ms` now times `finish`.

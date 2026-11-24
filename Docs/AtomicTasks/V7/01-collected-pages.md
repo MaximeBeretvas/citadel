@@ -57,17 +57,18 @@ Write these against the interface first. They fail to compile until `CollectedPa
    - `collected_urls_at_limit_is_cut_off`
    - `results_at_limit_count_retired_copies`
    - `under_budget_is_complete`
-6. **Missing-page policy.** `policy_is_prune_with_prune_preserve_when_cut_off_else_mark_stale`.
+6. **Missing-page policy.** `prune_wins_over_the_cut_off_policy`: Prune with `--prune`, otherwise Preserve when cut off and MarkStale when complete.
 7. **Budget warning.** These replace the five `budget_warning` tests, driven by hand-made redirected pages:
    - `warns_when_budget_went_to_redirects`
    - `no_warning_below_five_redirects`
    - `no_warning_at_ten_percent`
    - `warns_above_ten_percent`
    - `no_warning_when_not_cut_off`
-8. **Nothing reachable.** `nothing_reachable_fails_with_the_first_error`, plus `an_http_error_page_alone_is_still_a_result`.
+8. **Nothing reachable.** `nothing_reachable_fails_with_the_first_error`, `a_sync_with_no_pages_fails_naming_the_origin` and `an_http_error_page_alone_is_still_a_result`.
+
+**Moved unchanged:** `reads_link_tags_from_minified_html` (internal HTML parsing) moves into `collected.rs` together with `head_links`.
 
 **Kept unchanged:**
-- `reads_link_tags_from_minified_html` (internal HTML parsing);
 - `failed_step_keeps_its_duration` (the clock stays with the caller);
 - every fixture-server and render test, in particular:
   - `accounting_times_every_step_and_counts_later_crawls`, whose conservation assertion proves the wiring;
@@ -79,7 +80,7 @@ Write these against the interface first. They fail to compile until `CollectedPa
 
 ## Acceptance Criteria
 - Every fixture-server web test passes with unchanged assertions. The only edits are the `acc.pages.x` field paths.
-- No function outside `collected.rs` reads a field of a collected page to decide its fate.
+- No function outside `collected.rs` reads a field of a collected page to decide its fate. The one exception is part of the settled design: render status confirmation in `web.rs` corrects a rendered page's browser-reported 4xx before the page is handed over.
 - `--no-default-features` (lite) compiles and passes.
 
 ## Checks Gate
