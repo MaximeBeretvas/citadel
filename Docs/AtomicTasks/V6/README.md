@@ -13,7 +13,7 @@
 
 - **Keep one Page per document, at the HTML URI, with the Markdown twin's content** (no navigation or version banner; the frontmatter `title` wins). Chosen by the owner on 2026-11-24.
 - Pair after every crawl, so the order in which `llms.txt` seeds and links arrive does not matter.
-- Merged copies become `Superseded` results: their stored rows go stale (deleted with `--prune`), even in a cut-off Sync.
+- Merged copies become `Retired` results: their stored rows go stale (deleted with `--prune`), even in a cut-off Sync.
 - **Unchanged:** which pages are requested; the schema; local Markdown Sources.
 
 ## Tasks

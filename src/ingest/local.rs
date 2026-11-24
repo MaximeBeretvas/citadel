@@ -147,10 +147,10 @@ pub(crate) enum PageIngestOutcome {
         error_message: String,
         insert_if_missing: bool,
     },
-    /// A page visited in this Sync that is a copy of the page at `by` (a Markdown twin or a
-    /// canonical duplicate). Its stored row goes stale (deleted with `--prune`) whatever the
-    /// missing-page policy, because the Sync saw it and merged it; it is never inserted.
-    Superseded { uri: String, by: String },
+    /// A URI this Sync visited that no longer holds a Page of its own. Its stored row is
+    /// retired (stale, or deleted with `--prune`) whatever the missing-page policy, since the
+    /// Sync did see it; no row is inserted for it.
+    Retired { uri: String },
 }
 
 /// Mark a source as `'syncing'` and insert a new `'running'` row into `sync_runs`.
@@ -298,13 +298,13 @@ pub(crate) fn persist_sync_outcomes(
         ..Default::default()
     };
     let mut seen_uris: HashSet<String> = HashSet::with_capacity(outcomes.len());
-    let mut superseded: Vec<(String, String)> = Vec::new();
+    let mut retired: Vec<String> = Vec::new();
 
     let tx = conn.transaction()?;
 
     for outcome in outcomes {
         match outcome {
-            PageIngestOutcome::Superseded { uri, by } => superseded.push((uri, by)),
+            PageIngestOutcome::Retired { uri } => retired.push(uri),
             PageIngestOutcome::Failed {
                 uri,
                 http_status,
@@ -490,10 +490,10 @@ pub(crate) fn persist_sync_outcomes(
         }
     }
 
-    retire_superseded_pages(
+    retire_visited_pages(
         &tx,
         source_id,
-        superseded,
+        retired,
         &mut seen_uris,
         missing_policy == MissingPagePolicy::Prune,
         &mut summary,
@@ -567,44 +567,55 @@ fn insert_sections(
     Ok(())
 }
 
-/// Mark each stored superseded page stale (delete it when `prune`), and record it as seen so the
-/// missing-page pass does not count it again. A URI that also got its own result is left alone.
-fn retire_superseded_pages(
+/// Retire the stored row of each `Retired` URI, and record it as seen so the missing-page pass
+/// does not count it again. A URI that also got its own result is left alone.
+fn retire_visited_pages(
     tx: &rusqlite::Transaction<'_>,
     source_id: i64,
-    superseded: Vec<(String, String)>,
+    retired: Vec<String>,
     seen_uris: &mut HashSet<String>,
     prune: bool,
     summary: &mut SyncSummary,
 ) -> Result<()> {
-    for (uri, by) in superseded {
+    let mut lookup =
+        tx.prepare_cached("SELECT id, status FROM pages WHERE source_id = ?1 AND uri = ?2")?;
+    for uri in retired {
         if !seen_uris.insert(uri.clone()) {
             continue;
         }
-        let existing: Option<(i64, String)> = tx
-            .query_row(
-                "SELECT id, status FROM pages WHERE source_id = ?1 AND uri = ?2",
-                params![source_id, uri],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )
+        let existing: Option<(i64, String)> = lookup
+            .query_row(params![source_id, uri], |row| {
+                Ok((row.get(0)?, row.get(1)?))
+            })
             .optional()?;
-        let Some((page_id, status)) = existing else {
-            continue;
-        };
-        tracing::debug!(uri = %uri, by = %by, "page superseded by another copy of its document");
-        if prune {
-            tx.execute("DELETE FROM pages WHERE id = ?1", [page_id])?;
-            summary.pruned += 1;
-        } else if status == "active" || status == "error" {
-            tx.execute(
-                "UPDATE pages
-                 SET status = 'stale',
-                     last_checked_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now')
-                 WHERE id = ?1",
-                [page_id],
-            )?;
-            summary.pages_stale += 1;
+        if let Some((page_id, status)) = existing {
+            retire_page(tx, page_id, &status, prune, summary)?;
         }
+    }
+    Ok(())
+}
+
+/// Delete a page that is no longer at its Origin (`prune`), or mark an active or error page
+/// stale.
+fn retire_page(
+    tx: &rusqlite::Transaction<'_>,
+    page_id: i64,
+    status: &str,
+    prune: bool,
+    summary: &mut SyncSummary,
+) -> Result<()> {
+    if prune {
+        tx.execute("DELETE FROM pages WHERE id = ?1", [page_id])?;
+        summary.pruned += 1;
+    } else if status == "active" || status == "error" {
+        tx.execute(
+            "UPDATE pages
+             SET status = 'stale',
+                 last_checked_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now')
+             WHERE id = ?1",
+            [page_id],
+        )?;
+        summary.pages_stale += 1;
     }
     Ok(())
 }
@@ -640,19 +651,7 @@ fn reconcile_missing_pages(
     };
 
     for (page_id, status) in missing {
-        if prune {
-            tx.execute("DELETE FROM pages WHERE id = ?1", [page_id])?;
-            summary.pruned += 1;
-        } else if status == "active" || status == "error" {
-            tx.execute(
-                "UPDATE pages
-                 SET status = 'stale',
-                     last_checked_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now')
-                 WHERE id = ?1",
-                [page_id],
-            )?;
-            summary.pages_stale += 1;
-        }
+        retire_page(tx, page_id, &status, prune, summary)?;
     }
 
     Ok(())
