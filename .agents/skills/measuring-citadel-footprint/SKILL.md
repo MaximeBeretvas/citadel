@@ -55,6 +55,24 @@ rm -rf "$T"
 | `citadel mcp` | `CITADEL_HOME="$T" python3 -I $SK/mcp_load.py $SK/sample.sh "$T/mcp.csv" 20`. Report footprint peak, CPU-s ÷ calls (ms of CPU per call), and the search median / p95 latency it prints. | the whole CSV; use ≥ 20 rounds, because 100 calls finish inside one sample |
 | One-shot CLI / `citadel ui` request burst | `/usr/bin/time -l citadel ...`, or sample the `citadel ui --no-open --port P` pid while you `curl` it | the command, or the burst |
 
+## Where a web Sync spends its time: `sync_log_report.py`
+
+Use it to see, per web Sync, how long the Sync took, how many requests spider handed out, and how the time splits around them. It reads a log; it never syncs.
+
+```zsh
+python3 -I $SK/sync_log_report.py "$HOME/Library/Application Support/com.citadel.citadel/daemon.log"   # read-only
+python3 -I $SK/sync_log_report.py old.log --origin dlthub=https://dlthub.com/docs   # start lines without origin=
+python3 -I $SK/sync_log_report.py "$T/stderr.log"                                   # foreground daemon on a scratch vault
+citadel --data-dir "$T" sync x 2> "$T/sync.log"; python3 -I $SK/sync_log_report.py --single "$T/sync.log"
+```
+
+- **One row per Sync**, from the daemon's start line to its complete or failed line. Each `INFO spider::utils: fetch <url>` line goes to the only open Sync, or to the open Sync whose Origin has the same host. Two overlapping Syncs on one host are marked "not separable", and their rows share those lines. Lines outside any Sync are counted as unattributed.
+- **`web_sync_summary` lines** (written at the end of every web Sync) are printed under their row. They give the exact step durations, pages received, results and drop counts. Prefer them over the timings derived from `fetch` lines.
+- **Change of pace:** for a Sync without a summary line, the script fits two parts to the gaps between requests and prints the split when the last part's median gap is more than twice the first's (at least 10 gaps per part).
+- **To capture a log on a scratch vault,** run the foreground daemon as in "Run" above (`2> "$T/stderr.log"`), add Sources with `--no-sync`, and read `$T/stderr.log` once their Syncs finish.
+- **Requests that leave no `fetch` line,** so the count is a floor: Citadel's own discovery requests (`sitemap.xml`, `llms.txt`); spider's sitemap pass at the end of each crawler; spider's re-request of the start URL after a 404 on `<start URL>/sitemap.xml`; redirect hops; `robots.txt` fetches.
+- If spider changes its log format, the script prints "no fetch lines found".
+
 ## What each number means
 
 | Report | Source | Do not use |
