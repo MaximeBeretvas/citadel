@@ -11,8 +11,10 @@ whose Origin has the same host. `--origin` gives the Origin for logs written bef
 the start line carried `origin=`. `--single` treats the whole file as one Sync (the
 stderr of one `citadel sync` run).
 
-Standard library only. The file is streamed once.
+Standard library only, Python 3.9 or later (the macOS system python3). The file is streamed once.
 """
+
+from __future__ import annotations
 
 import argparse
 import re
