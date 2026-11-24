@@ -65,10 +65,10 @@ Data and software engineers rely heavily on external documentation (APIs, framew
 | **FR-2.1** | **Background daemon:** Run continuously as a low-resource background process managing scheduled refreshes. | Must |
 | **FR-2.2** | **Configurable refresh cadence:** Support a default periodic check interval and per-source overrides (including manual-only for static sources). | Must |
 | **FR-2.3** | **Meaningful diff detection:** Compare fetched content against stored content and only record an update when substantive content differs (ignoring volatile noise like crawl timestamps). | Must |
-| **FR-2.4** | **Stale & broken page visibility:** Track pages that disappear, move, or fail to fetch during a refresh instead of silently deleting them. A Sync that ran out of its page budget never marks pages stale *(planned; see FR-2.7)*. | Must |
+| **FR-2.4** | **Stale & broken page visibility:** Track pages that disappear, move, or fail to fetch during a refresh instead of silently deleting them. A Sync that ran out of its page budget never marks pages stale. | Must |
 | **FR-2.5** | **Local folder sync:** Detect added, modified, or deleted Markdown files in registered local folders (on demand or automatically). | Should |
 | **FR-2.6** | **Manual refresh:** Allow triggering an immediate refresh for a single source or all sources via CLI or UI. | Must |
-| **FR-2.7** | **Sync accounting:** Every web Sync reports how long each step took and why fetched pages were not stored. A Sync whose page budget went mostly to pages that redirect out of the Source says so. *(Planned: [design](./egm/2026-11-24-sync-measurement-one-request-per-url-design.md).)* | Should |
+| **FR-2.7** | **Sync accounting:** Every web Sync reports how long each step took and why fetched pages were not stored. A Sync whose page budget went mostly to pages that redirect out of the Source says so. | Should |
 
 ### 4.3 Minimal Composable MCP Server
 | ID | Requirement | Priority |

@@ -446,6 +446,7 @@ async fn scheduled_sync(
     }
 
     let name = source.name.clone();
+    let origin = source.origin.clone();
     let claimed = match lifecycle.claim_record(source).await {
         Ok(Some(claimed)) => claimed,
         Ok(None) => {
@@ -457,7 +458,7 @@ async fn scheduled_sync(
             return;
         }
     };
-    tracing::info!(source = %name, "starting scheduled web sync");
+    tracing::info!(source = %name, origin = %origin, "starting scheduled web sync");
     match claimed.run(false).await {
         Ok(summary) => log_sync_summary(&summary, "scheduled web sync complete"),
         Err(err) => {
@@ -476,6 +477,18 @@ fn log_sync_summary(summary: &SyncSummary, message: &str) {
         failed = summary.pages_failed,
         "{message}"
     );
+    for line in sync_warning_lines(summary) {
+        tracing::warn!("{line}");
+    }
+}
+
+/// One log line per warning in a Sync summary, each starting with the Source name.
+fn sync_warning_lines(summary: &SyncSummary) -> Vec<String> {
+    summary
+        .warnings
+        .iter()
+        .map(|warning| format!("{}: {warning}", summary.source_name))
+        .collect()
 }
 
 fn load_due_web_sources(config: &VaultConfig) -> Result<Vec<SourceRecord>> {
@@ -749,6 +762,27 @@ mod tests {
     use crate::error::VaultError;
     use crate::sources::{AddSourceParams, SourceLifecycle};
     use tempfile::tempdir;
+
+    fn summary_with_warnings(warnings: Vec<String>) -> SyncSummary {
+        SyncSummary {
+            source_name: "dlthub".to_string(),
+            warnings,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn sync_warning_lines_name_the_source() {
+        assert!(sync_warning_lines(&summary_with_warnings(Vec::new())).is_empty());
+
+        let lines = sync_warning_lines(&summary_with_warnings(vec![
+            "first warning".to_string(),
+            "second warning".to_string(),
+        ]));
+        assert_eq!(lines.len(), 2);
+        assert!(lines[0].starts_with("dlthub") && lines[0].contains("first warning"));
+        assert!(lines[1].starts_with("dlthub") && lines[1].contains("second warning"));
+    }
 
     #[test]
     fn selects_only_due_web_sources() {

@@ -273,12 +273,165 @@ impl WebScope {
     }
 }
 
+/// Counts of one web Sync, logged as one `web_sync_summary` line when the Sync ends.
+#[derive(Debug, Default)]
+pub(crate) struct WebSyncAccounting {
+    /// The delay spider reports after the first crawl (`Crawl-delay` in `robots.txt` can change it).
+    pub delay_ms: Option<u64>,
+    /// Every page the receiving task got from any crawler.
+    pub pages_received: usize,
+    /// Pages spider delivered that the receiving task missed because it fell behind.
+    pub lost_by_listener: usize,
+    /// Pages the first crawl delivered and lost; with them, `is_cut_off` sees whether that crawl
+    /// used up spider's limit. Not printed.
+    pub first_crawl_received: usize,
+    pub first_crawl_lost: usize,
+    pub later_crawls_started: usize,
+    /// Distinct storable URLs among the collected pages after the later crawls. Not printed.
+    pub collected_storable_urls: usize,
+    pub results_stored: usize,
+    pub results_failed: usize,
+    pub unparsable_url: usize,
+    pub already_collected: usize,
+    pub redirected_out_of_scope: usize,
+    pub url_not_storable: usize,
+    pub duplicate_result: usize,
+    pub binary_file: usize,
+    /// The requested URLs of the first pages dropped as `redirected_out_of_scope`. Not printed.
+    pub redirect_examples: Vec<String>,
+    pub cut_off: bool,
+    pub discovery_ms: Option<u64>,
+    pub first_crawl_ms: Option<u64>,
+    pub later_crawls_ms: Option<u64>,
+    pub conversion_ms: Option<u64>,
+    pub write_ms: Option<u64>,
+}
+
+/// A step's duration on the summary line: milliseconds, or `-` for a step the Sync never reached.
+struct StepMs(Option<u64>);
+
+impl std::fmt::Display for StepMs {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self.0 {
+            Some(ms) => write!(f, "{ms}"),
+            None => f.write_str("-"),
+        }
+    }
+}
+
+/// Whether a Sync stopped because it used up its page budget, so pages it did not visit must be
+/// kept. Any one condition is enough:
+/// 1. the first crawl delivered or lost `max_pages` pages: spider's limit ran out (a single
+///    crawler cannot fetch a page twice);
+/// 2. the distinct storable URLs among the collected pages reach `max_pages`;
+/// 3. the results (stored or failed) reach `max_pages`.
+fn is_cut_off(
+    first_crawl_delivered_or_lost: usize,
+    collected_storable_urls: usize,
+    outcomes: usize,
+    max_pages: usize,
+) -> bool {
+    first_crawl_delivered_or_lost >= max_pages
+        || collected_storable_urls >= max_pages
+        || outcomes >= max_pages
+}
+
+/// A cut-off Sync warns about redirects only when at least this many pages redirected outside
+/// the Source...
+const MIN_REDIRECTS_FOR_WARNING: usize = 5;
+/// ...and they are more than this share (in percent) of the pages received.
+const REDIRECT_SHARE_PERCENT: usize = 10;
+/// How many redirected URLs the warning names.
+const MAX_REDIRECT_EXAMPLES: usize = 3;
+
+/// The warning for a cut-off Sync that spent much of its page budget on pages that redirected
+/// outside the Source, or `None`.
+fn budget_warning(accounting: &WebSyncAccounting, max_pages: usize) -> Option<String> {
+    let redirected = accounting.redirected_out_of_scope;
+    let received = accounting.pages_received;
+    if !accounting.cut_off
+        || redirected < MIN_REDIRECTS_FOR_WARNING
+        || redirected * 100 <= received * REDIRECT_SHARE_PERCENT
+    {
+        return None;
+    }
+    let examples = accounting.redirect_examples.join(", ");
+    Some(format!(
+        "{redirected} of {received} pages received redirected outside this Source and were not \
+         stored, for example {examples}. They count against max_pages ({max_pages}), so other \
+         pages were not reached. Raise max_pages, or exclude that section if you do not need it."
+    ))
+}
+
+/// Record how long a step took and pass its value on unchanged. Applied to a step's `Result`
+/// before `?`, so a step that ran and failed still has a duration and its summary field is not `-`.
+fn finish_step<T>(slot: &mut Option<u64>, start: std::time::Instant, value: T) -> T {
+    *slot = Some(millis(start.elapsed()));
+    value
+}
+
+/// A duration in whole milliseconds, saturating at `u64::MAX`.
+fn millis(duration: Duration) -> u64 {
+    u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
+}
+
 /// Synchronize a web documentation source using `spider` and `spider_transformations`.
 pub async fn sync_web_source(
     db_path: &Path,
     source: &SourceRecord,
     prune: bool,
 ) -> Result<SyncSummary> {
+    sync_web_source_with_accounting(db_path, source, prune)
+        .await
+        .0
+}
+
+/// Run a web Sync and return its accounting record with the result. Every Sync whose Origin
+/// passes the checks logs one `web_sync_summary` line, whether it succeeds or fails.
+pub(crate) async fn sync_web_source_with_accounting(
+    db_path: &Path,
+    source: &SourceRecord,
+    prune: bool,
+) -> (Result<SyncSummary>, WebSyncAccounting) {
+    let mut acc = WebSyncAccounting::default();
+    let (origin, scope) = match web_origin_and_scope(source) {
+        Ok(checked) => checked,
+        Err(err) => return (Err(err), acc),
+    };
+    let result = sync_checked_web_source(db_path, source, prune, &origin, &scope, &mut acc).await;
+    log_web_sync_summary(source, result.is_ok(), &acc);
+    (result, acc)
+}
+
+fn log_web_sync_summary(source: &SourceRecord, ok: bool, acc: &WebSyncAccounting) {
+    tracing::info!(
+        source = ?source.name,
+        origin = ?source.origin,
+        ok,
+        max_pages = source.max_pages,
+        cut_off = acc.cut_off,
+        delay_ms = %StepMs(acc.delay_ms),
+        pages_received = acc.pages_received,
+        results_stored = acc.results_stored,
+        results_failed = acc.results_failed,
+        lost_by_listener = acc.lost_by_listener,
+        unparsable_url = acc.unparsable_url,
+        already_collected = acc.already_collected,
+        redirected_out_of_scope = acc.redirected_out_of_scope,
+        url_not_storable = acc.url_not_storable,
+        duplicate_result = acc.duplicate_result,
+        binary_file = acc.binary_file,
+        later_crawls_started = acc.later_crawls_started,
+        discovery_ms = %StepMs(acc.discovery_ms),
+        first_crawl_ms = %StepMs(acc.first_crawl_ms),
+        later_crawls_ms = %StepMs(acc.later_crawls_ms),
+        conversion_ms = %StepMs(acc.conversion_ms),
+        write_ms = %StepMs(acc.write_ms),
+        "web_sync_summary"
+    );
+}
+
+fn web_origin_and_scope(source: &SourceRecord) -> Result<(Url, WebScope)> {
     let origin = Url::parse(&source.origin).map_err(|err| {
         VaultError::Validation(format!("invalid web source URL '{}': {err}", source.origin))
     })?;
@@ -292,25 +445,46 @@ pub async fn sync_web_source(
     let scope = WebScope::new(&origin, &source.include_patterns, &source.exclude_patterns)?;
     // Touch matcher field to verify pattern compilation cleanly up front.
     let _ = &scope.matcher;
+    Ok((origin, scope))
+}
 
+async fn sync_checked_web_source(
+    db_path: &Path,
+    source: &SourceRecord,
+    prune: bool,
+    origin: &Url,
+    scope: &WebScope,
+    acc: &mut WebSyncAccounting,
+) -> Result<SyncSummary> {
     let run_id = {
         let conn = open_rw_db(db_path)?;
         start_sync_run(&conn, source.id)?
     };
 
-    let crawl_res = execute_web_crawl(source, &origin, &scope).await;
+    let crawl_res = execute_web_crawl(source, origin, scope, acc).await;
 
     let mut conn = open_rw_db(db_path)?;
     match crawl_res {
-        Ok((outcomes, warnings)) => {
+        Ok((outcomes, mut warnings)) => {
+            let cut_off = is_cut_off(
+                acc.first_crawl_received + acc.first_crawl_lost,
+                acc.collected_storable_urls,
+                outcomes.len(),
+                source.max_pages as usize,
+            );
+            acc.cut_off = cut_off;
+            if let Some(warning) = budget_warning(acc, source.max_pages as usize) {
+                warnings.push(warning);
+            }
             let missing_policy = if prune {
                 MissingPagePolicy::Prune
-            } else if outcomes.len() >= source.max_pages as usize {
+            } else if cut_off {
                 MissingPagePolicy::Preserve
             } else {
                 MissingPagePolicy::MarkStale
             };
-            persist_sync_outcomes(
+            let write_start = std::time::Instant::now();
+            let persisted = persist_sync_outcomes(
                 &mut conn,
                 source.id,
                 &source.name,
@@ -318,7 +492,8 @@ pub async fn sync_web_source(
                 outcomes,
                 missing_policy,
                 warnings,
-            )
+            );
+            finish_step(&mut acc.write_ms, write_start, persisted)
         }
         Err(err) => {
             fail_sync_run(&conn, source.id, run_id, &err.to_string());
@@ -331,6 +506,7 @@ async fn execute_web_crawl(
     source: &SourceRecord,
     origin: &Url,
     scope: &WebScope,
+    acc: &mut WebSyncAccounting,
 ) -> Result<(Vec<PageIngestOutcome>, Vec<String>)> {
     let mut warnings = Vec::new();
     if source.render_js && !cfg!(feature = "chrome") {
@@ -338,7 +514,12 @@ async fn execute_web_crawl(
         warnings.push(NO_CHROME_WARNING.to_string());
     }
 
-    let seed_urls = discover_seed_urls(origin, scope).await;
+    let discovery_start = std::time::Instant::now();
+    let seed_urls = finish_step(
+        &mut acc.discovery_ms,
+        discovery_start,
+        discover_seed_urls(origin, scope).await,
+    );
 
     let mut collected_pages: Vec<Page> = Vec::new();
     let mut visited_keys: HashSet<String> = HashSet::new();
@@ -350,7 +531,17 @@ async fn execute_web_crawl(
         source.max_depth,
         source.render_js,
     );
-    let primary_pages = run_website_crawl(&mut primary, source.render_js).await?;
+    let first_crawl_start = std::time::Instant::now();
+    let (primary_pages, primary_lost) = finish_step(
+        &mut acc.first_crawl_ms,
+        first_crawl_start,
+        run_website_crawl(&mut primary, source.render_js).await,
+    )?;
+    acc.delay_ms = Some(millis(primary.get_delay()));
+    acc.first_crawl_received = primary_pages.len();
+    acc.first_crawl_lost = primary_lost;
+    acc.pages_received += primary_pages.len();
+    acc.lost_by_listener += primary_lost;
     for page in primary_pages {
         if let Some(key) = page_dedup_key(&page) {
             visited_keys.insert(key);
@@ -358,8 +549,54 @@ async fn execute_web_crawl(
         collected_pages.push(page);
     }
 
+    let later_crawls_start = std::time::Instant::now();
+    let later_crawls = run_later_crawls(
+        source,
+        scope,
+        seed_urls,
+        &mut collected_pages,
+        &mut visited_keys,
+        acc,
+    )
+    .await;
+    finish_step(&mut acc.later_crawls_ms, later_crawls_start, later_crawls)?;
+    acc.collected_storable_urls = count_scoped_pages(&collected_pages, scope);
+
+    if source.render_js && cfg!(feature = "chrome") {
+        confirm_render_failures(&mut collected_pages, origin).await;
+    }
+
+    let conversion_start = std::time::Instant::now();
+    let converted = build_page_outcomes(collected_pages, scope, acc);
+    let (outcomes, ok_count, transport_failures) =
+        finish_step(&mut acc.conversion_ms, conversion_start, converted);
+
+    if ok_count == 0 && (outcomes.is_empty() || transport_failures == outcomes.len()) {
+        let reason = outcomes
+            .iter()
+            .find_map(|o| match o {
+                PageIngestOutcome::Failed { error_message, .. } => Some(error_message.clone()),
+                _ => None,
+            })
+            .unwrap_or_else(|| format!("no reachable pages crawled from '{}'", source.origin));
+        return Err(VaultError::Other(reason));
+    }
+
+    Ok((outcomes, warnings))
+}
+
+/// Start one more crawler per discovered URL that no earlier crawl collected, one after another,
+/// each limited to what is left of the page budget.
+async fn run_later_crawls(
+    source: &SourceRecord,
+    scope: &WebScope,
+    seed_urls: Vec<Url>,
+    collected_pages: &mut Vec<Page>,
+    visited_keys: &mut HashSet<String>,
+    acc: &mut WebSyncAccounting,
+) -> Result<()> {
     for seed in seed_urls {
-        let used_budget = count_scoped_pages(&collected_pages, scope);
+        let used_budget = count_scoped_pages(collected_pages, scope);
         if used_budget >= source.max_pages as usize {
             break;
         }
@@ -375,36 +612,24 @@ async fn execute_web_crawl(
 
         let mut seed_site =
             configure_website(&seed, scope, remaining, source.max_depth, source.render_js);
-        let extra_pages = run_website_crawl(&mut seed_site, source.render_js).await?;
+        acc.later_crawls_started += 1;
+        let (extra_pages, extra_lost) = run_website_crawl(&mut seed_site, source.render_js).await?;
+        acc.pages_received += extra_pages.len();
+        acc.lost_by_listener += extra_lost;
         for page in extra_pages {
             let Some(key) = page_dedup_key(&page) else {
+                acc.unparsable_url += 1;
                 continue;
             };
             if visited_keys.insert(key) {
                 collected_pages.push(page);
+            } else {
+                acc.already_collected += 1;
             }
         }
         visited_keys.insert(seed_key);
     }
-
-    if source.render_js && cfg!(feature = "chrome") {
-        confirm_render_failures(&mut collected_pages, origin).await;
-    }
-
-    let (outcomes, ok_count, transport_failures) = build_page_outcomes(collected_pages, scope);
-
-    if ok_count == 0 && (outcomes.is_empty() || transport_failures == outcomes.len()) {
-        let reason = outcomes
-            .iter()
-            .find_map(|o| match o {
-                PageIngestOutcome::Failed { error_message, .. } => Some(error_message.clone()),
-                _ => None,
-            })
-            .unwrap_or_else(|| format!("no reachable pages crawled from '{}'", source.origin));
-        return Err(VaultError::Other(reason));
-    }
-
-    Ok((outcomes, warnings))
+    Ok(())
 }
 
 fn configure_website(
@@ -507,7 +732,7 @@ impl CrawlActivity {
 
     /// Record that a page just finished.
     fn touch(&self) {
-        let elapsed = u64::try_from(self.started.elapsed().as_millis()).unwrap_or(u64::MAX);
+        let elapsed = millis(self.started.elapsed());
         self.last_page_ms
             .store(elapsed, std::sync::atomic::Ordering::Relaxed);
     }
@@ -526,7 +751,9 @@ impl CrawlActivity {
     }
 }
 
-async fn run_website_crawl(website: &mut Website, render_js: bool) -> Result<Vec<Page>> {
+/// Run one crawler and return the pages it delivered with the number the receiving task missed
+/// because it fell behind.
+async fn run_website_crawl(website: &mut Website, render_js: bool) -> Result<(Vec<Page>, usize)> {
     #[cfg(feature = "chrome")]
     let render_browser = if render_js {
         prepare_render_browser(website).await?
@@ -539,6 +766,7 @@ async fn run_website_crawl(website: &mut Website, render_js: bool) -> Result<Vec
     let collector_activity = activity.clone();
     let collector = tokio::spawn(async move {
         let mut pages = Vec::new();
+        let mut lost = 0usize;
         loop {
             match rx.recv().await {
                 Ok(page) => {
@@ -547,11 +775,12 @@ async fn run_website_crawl(website: &mut Website, render_js: bool) -> Result<Vec
                 }
                 Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
                     tracing::warn!(skipped, "spider broadcast channel lagged during crawl");
+                    lost = lost.saturating_add(usize::try_from(skipped).unwrap_or(usize::MAX));
                 }
                 Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
             }
         }
-        pages
+        (pages, lost)
     });
 
     let mut stalled = false;
@@ -656,9 +885,12 @@ fn count_scoped_pages(pages: &[Page], scope: &WebScope) -> usize {
     unique.len()
 }
 
+/// Turn collected pages into results, counting each page that gets none in `acc` under the first
+/// reason it meets.
 fn build_page_outcomes(
     pages: Vec<Page>,
     scope: &WebScope,
+    acc: &mut WebSyncAccounting,
 ) -> (Vec<PageIngestOutcome>, usize, usize) {
     let mut outcomes = Vec::new();
     let mut seen_uris = HashSet::new();
@@ -667,23 +899,30 @@ fn build_page_outcomes(
 
     for page in pages {
         let Some(canonical_url) = canonicalize_page_url(page.get_url()) else {
+            acc.unparsable_url += 1;
             continue;
         };
 
         if let Some(final_dest) = page.final_redirect_destination.as_deref() {
             if let Some(dest_url) = canonicalize_page_url(final_dest) {
                 if !scope.should_crawl(&dest_url) {
+                    acc.redirected_out_of_scope += 1;
+                    if acc.redirect_examples.len() < MAX_REDIRECT_EXAMPLES {
+                        acc.redirect_examples.push(page.get_url().to_string());
+                    }
                     continue;
                 }
             }
         }
 
         if !scope.should_store(&canonical_url) {
+            acc.url_not_storable += 1;
             continue;
         }
 
         let uri = canonical_url.to_string();
         if !seen_uris.insert(uri.clone()) {
+            acc.duplicate_result += 1;
             continue;
         }
 
@@ -700,10 +939,12 @@ fn build_page_outcomes(
                 error_message,
                 insert_if_missing: true,
             });
+            acc.results_failed += 1;
             continue;
         }
 
         if page.binary_file {
+            acc.binary_file += 1;
             continue;
         }
 
@@ -717,6 +958,7 @@ fn build_page_outcomes(
         let (etag, last_modified) = extract_http_validators(&page);
 
         ok_count += 1;
+        acc.results_stored += 1;
         outcomes.push(PageIngestOutcome::Ready {
             uri,
             doc,
@@ -2300,6 +2542,323 @@ setTimeout(function () {{
             .expect("query validators");
         assert_eq!(etag.as_deref(), Some("\"etag-/docs/from-sitemap\""));
         assert_eq!(last_mod.as_deref(), Some("Wed, 21 Oct 2026 07:28:00 GMT"));
+    }
+
+    fn hand_made_page(url: &str) -> super::Page {
+        let mut page = super::Page::default();
+        page.set_url(url.to_string());
+        page.status_code = StatusCode::OK;
+        page
+    }
+
+    #[test]
+    fn dropped_pages_are_counted_by_reason() {
+        use super::{build_page_outcomes, Url, WebScope, WebSyncAccounting};
+
+        let origin = Url::parse("https://docs.example/docs/").expect("origin");
+        let scope = WebScope::new(&origin, &[], &[]).expect("scope");
+
+        let mut redirected = hand_made_page("https://docs.example/docs/moved");
+        redirected.final_redirect_destination = Some("https://elsewhere.example/x".to_string());
+        let mut binary = hand_made_page("https://docs.example/docs/file");
+        binary.binary_file = true;
+        let mut missing = hand_made_page("https://docs.example/docs/missing");
+        missing.status_code = StatusCode::NOT_FOUND;
+
+        let pages = vec![
+            hand_made_page("ftp://docs.example/docs/unparsable"),
+            redirected,
+            hand_made_page("https://docs.example/blog/outside"),
+            hand_made_page("https://docs.example/docs/stored"),
+            hand_made_page("https://docs.example/docs/stored"),
+            binary,
+            missing,
+        ];
+
+        let mut acc = WebSyncAccounting::default();
+        let (outcomes, ok_count, _) = build_page_outcomes(pages, &scope, &mut acc);
+
+        assert_eq!(outcomes.len(), 2);
+        assert_eq!(ok_count, 1);
+        assert_eq!(acc.unparsable_url, 1);
+        assert_eq!(acc.redirected_out_of_scope, 1);
+        assert_eq!(acc.url_not_storable, 1);
+        assert_eq!(acc.duplicate_result, 1);
+        assert_eq!(acc.binary_file, 1);
+        assert_eq!(acc.results_stored, 1);
+        assert_eq!(acc.results_failed, 1);
+    }
+
+    /// A served fixture site with a Source added on `http://{addr}/docs/` but not synced yet.
+    struct UnsyncedSite {
+        addr: SocketAddr,
+        server: tokio::task::JoinHandle<()>,
+        _vault_dir: tempfile::TempDir,
+        cfg: VaultConfig,
+        source: crate::ingest::SourceRecord,
+    }
+
+    async fn add_unsynced_docs_source(
+        state: &FixtureState,
+        params: AddSourceParams,
+    ) -> UnsyncedSite {
+        let (addr, server) = spawn_fixture_server(state.clone()).await;
+        let vault_dir = tempdir().expect("vault tempdir");
+        let cfg = VaultConfig::new(vault_dir.path()).allowing_private_origins();
+        let Added { source, .. } = SourceLifecycle::new(cfg.clone())
+            .add(
+                AddSourceParams {
+                    origin: format!("http://{addr}/docs/"),
+                    ..params
+                },
+                false,
+            )
+            .await
+            .expect("add without sync");
+        UnsyncedSite {
+            addr,
+            server,
+            _vault_dir: vault_dir,
+            cfg,
+            source,
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn accounting_times_every_step_and_counts_later_crawls() {
+        use super::sync_web_source_with_accounting;
+
+        let state = FixtureState::default();
+        state.set_html(
+            "/docs/",
+            StatusCode::OK,
+            r#"<html><body><main><h1>Docs</h1><p>Root.</p><a href="/docs/a">A</a><a href="/docs/b">B</a></main></body></html>"#,
+        );
+        for (path, title) in [("/docs/a", "A"), ("/docs/b", "B")] {
+            state.set_html(
+                path,
+                StatusCode::OK,
+                &format!(
+                    "<html><body><main><h1>{title}</h1><p>Linked page.</p></main></body></html>"
+                ),
+            );
+        }
+        for (path, title) in [("/docs/h1", "Hidden 1"), ("/docs/h2", "Hidden 2")] {
+            state.set_html(
+                path,
+                StatusCode::OK,
+                &format!(
+                    r#"<html><body><main><h1>{title}</h1><p>Only in llms.txt.</p><a href="/docs/">Home</a></main></body></html>"#
+                ),
+            );
+        }
+
+        let site = add_unsynced_docs_source(
+            &state,
+            AddSourceParams {
+                name: Some("accounted".to_string()),
+                ..Default::default()
+            },
+        )
+        .await;
+        let addr = site.addr;
+        state.set_text(
+            "/llms.txt",
+            StatusCode::OK,
+            &format!(
+                "# Docs\n\n- [Hidden 1](http://{addr}/docs/h1)\n- [Hidden 2](http://{addr}/docs/h2)\n"
+            ),
+        );
+
+        let (result, acc) =
+            sync_web_source_with_accounting(&site.cfg.db_path(), &site.source, false).await;
+        site.server.abort();
+        let summary = result.expect("sync succeeds");
+        let requests = state.requests.read().expect("lock requests").clone();
+
+        assert_eq!(acc.later_crawls_started, 2, "{acc:?}\n{requests:?}");
+        assert_eq!(acc.already_collected, 6, "{acc:?}\n{requests:?}");
+        assert_eq!(acc.pages_received, 11, "{acc:?}\n{requests:?}");
+        assert_eq!(acc.lost_by_listener, 0);
+        assert_eq!(acc.results_stored, 5, "{summary:?}");
+        for (step, value) in [
+            ("discovery_ms", acc.discovery_ms),
+            ("first_crawl_ms", acc.first_crawl_ms),
+            ("later_crawls_ms", acc.later_crawls_ms),
+            ("conversion_ms", acc.conversion_ms),
+            ("write_ms", acc.write_ms),
+        ] {
+            assert!(value.is_some(), "{step} not set: {acc:?}");
+        }
+        assert_eq!(
+            acc.pages_received,
+            acc.results_stored
+                + acc.results_failed
+                + acc.unparsable_url
+                + acc.already_collected
+                + acc.redirected_out_of_scope
+                + acc.url_not_storable
+                + acc.duplicate_result
+                + acc.binary_file,
+            "{acc:?}"
+        );
+    }
+
+    fn redirect_accounting(
+        redirected: usize,
+        received: usize,
+        cut_off: bool,
+    ) -> super::WebSyncAccounting {
+        super::WebSyncAccounting {
+            redirected_out_of_scope: redirected,
+            pages_received: received,
+            cut_off,
+            redirect_examples: vec![
+                "https://docs.example/docs/r1".to_string(),
+                "https://docs.example/docs/r2".to_string(),
+                "https://docs.example/docs/r3".to_string(),
+            ],
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn warns_when_budget_went_to_redirects() {
+        let warning =
+            super::budget_warning(&redirect_accounting(5, 20, true), 20).expect("a warning");
+        assert!(warning.starts_with("5 of 20 pages received redirected outside this Source"));
+        for example in ["/docs/r1", "/docs/r2", "/docs/r3"] {
+            assert!(warning.contains(example), "{warning}");
+        }
+        assert!(warning.contains("max_pages (20)"), "{warning}");
+    }
+
+    #[test]
+    fn no_warning_below_five_redirects() {
+        assert_eq!(
+            super::budget_warning(&redirect_accounting(4, 20, true), 20),
+            None
+        );
+    }
+
+    #[test]
+    fn no_warning_at_ten_percent() {
+        assert_eq!(
+            super::budget_warning(&redirect_accounting(5, 50, true), 50),
+            None
+        );
+    }
+
+    #[test]
+    fn warns_above_ten_percent() {
+        assert!(super::budget_warning(&redirect_accounting(5, 49, true), 49).is_some());
+    }
+
+    #[test]
+    fn no_warning_when_not_cut_off() {
+        assert_eq!(
+            super::budget_warning(&redirect_accounting(5, 20, false), 20),
+            None
+        );
+    }
+
+    #[test]
+    fn failed_step_keeps_its_duration() {
+        let mut slot = None;
+        let result: crate::error::Result<()> = super::finish_step(
+            &mut slot,
+            std::time::Instant::now(),
+            Err(crate::error::VaultError::Other("crawl stalled".to_string())),
+        );
+        assert!(result.is_err());
+        assert!(
+            slot.is_some(),
+            "a step that ran and failed still has a duration"
+        );
+    }
+
+    #[test]
+    fn first_crawl_at_limit_is_cut_off() {
+        // The dlthub Sync of 2026-11-23: condition 1 only.
+        assert!(super::is_cut_off(1000, 759, 756, 1000));
+    }
+
+    #[test]
+    fn collected_urls_at_limit_is_cut_off() {
+        assert!(super::is_cut_off(40, 100, 90, 100));
+    }
+
+    #[test]
+    fn todays_condition_still_counts() {
+        assert!(super::is_cut_off(2, 2, 3, 3));
+    }
+
+    #[test]
+    fn under_budget_is_complete() {
+        assert!(!super::is_cut_off(40, 60, 60, 100));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn cut_off_sync_with_dropped_page_marks_nothing_stale() {
+        use super::sync_web_source_with_accounting;
+
+        let state = FixtureState::default();
+        state.set_html(
+            "/docs/",
+            StatusCode::OK,
+            r#"<html><body><main><h1>Docs</h1><p>Root.</p><a href="/docs/p1">1</a><a href="/docs/p2">2</a><a href="/docs/p3">3</a><a href="/docs/p4">4</a><a href="/docs/p5">5</a></main></body></html>"#,
+        );
+        for i in 1..=5 {
+            state.set_html(
+                &format!("/docs/p{i}"),
+                StatusCode::OK,
+                &format!(
+                    "<html><body><main><h1>Page {i}</h1><p>Body {i}.</p></main></body></html>"
+                ),
+            );
+        }
+
+        let site = add_unsynced_docs_source(
+            &state,
+            AddSourceParams {
+                name: Some("cut-off".to_string()),
+                include_patterns: vec!["docs/p*".to_string()],
+                max_pages: Some(3),
+                ..Default::default()
+            },
+        )
+        .await;
+        let cfg = &site.cfg;
+
+        let archived = format!("http://{}/docs/archived", site.addr);
+        let conn = open_rw_db(&cfg.db_path()).expect("open_rw_db");
+        conn.execute(
+            "INSERT INTO pages (source_id, uri, title, content_md, content_hash, word_count, status)
+             VALUES (?1, ?2, 'Archived', '# Archived\n\nOld page.\n', 'hash-old', 3, 'active')",
+            rusqlite::params![site.source.id, archived],
+        )
+        .expect("insert archived active page");
+        drop(conn);
+
+        let (result, acc) =
+            sync_web_source_with_accounting(&cfg.db_path(), &site.source, false).await;
+        site.server.abort();
+        let summary = result.expect("sync succeeds");
+        let requests = state.requests.read().expect("lock requests").clone();
+
+        assert_eq!(acc.url_not_storable, 1, "the Origin is dropped: {acc:?}");
+        assert_eq!(acc.results_stored, 2, "{acc:?}\n{requests:?}");
+        assert!(acc.cut_off, "{acc:?}");
+        assert_eq!(summary.pages_stale, 0, "{summary:?}");
+        let status: String = open_rw_db(&cfg.db_path())
+            .expect("open_rw_db")
+            .query_row(
+                "SELECT status FROM pages WHERE uri = ?1",
+                [&archived],
+                |r| r.get(0),
+            )
+            .expect("archived row");
+        assert_eq!(status, "active");
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
