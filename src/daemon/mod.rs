@@ -477,6 +477,18 @@ fn log_sync_summary(summary: &SyncSummary, message: &str) {
         failed = summary.pages_failed,
         "{message}"
     );
+    for line in sync_warning_lines(summary) {
+        tracing::warn!("{line}");
+    }
+}
+
+/// One log line per warning in a Sync summary, each starting with the Source name.
+fn sync_warning_lines(summary: &SyncSummary) -> Vec<String> {
+    summary
+        .warnings
+        .iter()
+        .map(|warning| format!("{}: {warning}", summary.source_name))
+        .collect()
 }
 
 fn load_due_web_sources(config: &VaultConfig) -> Result<Vec<SourceRecord>> {
@@ -750,6 +762,32 @@ mod tests {
     use crate::error::VaultError;
     use crate::sources::{AddSourceParams, SourceLifecycle};
     use tempfile::tempdir;
+
+    fn summary_with_warnings(warnings: Vec<String>) -> SyncSummary {
+        SyncSummary {
+            source_name: "dlthub".to_string(),
+            pages_added: 0,
+            pages_updated: 0,
+            pages_unchanged: 0,
+            pages_stale: 0,
+            pages_failed: 0,
+            pruned: 0,
+            warnings,
+        }
+    }
+
+    #[test]
+    fn sync_warning_lines_name_the_source() {
+        assert!(sync_warning_lines(&summary_with_warnings(Vec::new())).is_empty());
+
+        let lines = sync_warning_lines(&summary_with_warnings(vec![
+            "first warning".to_string(),
+            "second warning".to_string(),
+        ]));
+        assert_eq!(lines.len(), 2);
+        assert!(lines[0].starts_with("dlthub") && lines[0].contains("first warning"));
+        assert!(lines[1].starts_with("dlthub") && lines[1].contains("second warning"));
+    }
 
     #[test]
     fn selects_only_due_web_sources() {

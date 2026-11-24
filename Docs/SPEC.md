@@ -558,7 +558,7 @@ The `Makefile` drives Docker by default (`RUNTIME ?= docker`); Apple's macOS OCI
   - **Linux:** Generates `~/.config/systemd/user/citadel.service` and enables via `systemctl --user`.
 
 ### 8.3 Shared Scheduler & Watcher Behavior (Container & Native)
-- **Web scheduler loop:** Ticks every 60 seconds; selects `web` sources where `refresh_interval_secs > 0` and `last_synced_at + refresh_interval_secs <= now`; runs up to 2 source syncs concurrently with small random jitter (0–30s). The "starting scheduled web sync" line carries `source=` and `origin=`. *Planned* ([design](./egm/2026-11-24-sync-measurement-one-request-per-url-design.md)): the daemon logs each Sync warning at `warn` (today it logs none).
+- **Web scheduler loop:** Ticks every 60 seconds; selects `web` sources where `refresh_interval_secs > 0` and `last_synced_at + refresh_interval_secs <= now`; runs up to 2 source syncs concurrently with small random jitter (0–30s). The "starting scheduled web sync" line carries `source=` and `origin=`. After each Sync's complete line (scheduled web Syncs and local-folder watcher re-indexes), the daemon logs each Sync warning at `warn`, one line per warning starting with the Source name.
 - **Local folder watcher:** Registers a `notify` debounced watcher (2-second debounce) on each `local` source directory; triggers incremental re-indexing of changed `.md` files only.
 - **Graceful shutdown:** Handles `SIGINT`/`SIGTERM`, finishes in-flight DB transactions cleanly, removes `daemon.pid`.
 
