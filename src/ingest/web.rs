@@ -297,6 +297,8 @@ pub(crate) struct WebSyncAccounting {
     pub url_not_storable: usize,
     pub duplicate_result: usize,
     pub binary_file: usize,
+    /// The requested URLs of the first pages dropped as `redirected_out_of_scope`. Not printed.
+    pub redirect_examples: Vec<String>,
     pub cut_off: bool,
     pub discovery_ms: Option<u64>,
     pub first_crawl_ms: Option<u64>,
@@ -332,6 +334,33 @@ fn is_cut_off(
     first_crawl_delivered_or_lost >= max_pages
         || collected_storable_urls >= max_pages
         || outcomes >= max_pages
+}
+
+/// A cut-off Sync warns about redirects only when at least this many pages redirected outside
+/// the Source...
+const MIN_REDIRECTS_FOR_WARNING: usize = 5;
+/// ...and they are more than this share (in percent) of the pages received.
+const REDIRECT_SHARE_PERCENT: usize = 10;
+/// How many redirected URLs the warning names.
+const MAX_REDIRECT_EXAMPLES: usize = 3;
+
+/// The warning for a cut-off Sync that spent much of its page budget on pages that redirected
+/// outside the Source, or `None`.
+fn budget_warning(accounting: &WebSyncAccounting, max_pages: usize) -> Option<String> {
+    let redirected = accounting.redirected_out_of_scope;
+    let received = accounting.pages_received;
+    if !accounting.cut_off
+        || redirected < MIN_REDIRECTS_FOR_WARNING
+        || redirected * 100 <= received * REDIRECT_SHARE_PERCENT
+    {
+        return None;
+    }
+    let examples = accounting.redirect_examples.join(", ");
+    Some(format!(
+        "{redirected} of {received} pages received redirected outside this Source and were not \
+         stored, for example {examples}. They count against max_pages ({max_pages}), so other \
+         pages were not reached. Raise max_pages, or exclude that section if you do not need it."
+    ))
 }
 
 fn elapsed_ms(start: std::time::Instant) -> Option<u64> {
@@ -428,13 +457,16 @@ async fn sync_checked_web_source(
 
     let mut conn = open_rw_db(db_path)?;
     match crawl_res {
-        Ok((outcomes, warnings)) => {
+        Ok((outcomes, mut warnings)) => {
             acc.cut_off = is_cut_off(
                 acc.first_crawl_received + acc.first_crawl_lost,
                 acc.collected_storable_urls,
                 outcomes.len(),
                 source.max_pages as usize,
             );
+            if let Some(warning) = budget_warning(acc, source.max_pages as usize) {
+                warnings.push(warning);
+            }
             let missing_policy = if prune {
                 MissingPagePolicy::Prune
             } else if acc.cut_off {
@@ -838,6 +870,9 @@ fn build_page_outcomes(
             if let Some(dest_url) = canonicalize_page_url(final_dest) {
                 if !scope.should_crawl(&dest_url) {
                     acc.redirected_out_of_scope += 1;
+                    if acc.redirect_examples.len() < MAX_REDIRECT_EXAMPLES {
+                        acc.redirect_examples.push(page.get_url().to_string());
+                    }
                     continue;
                 }
             }
@@ -2598,6 +2633,64 @@ setTimeout(function () {{
                 + acc.duplicate_result
                 + acc.binary_file,
             "{acc:?}"
+        );
+    }
+
+    fn redirect_accounting(
+        redirected: usize,
+        received: usize,
+        cut_off: bool,
+    ) -> super::WebSyncAccounting {
+        super::WebSyncAccounting {
+            redirected_out_of_scope: redirected,
+            pages_received: received,
+            cut_off,
+            redirect_examples: vec![
+                "https://docs.example/docs/r1".to_string(),
+                "https://docs.example/docs/r2".to_string(),
+                "https://docs.example/docs/r3".to_string(),
+            ],
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn warns_when_budget_went_to_redirects() {
+        let warning =
+            super::budget_warning(&redirect_accounting(5, 20, true), 20).expect("a warning");
+        assert!(warning.starts_with("5 of 20 pages received redirected outside this Source"));
+        for example in ["/docs/r1", "/docs/r2", "/docs/r3"] {
+            assert!(warning.contains(example), "{warning}");
+        }
+        assert!(warning.contains("max_pages (20)"), "{warning}");
+    }
+
+    #[test]
+    fn no_warning_below_five_redirects() {
+        assert_eq!(
+            super::budget_warning(&redirect_accounting(4, 20, true), 20),
+            None
+        );
+    }
+
+    #[test]
+    fn no_warning_at_ten_percent() {
+        assert_eq!(
+            super::budget_warning(&redirect_accounting(5, 50, true), 50),
+            None
+        );
+    }
+
+    #[test]
+    fn warns_above_ten_percent() {
+        assert!(super::budget_warning(&redirect_accounting(5, 49, true), 49).is_some());
+    }
+
+    #[test]
+    fn no_warning_when_not_cut_off() {
+        assert_eq!(
+            super::budget_warning(&redirect_accounting(5, 20, false), 20),
+            None
         );
     }
 
