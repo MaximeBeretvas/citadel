@@ -36,13 +36,16 @@ _Avoid_: job, task
 The vault-wide exclusive right to Sync one Source; at most one holder at a time, across every process.
 _Avoid_: lock, lease, in-flight
 
+**Cut-off Sync**:
+A Sync whose first crawl used up the page budget (`max_pages`), or whose distinct storable pages collected, or pages recorded, reach it, whether or not those pages were stored.
+
 ### Pages
 
 **Page**:
 One document from a Source, identified by its URI.
 
 **Stale page**:
-A Page that was present before but missing from a complete Sync; kept, not deleted. A Sync cut short by its page limit leaves unvisited Pages as they were.
+A Page that was present before but missing from a complete Sync; kept, not deleted. A cut-off Sync leaves unvisited Pages as they were.
 
 **Error page**:
 A Page whose latest fetch or parse failed.

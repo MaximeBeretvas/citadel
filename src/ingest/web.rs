@@ -282,7 +282,13 @@ pub(crate) struct WebSyncAccounting {
     pub pages_received: usize,
     /// Pages spider delivered that the receiving task missed because it fell behind.
     pub lost_by_listener: usize,
+    /// Pages the first crawl delivered and lost; with them, `is_cut_off` sees whether that crawl
+    /// used up spider's limit. Not printed.
+    pub first_crawl_received: usize,
+    pub first_crawl_lost: usize,
     pub later_crawls_started: usize,
+    /// Distinct storable URLs among the collected pages after the later crawls. Not printed.
+    pub collected_storable_urls: usize,
     pub results_stored: usize,
     pub results_failed: usize,
     pub unparsable_url: usize,
@@ -309,6 +315,23 @@ impl std::fmt::Display for StepMs {
             None => f.write_str("-"),
         }
     }
+}
+
+/// Whether a Sync stopped because it used up its page budget, so pages it did not visit must be
+/// kept. Any one condition is enough:
+/// 1. the first crawl delivered or lost `max_pages` pages: spider's limit ran out (a single
+///    crawler cannot fetch a page twice);
+/// 2. the distinct storable URLs among the collected pages reach `max_pages`;
+/// 3. the results (stored or failed) reach `max_pages`.
+fn is_cut_off(
+    first_crawl_delivered_or_lost: usize,
+    collected_storable_urls: usize,
+    outcomes: usize,
+    max_pages: usize,
+) -> bool {
+    first_crawl_delivered_or_lost >= max_pages
+        || collected_storable_urls >= max_pages
+        || outcomes >= max_pages
 }
 
 fn elapsed_ms(start: std::time::Instant) -> Option<u64> {
@@ -406,7 +429,12 @@ async fn sync_checked_web_source(
     let mut conn = open_rw_db(db_path)?;
     match crawl_res {
         Ok((outcomes, warnings)) => {
-            acc.cut_off = outcomes.len() >= source.max_pages as usize;
+            acc.cut_off = is_cut_off(
+                acc.first_crawl_received + acc.first_crawl_lost,
+                acc.collected_storable_urls,
+                outcomes.len(),
+                source.max_pages as usize,
+            );
             let missing_policy = if prune {
                 MissingPagePolicy::Prune
             } else if acc.cut_off {
@@ -464,6 +492,8 @@ async fn execute_web_crawl(
     let (primary_pages, primary_lost) = run_website_crawl(&mut primary, source.render_js).await?;
     acc.first_crawl_ms = elapsed_ms(first_crawl_start);
     acc.delay_ms = Some(u64::try_from(primary.get_delay().as_millis()).unwrap_or(u64::MAX));
+    acc.first_crawl_received = primary_pages.len();
+    acc.first_crawl_lost = primary_lost;
     acc.pages_received += primary_pages.len();
     acc.lost_by_listener += primary_lost;
     for page in primary_pages {
@@ -509,6 +539,7 @@ async fn execute_web_crawl(
         visited_keys.insert(seed_key);
     }
     acc.later_crawls_ms = elapsed_ms(later_crawls_start);
+    acc.collected_storable_urls = count_scoped_pages(&collected_pages, scope);
 
     if source.render_js && cfg!(feature = "chrome") {
         confirm_render_failures(&mut collected_pages, origin).await;
@@ -2568,6 +2599,94 @@ setTimeout(function () {{
                 + acc.binary_file,
             "{acc:?}"
         );
+    }
+
+    #[test]
+    fn first_crawl_at_limit_is_cut_off() {
+        // The dlthub Sync of 2026-11-23: condition 1 only.
+        assert!(super::is_cut_off(1000, 759, 756, 1000));
+    }
+
+    #[test]
+    fn collected_urls_at_limit_is_cut_off() {
+        assert!(super::is_cut_off(40, 100, 90, 100));
+    }
+
+    #[test]
+    fn todays_condition_still_counts() {
+        assert!(super::is_cut_off(2, 2, 3, 3));
+    }
+
+    #[test]
+    fn under_budget_is_complete() {
+        assert!(!super::is_cut_off(40, 60, 60, 100));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn cut_off_sync_with_dropped_page_marks_nothing_stale() {
+        use super::sync_web_source_with_accounting;
+
+        let state = FixtureState::default();
+        state.set_html(
+            "/docs/",
+            StatusCode::OK,
+            r#"<html><body><main><h1>Docs</h1><p>Root.</p><a href="/docs/p1">1</a><a href="/docs/p2">2</a><a href="/docs/p3">3</a><a href="/docs/p4">4</a><a href="/docs/p5">5</a></main></body></html>"#,
+        );
+        for i in 1..=5 {
+            state.set_html(
+                &format!("/docs/p{i}"),
+                StatusCode::OK,
+                &format!(
+                    "<html><body><main><h1>Page {i}</h1><p>Body {i}.</p></main></body></html>"
+                ),
+            );
+        }
+
+        let (addr, server_handle) = spawn_fixture_server(state.clone()).await;
+        let vault_dir = tempdir().expect("vault tempdir");
+        let cfg = VaultConfig::new(vault_dir.path()).allowing_private_origins();
+        let Added { source, .. } = SourceLifecycle::new(cfg.clone())
+            .add(
+                AddSourceParams {
+                    origin: format!("http://{addr}/docs/"),
+                    name: Some("cut-off".to_string()),
+                    include_patterns: vec!["docs/p*".to_string()],
+                    max_pages: Some(3),
+                    ..Default::default()
+                },
+                false,
+            )
+            .await
+            .expect("add without sync");
+
+        let archived = format!("http://{addr}/docs/archived");
+        let conn = open_rw_db(&cfg.db_path()).expect("open_rw_db");
+        conn.execute(
+            "INSERT INTO pages (source_id, uri, title, content_md, content_hash, word_count, status)
+             VALUES (?1, ?2, 'Archived', '# Archived\n\nOld page.\n', 'hash-old', 3, 'active')",
+            rusqlite::params![source.id, archived],
+        )
+        .expect("insert archived active page");
+        drop(conn);
+
+        let (result, acc) = sync_web_source_with_accounting(&cfg.db_path(), &source, false).await;
+        server_handle.abort();
+        let summary = result.expect("sync succeeds");
+        let requests = state.requests.read().expect("lock requests").clone();
+
+        assert_eq!(acc.url_not_storable, 1, "the Origin is dropped: {acc:?}");
+        assert_eq!(acc.results_stored, 2, "{acc:?}\n{requests:?}");
+        assert!(acc.cut_off, "{acc:?}");
+        assert_eq!(summary.pages_stale, 0, "{summary:?}");
+        let status: String = open_rw_db(&cfg.db_path())
+            .expect("open_rw_db")
+            .query_row(
+                "SELECT status FROM pages WHERE uri = ?1",
+                [&archived],
+                |r| r.get(0),
+            )
+            .expect("archived row");
+        assert_eq!(status, "active");
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
