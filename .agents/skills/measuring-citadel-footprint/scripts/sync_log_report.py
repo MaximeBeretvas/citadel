@@ -93,8 +93,7 @@ class SyncRow:
 
     @property
     def requests_per_second(self):
-        span = self.first_to_last
-        return self.requests / span if span else None
+        return rate(self.requests, self.first_to_last)
 
 
 @dataclass
@@ -259,12 +258,8 @@ def fmt(value, unit="", digits=1):
     return f"{value:.{digits}f}{unit}"
 
 
-SUMMARY_KEYS = (
-    "ok cut_off max_pages delay_ms pages_received results_stored results_failed "
-    "lost_by_listener unparsable_url already_collected redirected_out_of_scope "
-    "url_not_storable duplicate_result binary_file later_crawls_started "
-    "discovery_ms first_crawl_ms later_crawls_ms conversion_ms write_ms"
-).split()
+# Summary fields already shown in the row itself; every other field is printed in log order.
+ROW_FIELDS = ("source", "origin")
 
 
 def print_report(result, out):
@@ -304,28 +299,30 @@ def print_report(result, out):
             )
         )
     widths = [max(len(r[i]) for r in table) for i in range(len(header))]
-    for i, r in enumerate(table):
-        print("  ".join(cell.ljust(widths[j]) for j, cell in enumerate(r)).rstrip(), file=out)
-        if i == 0:
-            continue
-        row = result.rows[i - 1]
+
+    def print_cells(cells):
+        print("  ".join(c.ljust(w) for c, w in zip(cells, widths)).rstrip(), file=out)
+
+    print_cells(header)
+    for row, cells in zip(result.rows, table[1:]):
+        print_cells(cells)
         if row.pace_split:
             p = row.pace_split
             print(
                 f"    change of pace: first {p.first_requests} requests in "
-                f"{p.first_seconds:.1f} s ({rate(p.first_requests, p.first_seconds)}/s), "
+                f"{p.first_seconds:.1f} s ({fmt(rate(p.first_requests, p.first_seconds))}/s), "
                 f"last {p.last_requests} in {p.last_seconds:.1f} s "
-                f"({rate(p.last_requests, p.last_seconds)}/s)",
+                f"({fmt(rate(p.last_requests, p.last_seconds))}/s)",
                 file=out,
             )
         if row.summary:
-            pairs = " ".join(f"{k}={row.summary[k]}" for k in SUMMARY_KEYS if k in row.summary)
+            pairs = " ".join(f"{k}={v}" for k, v in row.summary.items() if k not in ROW_FIELDS)
             print(f"    web_sync_summary: {pairs}", file=out)
     print(f"unattributed fetch lines: {result.unattributed}", file=out)
 
 
 def rate(n, secs):
-    return f"{n / secs:.1f}" if secs else "-"
+    return n / secs if secs else None
 
 
 def parse_origins(values):

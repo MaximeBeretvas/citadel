@@ -766,13 +766,8 @@ mod tests {
     fn summary_with_warnings(warnings: Vec<String>) -> SyncSummary {
         SyncSummary {
             source_name: "dlthub".to_string(),
-            pages_added: 0,
-            pages_updated: 0,
-            pages_unchanged: 0,
-            pages_stale: 0,
-            pages_failed: 0,
-            pruned: 0,
             warnings,
+            ..Default::default()
         }
     }
 

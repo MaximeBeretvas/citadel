@@ -363,19 +363,16 @@ fn budget_warning(accounting: &WebSyncAccounting, max_pages: usize) -> Option<St
     ))
 }
 
-/// Record how long a step took, whether it succeeded or failed, and pass its result on: a step
-/// that ran and failed has a duration, so its summary field is not `-`.
-fn finish_step<T>(
-    slot: &mut Option<u64>,
-    start: std::time::Instant,
-    result: Result<T>,
-) -> Result<T> {
-    *slot = elapsed_ms(start);
-    result
+/// Record how long a step took and pass its value on unchanged. Applied to a step's `Result`
+/// before `?`, so a step that ran and failed still has a duration and its summary field is not `-`.
+fn finish_step<T>(slot: &mut Option<u64>, start: std::time::Instant, value: T) -> T {
+    *slot = Some(millis(start.elapsed()));
+    value
 }
 
-fn elapsed_ms(start: std::time::Instant) -> Option<u64> {
-    Some(u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX))
+/// A duration in whole milliseconds, saturating at `u64::MAX`.
+fn millis(duration: Duration) -> u64 {
+    u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
 }
 
 /// Synchronize a web documentation source using `spider` and `spider_transformations`.
@@ -469,18 +466,19 @@ async fn sync_checked_web_source(
     let mut conn = open_rw_db(db_path)?;
     match crawl_res {
         Ok((outcomes, mut warnings)) => {
-            acc.cut_off = is_cut_off(
+            let cut_off = is_cut_off(
                 acc.first_crawl_received + acc.first_crawl_lost,
                 acc.collected_storable_urls,
                 outcomes.len(),
                 source.max_pages as usize,
             );
+            acc.cut_off = cut_off;
             if let Some(warning) = budget_warning(acc, source.max_pages as usize) {
                 warnings.push(warning);
             }
             let missing_policy = if prune {
                 MissingPagePolicy::Prune
-            } else if acc.cut_off {
+            } else if cut_off {
                 MissingPagePolicy::Preserve
             } else {
                 MissingPagePolicy::MarkStale
@@ -495,8 +493,7 @@ async fn sync_checked_web_source(
                 missing_policy,
                 warnings,
             );
-            acc.write_ms = elapsed_ms(write_start);
-            persisted
+            finish_step(&mut acc.write_ms, write_start, persisted)
         }
         Err(err) => {
             fail_sync_run(&conn, source.id, run_id, &err.to_string());
@@ -518,8 +515,11 @@ async fn execute_web_crawl(
     }
 
     let discovery_start = std::time::Instant::now();
-    let seed_urls = discover_seed_urls(origin, scope).await;
-    acc.discovery_ms = elapsed_ms(discovery_start);
+    let seed_urls = finish_step(
+        &mut acc.discovery_ms,
+        discovery_start,
+        discover_seed_urls(origin, scope).await,
+    );
 
     let mut collected_pages: Vec<Page> = Vec::new();
     let mut visited_keys: HashSet<String> = HashSet::new();
@@ -537,7 +537,7 @@ async fn execute_web_crawl(
         first_crawl_start,
         run_website_crawl(&mut primary, source.render_js).await,
     )?;
-    acc.delay_ms = Some(u64::try_from(primary.get_delay().as_millis()).unwrap_or(u64::MAX));
+    acc.delay_ms = Some(millis(primary.get_delay()));
     acc.first_crawl_received = primary_pages.len();
     acc.first_crawl_lost = primary_lost;
     acc.pages_received += primary_pages.len();
@@ -550,8 +550,53 @@ async fn execute_web_crawl(
     }
 
     let later_crawls_start = std::time::Instant::now();
+    let later_crawls = run_later_crawls(
+        source,
+        scope,
+        seed_urls,
+        &mut collected_pages,
+        &mut visited_keys,
+        acc,
+    )
+    .await;
+    finish_step(&mut acc.later_crawls_ms, later_crawls_start, later_crawls)?;
+    acc.collected_storable_urls = count_scoped_pages(&collected_pages, scope);
+
+    if source.render_js && cfg!(feature = "chrome") {
+        confirm_render_failures(&mut collected_pages, origin).await;
+    }
+
+    let conversion_start = std::time::Instant::now();
+    let converted = build_page_outcomes(collected_pages, scope, acc);
+    let (outcomes, ok_count, transport_failures) =
+        finish_step(&mut acc.conversion_ms, conversion_start, converted);
+
+    if ok_count == 0 && (outcomes.is_empty() || transport_failures == outcomes.len()) {
+        let reason = outcomes
+            .iter()
+            .find_map(|o| match o {
+                PageIngestOutcome::Failed { error_message, .. } => Some(error_message.clone()),
+                _ => None,
+            })
+            .unwrap_or_else(|| format!("no reachable pages crawled from '{}'", source.origin));
+        return Err(VaultError::Other(reason));
+    }
+
+    Ok((outcomes, warnings))
+}
+
+/// Start one more crawler per discovered URL that no earlier crawl collected, one after another,
+/// each limited to what is left of the page budget.
+async fn run_later_crawls(
+    source: &SourceRecord,
+    scope: &WebScope,
+    seed_urls: Vec<Url>,
+    collected_pages: &mut Vec<Page>,
+    visited_keys: &mut HashSet<String>,
+    acc: &mut WebSyncAccounting,
+) -> Result<()> {
     for seed in seed_urls {
-        let used_budget = count_scoped_pages(&collected_pages, scope);
+        let used_budget = count_scoped_pages(collected_pages, scope);
         if used_budget >= source.max_pages as usize {
             break;
         }
@@ -568,12 +613,7 @@ async fn execute_web_crawl(
         let mut seed_site =
             configure_website(&seed, scope, remaining, source.max_depth, source.render_js);
         acc.later_crawls_started += 1;
-        let (extra_pages, extra_lost) = match run_website_crawl(&mut seed_site, source.render_js)
-            .await
-        {
-            Ok(crawled) => crawled,
-            Err(err) => return finish_step(&mut acc.later_crawls_ms, later_crawls_start, Err(err)),
-        };
+        let (extra_pages, extra_lost) = run_website_crawl(&mut seed_site, source.render_js).await?;
         acc.pages_received += extra_pages.len();
         acc.lost_by_listener += extra_lost;
         for page in extra_pages {
@@ -589,29 +629,7 @@ async fn execute_web_crawl(
         }
         visited_keys.insert(seed_key);
     }
-    acc.later_crawls_ms = elapsed_ms(later_crawls_start);
-    acc.collected_storable_urls = count_scoped_pages(&collected_pages, scope);
-
-    if source.render_js && cfg!(feature = "chrome") {
-        confirm_render_failures(&mut collected_pages, origin).await;
-    }
-
-    let conversion_start = std::time::Instant::now();
-    let (outcomes, ok_count, transport_failures) = build_page_outcomes(collected_pages, scope, acc);
-    acc.conversion_ms = elapsed_ms(conversion_start);
-
-    if ok_count == 0 && (outcomes.is_empty() || transport_failures == outcomes.len()) {
-        let reason = outcomes
-            .iter()
-            .find_map(|o| match o {
-                PageIngestOutcome::Failed { error_message, .. } => Some(error_message.clone()),
-                _ => None,
-            })
-            .unwrap_or_else(|| format!("no reachable pages crawled from '{}'", source.origin));
-        return Err(VaultError::Other(reason));
-    }
-
-    Ok((outcomes, warnings))
+    Ok(())
 }
 
 fn configure_website(
@@ -714,7 +732,7 @@ impl CrawlActivity {
 
     /// Record that a page just finished.
     fn touch(&self) {
-        let elapsed = u64::try_from(self.started.elapsed().as_millis()).unwrap_or(u64::MAX);
+        let elapsed = millis(self.started.elapsed());
         self.last_page_ms
             .store(elapsed, std::sync::atomic::Ordering::Relaxed);
     }
@@ -2571,6 +2589,41 @@ setTimeout(function () {{
         assert_eq!(acc.results_failed, 1);
     }
 
+    /// A served fixture site with a Source added on `http://{addr}/docs/` but not synced yet.
+    struct UnsyncedSite {
+        addr: SocketAddr,
+        server: tokio::task::JoinHandle<()>,
+        _vault_dir: tempfile::TempDir,
+        cfg: VaultConfig,
+        source: crate::ingest::SourceRecord,
+    }
+
+    async fn add_unsynced_docs_source(
+        state: &FixtureState,
+        params: AddSourceParams,
+    ) -> UnsyncedSite {
+        let (addr, server) = spawn_fixture_server(state.clone()).await;
+        let vault_dir = tempdir().expect("vault tempdir");
+        let cfg = VaultConfig::new(vault_dir.path()).allowing_private_origins();
+        let Added { source, .. } = SourceLifecycle::new(cfg.clone())
+            .add(
+                AddSourceParams {
+                    origin: format!("http://{addr}/docs/"),
+                    ..params
+                },
+                false,
+            )
+            .await
+            .expect("add without sync");
+        UnsyncedSite {
+            addr,
+            server,
+            _vault_dir: vault_dir,
+            cfg,
+            source,
+        }
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn accounting_times_every_step_and_counts_later_crawls() {
         use super::sync_web_source_with_accounting;
@@ -2600,7 +2653,15 @@ setTimeout(function () {{
             );
         }
 
-        let (addr, server_handle) = spawn_fixture_server(state.clone()).await;
+        let site = add_unsynced_docs_source(
+            &state,
+            AddSourceParams {
+                name: Some("accounted".to_string()),
+                ..Default::default()
+            },
+        )
+        .await;
+        let addr = site.addr;
         state.set_text(
             "/llms.txt",
             StatusCode::OK,
@@ -2608,22 +2669,10 @@ setTimeout(function () {{
                 "# Docs\n\n- [Hidden 1](http://{addr}/docs/h1)\n- [Hidden 2](http://{addr}/docs/h2)\n"
             ),
         );
-        let vault_dir = tempdir().expect("vault tempdir");
-        let cfg = VaultConfig::new(vault_dir.path()).allowing_private_origins();
-        let Added { source, .. } = SourceLifecycle::new(cfg.clone())
-            .add(
-                AddSourceParams {
-                    origin: format!("http://{addr}/docs/"),
-                    name: Some("accounted".to_string()),
-                    ..Default::default()
-                },
-                false,
-            )
-            .await
-            .expect("add without sync");
 
-        let (result, acc) = sync_web_source_with_accounting(&cfg.db_path(), &source, false).await;
-        server_handle.abort();
+        let (result, acc) =
+            sync_web_source_with_accounting(&site.cfg.db_path(), &site.source, false).await;
+        site.server.abort();
         let summary = result.expect("sync succeeds");
         let requests = state.requests.read().expect("lock requests").clone();
 
@@ -2769,35 +2818,31 @@ setTimeout(function () {{
             );
         }
 
-        let (addr, server_handle) = spawn_fixture_server(state.clone()).await;
-        let vault_dir = tempdir().expect("vault tempdir");
-        let cfg = VaultConfig::new(vault_dir.path()).allowing_private_origins();
-        let Added { source, .. } = SourceLifecycle::new(cfg.clone())
-            .add(
-                AddSourceParams {
-                    origin: format!("http://{addr}/docs/"),
-                    name: Some("cut-off".to_string()),
-                    include_patterns: vec!["docs/p*".to_string()],
-                    max_pages: Some(3),
-                    ..Default::default()
-                },
-                false,
-            )
-            .await
-            .expect("add without sync");
+        let site = add_unsynced_docs_source(
+            &state,
+            AddSourceParams {
+                name: Some("cut-off".to_string()),
+                include_patterns: vec!["docs/p*".to_string()],
+                max_pages: Some(3),
+                ..Default::default()
+            },
+        )
+        .await;
+        let cfg = &site.cfg;
 
-        let archived = format!("http://{addr}/docs/archived");
+        let archived = format!("http://{}/docs/archived", site.addr);
         let conn = open_rw_db(&cfg.db_path()).expect("open_rw_db");
         conn.execute(
             "INSERT INTO pages (source_id, uri, title, content_md, content_hash, word_count, status)
              VALUES (?1, ?2, 'Archived', '# Archived\n\nOld page.\n', 'hash-old', 3, 'active')",
-            rusqlite::params![source.id, archived],
+            rusqlite::params![site.source.id, archived],
         )
         .expect("insert archived active page");
         drop(conn);
 
-        let (result, acc) = sync_web_source_with_accounting(&cfg.db_path(), &source, false).await;
-        server_handle.abort();
+        let (result, acc) =
+            sync_web_source_with_accounting(&cfg.db_path(), &site.source, false).await;
+        site.server.abort();
         let summary = result.expect("sync succeeds");
         let requests = state.requests.read().expect("lock requests").clone();
 
