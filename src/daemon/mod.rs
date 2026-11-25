@@ -149,6 +149,19 @@ pub fn daemon_status(config: &VaultConfig) -> Result<DaemonStatus> {
     }
 }
 
+/// Write `daemon.json` for this process. It only feeds `citadel doctor`, so a
+/// failure is logged and the daemon runs on without it. Keep the returned guard
+/// alive for the daemon's lifetime: dropping it removes the file.
+fn write_daemon_info_best_effort(path: &Path) -> Option<DaemonInfoGuard> {
+    match DaemonInfo::for_current_process().and_then(|info| DaemonInfoGuard::write(path, &info)) {
+        Ok(guard) => Some(guard),
+        Err(err) => {
+            tracing::warn!(error = %err, "could not write daemon.json; continuing without it");
+            None
+        }
+    }
+}
+
 /// Start the daemon either in the foreground (blocking until `SIGINT`/`SIGTERM`) or detached.
 ///
 /// Returns `Ok(Some(child_pid))` when detached, or `Ok(None)` after clean foreground shutdown.
@@ -157,10 +170,7 @@ pub fn start_daemon(config: &VaultConfig, foreground: bool) -> Result<Option<u32
 
     if foreground {
         let _lock = PidLock::acquire(&config.pid_path())?;
-        let _info = DaemonInfoGuard::write(
-            &config.daemon_info_path(),
-            &DaemonInfo::for_current_process()?,
-        )?;
+        let _info = write_daemon_info_best_effort(&config.daemon_info_path());
         let rt = tokio::runtime::Builder::new_multi_thread()
             .enable_all()
             .build()
@@ -896,6 +906,18 @@ mod tests {
             matches!(err, VaultError::Io(ref io_err) if io_err.kind() == std::io::ErrorKind::NotFound),
             "expected NotFound Io error from explicit exe path, got: {err}"
         );
+    }
+
+    #[test]
+    fn daemon_info_write_failure_is_not_fatal() {
+        let dir = tempdir().expect("tempdir");
+        let path = dir.path().join("missing-dir").join("daemon.json");
+        assert!(write_daemon_info_best_effort(&path).is_none());
+        let ok_path = dir.path().join("daemon.json");
+        let guard = write_daemon_info_best_effort(&ok_path);
+        assert!(guard.is_some() && ok_path.exists());
+        drop(guard);
+        assert!(!ok_path.exists());
     }
 
     #[test]
