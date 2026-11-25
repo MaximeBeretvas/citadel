@@ -4,9 +4,9 @@ use toml_edit::{Array, DocumentMut, Item, Table, Value as TomlValue};
 use crate::error::{Result, VaultError};
 use crate::setup::agents::McpTransport;
 
-const CITADEL_KEY: &str = "citadel";
-const MCP_SERVERS_JSON_KEY: &str = "mcpServers";
-const MCP_SERVERS_TOML_KEY: &str = "mcp_servers";
+pub(crate) const CITADEL_KEY: &str = "citadel";
+pub(crate) const MCP_SERVERS_JSON_KEY: &str = "mcpServers";
+pub(crate) const MCP_SERVERS_TOML_KEY: &str = "mcp_servers";
 
 /// Return `true` if `existing` JSON content already contains `mcpServers.citadel`.
 pub fn json_has_citadel_entry(existing: &str) -> bool {

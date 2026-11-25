@@ -6,7 +6,7 @@ pub mod setup;
 pub mod version;
 
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use crate::config::VaultConfig;
 use report::{Check, Report, Section};
@@ -32,11 +32,22 @@ struct Inspected {
     mcp: std::result::Result<Option<McpEntry>, String>,
 }
 
-fn same_dir(a: &Path, b: &Path) -> bool {
-    match (std::fs::canonicalize(a), std::fs::canonicalize(b)) {
-        (Ok(a), Ok(b)) => a == b,
-        _ => false,
+/// Probe every distinct URL concurrently.
+async fn probe_all(urls: Vec<String>) -> HashMap<String, ServeProbe> {
+    let mut set = tokio::task::JoinSet::new();
+    for url in urls {
+        set.spawn(async move {
+            let probe = running::probe_serve(&url).await;
+            (url, probe)
+        });
     }
+    let mut probes = HashMap::new();
+    while let Some(joined) = set.join_next().await {
+        if let Ok((url, probe)) = joined {
+            probes.insert(url, probe);
+        }
+    }
+    probes
 }
 
 /// Run every check and collect the report. Read-only: creates no file or directory.
@@ -54,7 +65,7 @@ pub async fn run_doctor(config: &VaultConfig, opts: &DoctorOpts) -> Report {
     let home_is_cwd = opts
         .home
         .as_deref()
-        .is_some_and(|home| same_dir(home, &opts.cwd));
+        .is_some_and(|home| crate::fsutil::resolves_to_same_dir(home, &opts.cwd));
     let inspected: Vec<Inspected> = setup::setup_locations(&opts.cwd, opts.home.as_deref())
         .into_iter()
         .filter(|loc| !(home_is_cwd && loc.scope == crate::setup::agents::SetupScope::Local))
@@ -65,21 +76,25 @@ pub async fn run_doctor(config: &VaultConfig, opts: &DoctorOpts) -> Report {
         })
         .collect();
 
-    // Probe each distinct HTTP URL once.
-    let mut probes: HashMap<String, ServeProbe> = HashMap::new();
-    let urls =
-        std::iter::once(opts.serve_url.clone()).chain(inspected.iter().filter_map(
-            |i| match &i.mcp {
-                Ok(Some(McpEntry::Http { url })) => Some(url.clone()),
-                _ => None,
-            },
-        ));
-    for url in urls {
-        if let std::collections::hash_map::Entry::Vacant(slot) = probes.entry(url) {
-            let probe = running::probe_serve(slot.key()).await;
-            slot.insert(probe);
-        }
-    }
+    // Network checks run concurrently: the release check and each distinct HTTP URL once.
+    let mut urls: Vec<String> = std::iter::once(opts.serve_url.clone())
+        .chain(inspected.iter().filter_map(|i| match &i.mcp {
+            Ok(Some(McpEntry::Http { url })) => Some(url.clone()),
+            _ => None,
+        }))
+        .collect();
+    urls.sort();
+    urls.dedup();
+    let cache_path = config.update_check_path();
+    let (latest, probes) = tokio::join!(
+        version::latest_release(
+            &cache_path,
+            &opts.releases_api_url,
+            current,
+            opts.live_release_check,
+        ),
+        probe_all(urls),
+    );
     let serve_probe = probes
         .get(&opts.serve_url)
         .cloned()
@@ -88,46 +103,42 @@ pub async fn run_doctor(config: &VaultConfig, opts: &DoctorOpts) -> Report {
         .iter()
         .any(|i| matches!(&i.mcp, Ok(Some(McpEntry::Http { url })) if *url == opts.serve_url));
 
-    // Version.
-    let latest = version::latest_release(
-        &config.update_check_path(),
-        &opts.releases_api_url,
-        current,
-        opts.live_release_check,
-    )
-    .await;
-    checks.push(version::cli_version_check(current, &latest));
-    let daemon_facts = if opts.in_container {
-        None
+    // Daemon state feeds a Version row and a Running row.
+    let (daemon_version_rows, daemon_running_row) = if opts.in_container {
+        (Vec::new(), None)
     } else {
-        Some(version::gather_daemon_facts(config, service_installed))
+        match version::gather_daemon_facts(config, service_installed) {
+            Ok(facts) => (
+                version::daemon_version_checks(current, &facts),
+                Some(running::daemon_running_check(
+                    facts.status,
+                    &config.pid_path(),
+                )),
+            ),
+            Err(err) => (
+                Vec::new(),
+                Some(
+                    Check::fail(
+                        Section::Running,
+                        "daemon",
+                        format!("cannot read daemon state: {err}"),
+                    )
+                    .with_hint(&format!(
+                        "check permissions on {}, then run citadel daemon status",
+                        config.pid_path().display()
+                    )),
+                ),
+            ),
+        }
     };
-    if let Some(Ok(facts)) = &daemon_facts {
-        checks.extend(version::daemon_version_checks(current, facts));
-    }
+
+    // Version.
+    checks.push(version::cli_version_check(current, &latest));
+    checks.extend(daemon_version_rows);
     checks.extend(version::serve_version_check(current, &serve_probe));
 
     // Running.
-    match daemon_facts {
-        Some(Ok(facts)) => {
-            checks.push(running::daemon_running_check(
-                facts.status,
-                &config.pid_path(),
-            ));
-        }
-        Some(Err(err)) => checks.push(
-            Check::fail(
-                Section::Running,
-                "daemon",
-                format!("cannot read daemon state: {err}"),
-            )
-            .with_hint(&format!(
-                "check permissions on {}, then run citadel daemon status",
-                config.pid_path().display()
-            )),
-        ),
-        None => {}
-    }
+    checks.extend(daemon_running_row);
     if let Some(service) = &service {
         checks.extend(running::service_checks(
             service,
@@ -159,13 +170,22 @@ pub async fn run_doctor(config: &VaultConfig, opts: &DoctorOpts) -> Report {
         checks.push(setup::local_scope_note(&opts.cwd));
     }
     let path_env = std::env::var_os("PATH");
+    // Resolve (and version-probe) each distinct stdio command once.
+    let mut resolved: HashMap<String, setup::StdioResolution> = HashMap::new();
     for item in &inspected {
         let stdio = match &item.mcp {
-            Ok(Some(McpEntry::Stdio { command, .. })) => Some(setup::resolve_stdio_command(
-                command,
-                path_env.as_deref(),
-                &opts.current_exe,
-            )),
+            Ok(Some(McpEntry::Stdio { command, .. })) => Some(
+                resolved
+                    .entry(command.clone())
+                    .or_insert_with(|| {
+                        setup::resolve_stdio_command(
+                            command,
+                            path_env.as_deref(),
+                            &opts.current_exe,
+                        )
+                    })
+                    .clone(),
+            ),
             _ => None,
         };
         let http = match &item.mcp {

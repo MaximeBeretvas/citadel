@@ -11,6 +11,7 @@ use std::time::{Duration, Instant};
 use super::report::{Check, Section};
 use super::running::ServeProbe;
 use crate::setup::agents::{mcp_targets, skill_targets, ActionKind, AgentKind, SetupScope};
+use crate::setup::merge::{CITADEL_KEY, MCP_SERVERS_JSON_KEY, MCP_SERVERS_TOML_KEY};
 use crate::skill::ROUTER_SKILL_MD;
 
 const AGENTS: [AgentKind; 3] = [AgentKind::Claude, AgentKind::Agy, AgentKind::Codex];
@@ -125,61 +126,74 @@ pub fn read_mcp_entry(path: &Path, toml: bool) -> std::result::Result<Option<Mcp
     } else {
         json_server(&raw)?
     };
-    let Some((url, command, args)) = server else {
+    let Some(server) = server else {
         return Ok(None);
     };
-    match (url, command) {
+    match (server.url, server.command) {
         (Some(url), _) => Ok(Some(McpEntry::Http { url })),
-        (None, Some(command)) => Ok(Some(McpEntry::Stdio { command, args })),
+        (None, Some(command)) => Ok(Some(McpEntry::Stdio {
+            command,
+            args: server.args,
+        })),
         (None, None) => Err("citadel entry has neither `command` nor `url`".to_string()),
     }
 }
 
-type RawServer = Option<(Option<String>, Option<String>, Vec<String>)>;
-
-fn json_server(raw: &str) -> std::result::Result<RawServer, String> {
-    let root: serde_json::Value = serde_json::from_str(raw).map_err(|e| e.to_string())?;
-    let serde_json::Value::Object(root) = root else {
-        return Err("config is not a JSON object".to_string());
-    };
-    let Some(server) = root.get("mcpServers").and_then(|s| s.get("citadel")) else {
-        return Ok(None);
-    };
-    let text = |key: &str| server.get(key).and_then(|v| v.as_str()).map(str::to_string);
-    let args = server
-        .get("args")
-        .and_then(|v| v.as_array())
-        .map(|a| {
-            a.iter()
-                .filter_map(|v| v.as_str().map(str::to_string))
-                .collect()
-        })
-        .unwrap_or_default();
-    Ok(Some((text("url"), text("command"), args)))
+/// The string fields of a `citadel` entry, before deciding its transport.
+struct RawServer {
+    url: Option<String>,
+    command: Option<String>,
+    args: Vec<String>,
 }
 
-fn toml_server(raw: &str) -> std::result::Result<RawServer, String> {
+impl RawServer {
+    /// Build from a field getter and the `args` array items, whatever the config format.
+    fn new<'a>(
+        text: impl Fn(&str) -> Option<&'a str>,
+        args: impl Iterator<Item = Option<&'a str>>,
+    ) -> Self {
+        Self {
+            url: text("url").map(str::to_string),
+            command: text("command").map(str::to_string),
+            args: args.flatten().map(str::to_string).collect(),
+        }
+    }
+}
+
+fn json_server(raw: &str) -> std::result::Result<Option<RawServer>, String> {
+    let root: serde_json::Value = serde_json::from_str(raw).map_err(|e| e.to_string())?;
+    if !root.is_object() {
+        return Err("config is not a JSON object".to_string());
+    }
+    let Some(server) = root
+        .get(MCP_SERVERS_JSON_KEY)
+        .and_then(|s| s.get(CITADEL_KEY))
+    else {
+        return Ok(None);
+    };
+    let args = server.get("args").and_then(|v| v.as_array());
+    Ok(Some(RawServer::new(
+        |key| server.get(key).and_then(|v| v.as_str()),
+        args.into_iter().flatten().map(|v| v.as_str()),
+    )))
+}
+
+fn toml_server(raw: &str) -> std::result::Result<Option<RawServer>, String> {
     let doc: toml_edit::DocumentMut = raw
         .parse()
         .map_err(|e: toml_edit::TomlError| e.to_string())?;
     let Some(server) = doc
-        .get("mcp_servers")
-        .and_then(|s| s.get("citadel"))
+        .get(MCP_SERVERS_TOML_KEY)
+        .and_then(|s| s.get(CITADEL_KEY))
         .and_then(|s| s.as_table_like())
     else {
         return Ok(None);
     };
-    let text = |key: &str| server.get(key).and_then(|v| v.as_str()).map(str::to_string);
-    let args = server
-        .get("args")
-        .and_then(|v| v.as_array())
-        .map(|a| {
-            a.iter()
-                .filter_map(|v| v.as_str().map(str::to_string))
-                .collect()
-        })
-        .unwrap_or_default();
-    Ok(Some((text("url"), text("command"), args)))
+    let args = server.get("args").and_then(|v| v.as_array());
+    Ok(Some(RawServer::new(
+        |key| server.get(key).and_then(|v| v.as_str()),
+        args.into_iter().flatten().map(|v| v.as_str()),
+    )))
 }
 
 /// Where a stdio MCP command points, relative to the running doctor binary.
@@ -281,19 +295,11 @@ fn binary_version(path: &Path) -> Option<String> {
         .map(|v| v.trim().to_string())
 }
 
-fn scope_label(scope: SetupScope) -> &'static str {
-    match scope {
-        SetupScope::Local => "local",
-        SetupScope::Global => "global",
-    }
-}
-
-fn agent_cli_name(agent: AgentKind) -> &'static str {
-    match agent {
-        AgentKind::Claude => "claude",
-        AgentKind::Agy => "agy",
-        AgentKind::Codex => "codex",
-    }
+/// The value clap accepts for `v` on the command line (e.g. `claude`, `global`).
+fn cli_value(v: impl clap::ValueEnum) -> String {
+    v.to_possible_value()
+        .map(|p| p.get_name().to_string())
+        .unwrap_or_default()
 }
 
 /// Turn the inspected state of one agent x scope location into report rows.
@@ -306,7 +312,7 @@ pub fn setup_checks(
     current: &str,
 ) -> Vec<Check> {
     let agent = loc.agent.display_name();
-    let scope = scope_label(loc.scope);
+    let scope = cli_value(loc.scope);
     let prefix = format!("{agent}  {scope}");
     let mut rows = Vec::new();
 
@@ -320,7 +326,7 @@ pub fn setup_checks(
 
     let skill_hint = format!(
         "citadel setup --agent {} --scope {scope} --only skill --force",
-        agent_cli_name(loc.agent)
+        cli_value(loc.agent)
     );
     match skill {
         SkillState::Missing => rows.push(Check::info(

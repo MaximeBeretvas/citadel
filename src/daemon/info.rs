@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use crate::error::{Result, VaultError};
-use crate::update::check::format_iso8601_utc;
+use crate::update::check::{current_unix_secs, format_iso8601_utc};
 
 /// Facts about a running daemon process, recorded next to `daemon.pid`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -21,23 +21,25 @@ impl DaemonInfo {
     /// Describe the current process.
     pub fn for_current_process() -> Result<Self> {
         let exe = std::env::current_exe()?;
-        let exe_mtime_secs = std::fs::metadata(&exe)
-            .and_then(|meta| meta.modified())
-            .ok()
-            .and_then(|modified| modified.duration_since(std::time::UNIX_EPOCH).ok())
-            .and_then(|elapsed| i64::try_from(elapsed.as_secs()).ok());
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|elapsed| i64::try_from(elapsed.as_secs()).unwrap_or(0))
-            .unwrap_or(0);
+        let exe_mtime_secs = file_mtime_secs(&exe);
         Ok(Self {
             pid: std::process::id(),
             version: env!("CARGO_PKG_VERSION").to_string(),
             exe,
             exe_mtime_secs,
-            started_at: format_iso8601_utc(now),
+            started_at: format_iso8601_utc(current_unix_secs()),
         })
     }
+}
+
+/// Modification time of `path` in unix seconds; `None` if it can't be read.
+///
+/// The daemon records its binary's mtime with this and doctor compares against it,
+/// so both sides must use the same function.
+pub fn file_mtime_secs(path: &Path) -> Option<i64> {
+    let modified = std::fs::metadata(path).ok()?.modified().ok()?;
+    let elapsed = modified.duration_since(std::time::UNIX_EPOCH).ok()?;
+    i64::try_from(elapsed.as_secs()).ok()
 }
 
 /// Read `daemon.json`; a missing or unparsable file yields `None`.
@@ -57,12 +59,7 @@ impl DaemonInfoGuard {
     pub fn write(path: &Path, info: &DaemonInfo) -> Result<Self> {
         let json = serde_json::to_string_pretty(info)
             .map_err(|err| VaultError::Other(format!("failed to encode daemon info: {err}")))?;
-        let tmp = path.with_extension("json.tmp");
-        std::fs::write(&tmp, json)?;
-        if let Err(err) = std::fs::rename(&tmp, path) {
-            let _ = std::fs::remove_file(&tmp);
-            return Err(err.into());
-        }
+        crate::fsutil::write_file_atomic(path, &json)?;
         Ok(Self {
             path: path.to_path_buf(),
         })

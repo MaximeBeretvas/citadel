@@ -4,13 +4,13 @@ use std::path::Path;
 use std::time::Duration;
 
 use crate::config::VaultConfig;
-use crate::daemon::info::{read_daemon_info, DaemonInfo};
-use crate::daemon::{daemon_status, DaemonStatus};
+use crate::daemon::info::{file_mtime_secs, read_daemon_info, DaemonInfo};
+use crate::daemon::{daemon_status, DaemonStatus, LAUNCHD_LABEL, SYSTEMD_SERVICE_NAME};
 use crate::doctor::report::{Check, Section};
 use crate::doctor::running::ServeProbe;
 use crate::error::Result;
 use crate::update::check::{
-    fetch_release, is_newer_version, normalize_version_str, UpdateCheckCache,
+    fetch_release, is_newer_version, normalize_version_str, read_cache_entry,
 };
 
 const LIVE_CHECK_TIMEOUT: Duration = Duration::from_secs(3);
@@ -47,19 +47,12 @@ pub async fn latest_release(
 }
 
 fn read_cache(path: &Path) -> LatestRelease {
-    let Ok(raw) = std::fs::read_to_string(path) else {
-        return LatestRelease::Unknown;
-    };
-    let Ok(cache) = serde_json::from_str::<UpdateCheckCache>(&raw) else {
-        return LatestRelease::Unknown;
-    };
-    let version = normalize_version_str(&cache.latest_version).to_string();
-    if semver::Version::parse(&version).is_err() {
-        return LatestRelease::Unknown;
-    }
-    LatestRelease::Cached {
-        version,
-        checked_at: cache.checked_at,
+    match read_cache_entry(path) {
+        Some((cache, version)) => LatestRelease::Cached {
+            version,
+            checked_at: cache.checked_at,
+        },
+        None => LatestRelease::Unknown,
     }
 }
 
@@ -118,13 +111,7 @@ pub fn gather_daemon_facts(config: &VaultConfig, service_installed: bool) -> Res
         }
         _ => None,
     };
-    let exe_mtime_now = info.as_ref().and_then(|info| {
-        std::fs::metadata(&info.exe)
-            .and_then(|meta| meta.modified())
-            .ok()
-            .and_then(|modified| modified.duration_since(std::time::UNIX_EPOCH).ok())
-            .and_then(|elapsed| i64::try_from(elapsed.as_secs()).ok())
-    });
+    let exe_mtime_now = info.as_ref().and_then(|info| file_mtime_secs(&info.exe));
     Ok(DaemonFacts {
         status,
         info,
@@ -138,9 +125,9 @@ pub fn restart_hint(service_installed: bool) -> String {
     if !service_installed {
         "citadel daemon stop && citadel daemon start".to_string()
     } else if cfg!(target_os = "macos") {
-        "launchctl kickstart -k gui/$(id -u)/com.citadel.daemon".to_string()
+        format!("launchctl kickstart -k gui/$(id -u)/{LAUNCHD_LABEL}")
     } else {
-        "systemctl --user restart citadel.service".to_string()
+        format!("systemctl --user restart {SYSTEMD_SERVICE_NAME}")
     }
 }
 

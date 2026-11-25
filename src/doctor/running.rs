@@ -378,12 +378,6 @@ pub enum ServeProbe {
 
 /// POST an MCP `initialize` to `url` and read the server version.
 pub async fn probe_serve(url: &str) -> ServeProbe {
-    let Ok(client) = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(1))
-        .build()
-    else {
-        return ServeProbe::NotAnswering;
-    };
     let body = serde_json::json!({
         "jsonrpc": "2.0",
         "id": "citadel-doctor",
@@ -394,37 +388,14 @@ pub async fn probe_serve(url: &str) -> ServeProbe {
             "clientInfo": { "name": "citadel-doctor", "version": env!("CARGO_PKG_VERSION") },
         },
     });
-    let Ok(resp) = client
-        .post(url)
-        .header(reqwest::header::CONTENT_TYPE, "application/json")
-        .header(
-            reqwest::header::ACCEPT,
-            "application/json, text/event-stream",
-        )
-        .body(body.to_string())
-        .send()
-        .await
-    else {
-        return ServeProbe::NotAnswering;
-    };
-    if !resp.status().is_success() {
-        return ServeProbe::NotAnswering;
-    }
-    let Ok(text) = resp.text().await else {
-        return ServeProbe::NotAnswering;
-    };
-    match serde_json::from_str::<serde_json::Value>(&text) {
-        Ok(reply)
-            if reply.get("jsonrpc").and_then(|v| v.as_str()) == Some("2.0")
-                && reply.get("result").is_some() =>
-        {
-            let version = reply
+    match crate::setup::mcp_post(url, body.to_string(), std::time::Duration::from_secs(1)).await {
+        Some(reply) => ServeProbe::Answering {
+            version: reply
                 .pointer("/result/serverInfo/version")
                 .and_then(|v| v.as_str())
-                .map(str::to_string);
-            ServeProbe::Answering { version }
-        }
-        _ => ServeProbe::NotAnswering,
+                .map(str::to_string),
+        },
+        None => ServeProbe::NotAnswering,
     }
 }
 
