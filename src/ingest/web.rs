@@ -354,6 +354,7 @@ fn log_web_sync_summary(source: &SourceRecord, ok: bool, acc: &WebSyncAccounting
         duplicate_result = acc.pages.duplicate_result,
         markdown_twin = acc.pages.markdown_twin,
         canonical_duplicate = acc.pages.canonical_duplicate,
+        url_alias = acc.pages.url_alias,
         binary_file = acc.pages.binary_file,
         later_crawls_started = acc.pages.later_crawls_started,
         discovery_ms = %StepMs(acc.discovery_ms),
@@ -988,14 +989,41 @@ fn canonicalize_page_url(raw: &str) -> Option<Url> {
     Some(url)
 }
 
+/// `url` without its fragment or trailing slash. The key spider's budget and the cut-off rule
+/// count by (one per fetched URL), and that scope checks and Markdown twin lookups match on. To
+/// group copies of one document, use [`document_key`].
 fn canonical_dedup_key(url: &Url) -> String {
+    key_with_path(url, url.path().trim_end_matches('/'))
+}
+
+/// `url` as a string without its fragment and with `path` (`/` when empty) as its path.
+fn key_with_path(url: &Url, path: &str) -> String {
     let mut normalized = url.clone();
     normalized.set_fragment(None);
-    let path = normalized.path().to_string();
-    if path.len() > 1 && path.ends_with('/') {
-        normalized.set_path(path.trim_end_matches('/'));
-    }
+    normalized.set_path(if path.is_empty() { "/" } else { path });
     normalized.to_string()
+}
+
+/// The key under which URLs of one document collapse: [`canonical_dedup_key`] with a trailing
+/// `/index`, `/index.html` or `/index.htm` segment removed too (`/a/`, `/a/index` -> `/a`). The
+/// query string is kept. Groups copies for storage and dedups later crawls; spider's budget and
+/// the cut-off rule keep counting by [`canonical_dedup_key`].
+fn document_key(url: &Url) -> String {
+    key_with_path(url, document_path(url))
+}
+
+/// `url`'s path without a trailing slash or `/index`, `/index.html` or `/index.htm` segment.
+fn document_path(url: &Url) -> &str {
+    let path = url.path().trim_end_matches('/');
+    ["/index.html", "/index.htm", "/index"]
+        .iter()
+        .find_map(|suffix| path.strip_suffix(suffix))
+        .unwrap_or(path)
+}
+
+/// The URL a page's document is at: where its redirects ended, else the requested URL.
+fn effective_url(page: &Page) -> Option<Url> {
+    canonicalize_page_url(page.get_url_final())
 }
 
 fn normalize_prefix(path: &str) -> String {
@@ -2230,6 +2258,46 @@ setTimeout(function () {{
         }
     }
 
+    async fn sync(site: &UnsyncedSite, prune: bool) -> crate::ingest::SyncSummary {
+        SourceLifecycle::new(site.cfg.clone())
+            .sync(&site.source.name, prune)
+            .await
+            .expect("sync")
+            .synced()
+            .expect("synced")
+    }
+
+    /// (uri relative to the server, status, title, content_md) of every page, by uri.
+    fn pages(site: &UnsyncedSite) -> Vec<(String, String, String, String)> {
+        let base = format!("http://{}", site.addr);
+        open_rw_db(&site.cfg.db_path())
+            .expect("open_rw_db")
+            .prepare(
+                "SELECT uri, status, title, content_md FROM pages WHERE source_id = ?1 ORDER BY uri",
+            )
+            .expect("prepare")
+            .query_map([site.source.id], |r| {
+                let uri: String = r.get(0)?;
+                Ok((
+                    uri.trim_start_matches(&base).to_string(),
+                    r.get(1)?,
+                    r.get(2)?,
+                    r.get(3)?,
+                ))
+            })
+            .expect("query")
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .expect("collect")
+    }
+
+    fn active_uris(site: &UnsyncedSite) -> Vec<String> {
+        pages(site)
+            .into_iter()
+            .filter(|p| p.1 == "active")
+            .map(|p| p.0)
+            .collect()
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn accounting_times_every_step_and_counts_later_crawls() {
         use super::sync_web_source_with_accounting;
@@ -2307,6 +2375,7 @@ setTimeout(function () {{
                 + acc.pages.duplicate_result
                 + acc.pages.markdown_twin
                 + acc.pages.canonical_duplicate
+                + acc.pages.url_alias
                 + acc.pages.binary_file,
             "{acc:?}"
         );
@@ -2519,9 +2588,11 @@ setTimeout(function () {{
     mod markdown_twins {
         use axum::http::StatusCode;
 
-        use super::{add_unsynced_docs_source, FixtureState, UnsyncedSite};
+        use super::{
+            active_uris, add_unsynced_docs_source, pages, sync, FixtureState, UnsyncedSite,
+        };
         use crate::db::open_rw_db;
-        use crate::sources::{AddSourceParams, SourceLifecycle};
+        use crate::sources::AddSourceParams;
 
         const BANNER: &str = "This is documentation for an unreleased version banner";
 
@@ -2625,46 +2696,6 @@ setTimeout(function () {{
                 },
             )
             .await
-        }
-
-        async fn sync(site: &UnsyncedSite, prune: bool) -> crate::ingest::SyncSummary {
-            SourceLifecycle::new(site.cfg.clone())
-                .sync(&site.source.name, prune)
-                .await
-                .expect("sync")
-                .synced()
-                .expect("synced")
-        }
-
-        /// (uri relative to the server, status, title, content_md) of every page, by uri.
-        fn pages(site: &UnsyncedSite) -> Vec<(String, String, String, String)> {
-            let base = format!("http://{}", site.addr);
-            open_rw_db(&site.cfg.db_path())
-                .expect("open_rw_db")
-                .prepare(
-                    "SELECT uri, status, title, content_md FROM pages WHERE source_id = ?1 ORDER BY uri",
-                )
-                .expect("prepare")
-                .query_map([site.source.id], |r| {
-                    let uri: String = r.get(0)?;
-                    Ok((
-                        uri.trim_start_matches(&base).to_string(),
-                        r.get(1)?,
-                        r.get(2)?,
-                        r.get(3)?,
-                    ))
-                })
-                .expect("query")
-                .collect::<std::result::Result<Vec<_>, _>>()
-                .expect("collect")
-        }
-
-        fn active_uris(site: &UnsyncedSite) -> Vec<String> {
-            pages(site)
-                .into_iter()
-                .filter(|p| p.1 == "active")
-                .map(|p| p.0)
-                .collect()
         }
 
         #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -2843,6 +2874,180 @@ setTimeout(function () {{
             );
             let ok_md = &rows.iter().find(|p| p.0 == "/docs/ok-html").expect("row").3;
             assert!(ok_md.contains("Html body."), "{ok_md}");
+        }
+    }
+
+    /// Issue #5: one Page per document across alias URLs (redirects, `x` and `x/`, `x/index`).
+    /// spider refuses to follow a redirect to a loopback address (its SSRF guard), so the fixture
+    /// site cannot serve one; redirects are covered with hand-made pages in `collected.rs`.
+    mod url_aliases {
+        use axum::http::StatusCode;
+
+        use super::{
+            active_uris, add_unsynced_docs_source, pages, sync, FixtureState, UnsyncedSite,
+        };
+        use crate::db::open_rw_db;
+        use crate::sources::AddSourceParams;
+
+        fn html(title: &str, canonical: Option<&str>, links: &[&str]) -> String {
+            let canonical = canonical
+                .map(|href| format!(r#"<link rel="canonical" href="{href}">"#))
+                .unwrap_or_default();
+            let anchors: String = links
+                .iter()
+                .map(|href| format!(r#"<a href="{href}">{href}</a> "#))
+                .collect();
+            format!(
+                "<!doctype html><html><head><title>{title}</title>{canonical}</head><body>\
+                 <main><h1>{title}</h1><p>All about {title}.</p><p>{anchors}</p></main>\
+                 </body></html>"
+            )
+        }
+
+        /// A docs site whose documents are reachable under alias URLs, as on dlthub.
+        fn alias_site() -> FixtureState {
+            let state = FixtureState::default();
+            state.set_text("/robots.txt", StatusCode::OK, "User-agent: *\nAllow: /\n");
+            state.set_html(
+                "/docs/",
+                StatusCode::OK,
+                &html(
+                    "Home",
+                    None,
+                    &[
+                        "/docs/slash",
+                        "/docs/slash/",
+                        "/docs/idx",
+                        "/docs/idx/index",
+                        "/docs/plain",
+                    ],
+                ),
+            );
+            // Served with 200 both with and without the trailing slash, and as `/index`.
+            let slash = html("Slash", None, &[]);
+            state.set_html("/docs/slash", StatusCode::OK, &slash);
+            state.set_html("/docs/slash/", StatusCode::OK, &slash);
+            let idx = html("Idx", None, &[]);
+            state.set_html("/docs/idx", StatusCode::OK, &idx);
+            state.set_html("/docs/idx/index", StatusCode::OK, &idx);
+            // Served for `/docs/plain` and the `?version=2` seed alike (routes ignore the query).
+            state.set_html(
+                "/docs/plain",
+                StatusCode::OK,
+                &html("Plain", Some("/docs/plain"), &[]),
+            );
+            state.set_text(
+                "/docs/llms.txt",
+                StatusCode::OK,
+                "# Docs\n\n- [Plain](/docs/plain?version=2): plain\n",
+            );
+            state
+        }
+
+        const STORED: [&str; 4] = ["/docs/", "/docs/idx", "/docs/plain", "/docs/slash"];
+
+        async fn add_site(max_pages: Option<u32>) -> UnsyncedSite {
+            add_unsynced_docs_source(
+                &alias_site(),
+                AddSourceParams {
+                    name: Some("aliases".to_string()),
+                    max_pages,
+                    ..Default::default()
+                },
+            )
+            .await
+        }
+
+        #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+        async fn stores_one_page_per_alias_group() {
+            let site = add_site(None).await;
+            sync(&site, false).await;
+            site.server.abort();
+            let all = pages(&site);
+            assert_eq!(
+                all.iter().map(|r| r.0.as_str()).collect::<Vec<_>>(),
+                STORED.to_vec(),
+                "{all:#?}"
+            );
+            assert!(all.iter().all(|r| r.1 == "active"), "{all:#?}");
+        }
+
+        #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+        async fn stored_copy_is_stable_across_syncs() {
+            let site = add_site(None).await;
+            for round in 0..3 {
+                let summary = sync(&site, false).await;
+                assert_eq!(active_uris(&site), STORED.to_vec(), "round {round}");
+                assert_eq!(summary.pages_stale, 0, "round {round}: {summary:?}");
+            }
+            site.server.abort();
+        }
+
+        const OLD_ALIASES: [&str; 3] = ["/docs/slash/", "/docs/idx/index", "/docs/plain?version=2"];
+
+        fn insert_old_alias_rows(site: &UnsyncedSite) {
+            let conn = open_rw_db(&site.cfg.db_path()).expect("open_rw_db");
+            for path in OLD_ALIASES {
+                conn.execute(
+                    "INSERT INTO pages (source_id, uri, title, content_md, content_hash, word_count, status)
+                     VALUES (?1, ?2, 'Old', '# Old\n', 'hash-old', 1, 'active')",
+                    rusqlite::params![site.source.id, format!("http://{}{path}", site.addr)],
+                )
+                .expect("insert old alias row");
+            }
+        }
+
+        #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+        async fn alias_rows_from_earlier_syncs_go_stale() {
+            let site = add_site(None).await;
+            insert_old_alias_rows(&site);
+            sync(&site, false).await;
+            let after = pages(&site);
+            for path in OLD_ALIASES {
+                let status = after.iter().find(|r| r.0 == path).map(|r| r.1.as_str());
+                assert_eq!(status, Some("stale"), "{path}: {after:#?}");
+            }
+            assert_eq!(active_uris(&site), STORED.to_vec());
+
+            sync(&site, true).await;
+            site.server.abort();
+            let pruned = pages(&site);
+            assert_eq!(
+                pruned.iter().map(|r| r.0.as_str()).collect::<Vec<_>>(),
+                STORED.to_vec(),
+                "--prune deletes the alias rows: {pruned:#?}"
+            );
+        }
+
+        /// The pages `alias_site`'s home links to, plus itself: the first crawl uses the budget up.
+        const CUT_OFF_BUDGET: u32 = 6;
+
+        #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+        async fn cut_off_sync_still_retires_visited_aliases() {
+            // A budget the first crawl uses up: the Sync is cut off, so unvisited pages are kept,
+            // yet the alias rows it did visit go stale.
+            let site = add_site(Some(CUT_OFF_BUDGET)).await;
+            insert_old_alias_rows(&site);
+            let conn = open_rw_db(&site.cfg.db_path()).expect("open_rw_db");
+            conn.execute(
+                "INSERT INTO pages (source_id, uri, title, content_md, content_hash, word_count, status)
+                 VALUES (?1, ?2, 'Archived', '# Archived\n', 'hash-arch', 1, 'active')",
+                rusqlite::params![site.source.id, format!("http://{}/docs/archived", site.addr)],
+            )
+            .expect("insert unvisited row");
+            drop(conn);
+            sync(&site, false).await;
+            site.server.abort();
+            let after = pages(&site);
+            let status = |path: &str| after.iter().find(|r| r.0 == path).map(|r| r.1.clone());
+            assert_eq!(
+                status("/docs/archived").as_deref(),
+                Some("active"),
+                "{after:#?}"
+            );
+            for path in ["/docs/slash/", "/docs/idx/index"] {
+                assert_eq!(status(path).as_deref(), Some("stale"), "{path}: {after:#?}");
+            }
         }
     }
 }

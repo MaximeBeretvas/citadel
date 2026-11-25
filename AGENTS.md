@@ -54,3 +54,4 @@ Follow `AtomicTasks -> LLMCode -> Checks -> HumanAudit` for every change:
 ## Lessons
 *(Updated via `Telemetry -> learn -> AgentRules`: add one crisp, positive rule per real check failure, audit finding, or runtime bug; prune entries once obsolete.)*
 - Exclude concurrent Syncs only through the Sync claim (`sync_claims`, ADR-0001): call `SourceLifecycle::sync`/`claim` and handle `AlreadySyncing`, never filter on `status = 'syncing'` or keep an in-memory set. Preserve unvisited pages (`MissingPagePolicy::Preserve`) when a web crawl reaches `max_pages` without `--prune`.
+- Test redirect handling with hand-made `Page`s (`final_redirect_destination`), not the loopback fixture server: spider's SSRF guard refuses every redirect to a loopback or private address and records the page as status 599.

@@ -56,7 +56,11 @@ The raw Markdown copy a site serves of one of its HTML pages (`X.md` next to `X`
 _Avoid_: md copy, duplicate page
 
 **Canonical duplicate**:
-A page whose `rel=canonical` names another collected page with the same path, differing only by query string or trailing slash (`/guide?version=2` for `/guide`). Stored only as the canonical page.
+A page whose `rel=canonical` names another collected page that differs only by its query string (`/guide?version=2` for `/guide`). Stored only as the canonical page.
+
+**URL alias**:
+Another URL of a collected document: a redirect source, or a `/` or `/index` variant (`/guide/`, `/guide/index.html` for `/guide`). A Sync stores the document once, at its redirect destination; among variants, a cleanly fetched one wins, then the one a `rel=canonical` names, then the shortest URL.
+_Avoid_: duplicate URL
 
 **Error page**:
 A Page whose latest fetch or parse failed.
