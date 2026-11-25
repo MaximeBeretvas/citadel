@@ -2,6 +2,7 @@ pub mod cli;
 pub mod config;
 pub mod daemon;
 pub mod db;
+pub mod doctor;
 pub mod error;
 pub(crate) mod fsutil;
 pub mod ingest;
