@@ -147,6 +147,13 @@ pub enum Commands {
         command: DaemonCommands,
     },
 
+    /// Check whether citadel is up to date, running and set up.
+    Doctor {
+        /// Output as JSON.
+        #[arg(long)]
+        json: bool,
+    },
+
     /// Install the embedded agent router skill.
     Skill {
         #[command(subcommand)]
@@ -293,6 +300,7 @@ pub fn run_cli_with_writer<W: Write>(cli: Cli, out: &mut W) -> anyhow::Result<()
             | Commands::Serve { .. }
             | Commands::Ui { .. }
             | Commands::Daemon { .. }
+            | Commands::Doctor { .. }
             | Commands::List { json: true }
             | Commands::Query {
                 format: QueryFormat::Json,
@@ -460,6 +468,28 @@ fn dispatch_command<W: Write>(
                 .enable_all()
                 .build()?;
             rt.block_on(crate::ui::run_ui_server(config, port, no_open))?;
+            Ok(())
+        }
+        Commands::Doctor { json } => {
+            let opts = crate::doctor::DoctorOpts {
+                cwd: std::env::current_dir()?,
+                home: directories::BaseDirs::new().map(|d| d.home_dir().to_path_buf()),
+                current_exe: std::env::current_exe()?,
+                releases_api_url: crate::update::check::DEFAULT_RELEASES_API_URL.to_string(),
+                serve_url: crate::setup::DEFAULT_HTTP_MCP_URL.to_string(),
+                live_release_check: !config.no_update_check,
+                in_container: crate::update::is_running_in_container(),
+            };
+            let report = block_on(crate::doctor::run_doctor(&config, &opts))?;
+            if json {
+                report.render_json(out)?;
+            } else {
+                report.render_text(out)?;
+            }
+            let failed = report.fail_count();
+            if failed > 0 {
+                anyhow::bail!("{failed} doctor check(s) failed");
+            }
             Ok(())
         }
         Commands::Daemon { command } => match command {
