@@ -293,7 +293,11 @@ pub fn setup_checks(
         agent_cli_name(loc.agent)
     );
     match skill {
-        SkillState::Missing => {}
+        SkillState::Missing => rows.push(Check::info(
+            Section::Setup,
+            "skill",
+            format!("{prefix}  skill  not installed"),
+        )),
         SkillState::Present {
             path,
             link_target,
@@ -340,7 +344,11 @@ pub fn setup_checks(
             )
             .with_hint(&format!("fix or remove the citadel entry in {mcp_path}")),
         ),
-        Ok(None) => {}
+        Ok(None) => rows.push(Check::info(
+            Section::Setup,
+            "mcp",
+            format!("{prefix}  MCP  not configured ({mcp_path})"),
+        )),
         Ok(Some(McpEntry::Stdio { command, args })) => {
             let shown = std::iter::once(command.as_str())
                 .chain(args.iter().map(String::as_str))
@@ -630,6 +638,46 @@ mod tests {
         assert!(fail.hint.as_deref().unwrap().contains(".claude.json"));
     }
 
+    fn row<'a>(rows: &'a [Check], name: &str) -> &'a Check {
+        rows.iter().find(|c| c.name == name).expect("row")
+    }
+
+    #[test]
+    fn missing_skill_with_mcp_configured_gets_an_info_row() {
+        let dir = tempdir().unwrap();
+        let l = loc(AgentKind::Claude, SetupScope::Global, dir.path());
+        let entry = McpEntry::Stdio {
+            command: "citadel".into(),
+            args: vec!["mcp".into()],
+        };
+        let rows = setup_checks(
+            &l,
+            &SkillState::Missing,
+            &Ok(Some(entry)),
+            Some(&StdioResolution::SameAsDoctor),
+            None,
+            "1.0.0",
+        );
+        let skill = row(&rows, "skill");
+        assert_eq!(skill.status, CheckStatus::Info);
+        assert!(skill.detail.contains("skill  not installed"));
+        assert!(skill.hint.is_none());
+        assert_eq!(row(&rows, "mcp").status, CheckStatus::Ok);
+    }
+
+    #[test]
+    fn missing_mcp_with_skill_present_gets_an_info_row() {
+        let dir = tempdir().unwrap();
+        let l = loc(AgentKind::Claude, SetupScope::Global, dir.path());
+        let rows = setup_checks(&l, &present(), &Ok(None), None, None, "1.0.0");
+        assert_eq!(row(&rows, "skill").status, CheckStatus::Ok);
+        let mcp = row(&rows, "mcp");
+        assert_eq!(mcp.status, CheckStatus::Info);
+        assert!(mcp.detail.contains("MCP  not configured"));
+        assert!(mcp.detail.contains(&l.mcp_path.display().to_string()));
+        assert!(mcp.hint.is_none());
+    }
+
     #[test]
     fn missing_command_fails() {
         let dir = tempdir().unwrap();
@@ -646,11 +694,11 @@ mod tests {
             None,
             "1.0.0",
         );
-        assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0].status, CheckStatus::Fail);
-        assert!(rows[0].detail.contains("stdio: citadel mcp"));
+        let mcp = row(&rows, "mcp");
+        assert_eq!(mcp.status, CheckStatus::Fail);
+        assert!(mcp.detail.contains("stdio: citadel mcp"));
         assert_eq!(
-            rows[0].hint.as_deref(),
+            mcp.hint.as_deref(),
             Some("install citadel on PATH or re-run citadel setup")
         );
     }
@@ -665,9 +713,9 @@ mod tests {
             outdated: true,
         };
         let rows = setup_checks(&l, &skill, &Ok(None), None, None, "1.0.0");
-        assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0].status, CheckStatus::Warn);
-        let hint = rows[0].hint.as_deref().unwrap();
+        let skill = row(&rows, "skill");
+        assert_eq!(skill.status, CheckStatus::Warn);
+        let hint = skill.hint.as_deref().unwrap();
         assert!(hint.contains("--only skill") && hint.contains("--force"));
     }
 
@@ -680,16 +728,16 @@ mod tests {
             link_target: PathBuf::from("/gone"),
         };
         let rows = setup_checks(&l, &dangling, &Ok(None), None, None, "1.0.0");
-        assert_eq!(rows[0].status, CheckStatus::Fail);
-        assert!(rows[0].hint.is_some());
+        assert_eq!(row(&rows, "skill").status, CheckStatus::Fail);
+        assert!(row(&rows, "skill").hint.is_some());
         let linked = SkillState::Present {
             path: l.skill_path.clone(),
             link_target: Some(PathBuf::from("/canon")),
             outdated: false,
         };
         let rows = setup_checks(&l, &linked, &Ok(None), None, None, "1.0.0");
-        assert_eq!(rows[0].status, CheckStatus::Ok);
-        assert!(rows[0].detail.contains(" → /canon"));
+        assert_eq!(row(&rows, "skill").status, CheckStatus::Ok);
+        assert!(row(&rows, "skill").detail.contains(" → /canon"));
     }
 
     #[test]
@@ -712,8 +760,8 @@ mod tests {
             None,
             "1.0.0",
         );
-        assert_eq!(rows[0].status, CheckStatus::Warn);
-        assert!(rows[0].hint.is_some());
+        assert_eq!(row(&rows, "mcp").status, CheckStatus::Warn);
+        assert!(row(&rows, "mcp").hint.is_some());
         let same = setup_checks(
             &l,
             &SkillState::Missing,
@@ -722,7 +770,7 @@ mod tests {
             None,
             "1.0.0",
         );
-        assert_eq!(same[0].status, CheckStatus::Ok);
+        assert_eq!(row(&same, "mcp").status, CheckStatus::Ok);
         let http = McpEntry::Http {
             url: "http://127.0.0.1:4317/mcp".into(),
         };
@@ -734,9 +782,10 @@ mod tests {
             Some(&ServeProbe::NotAnswering),
             "1.0.0",
         );
-        assert_eq!(rows[0].status, CheckStatus::Warn);
-        assert!(rows[0].detail.contains("not answering"));
-        assert!(rows[0].hint.is_some());
+        let mcp = row(&rows, "mcp");
+        assert_eq!(mcp.status, CheckStatus::Warn);
+        assert!(mcp.detail.contains("not answering"));
+        assert!(mcp.hint.is_some());
     }
 
     #[test]
