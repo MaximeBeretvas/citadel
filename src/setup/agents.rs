@@ -136,7 +136,11 @@ pub fn build_plan(
 }
 
 /// Skill files and symlinks for `agent`, relative to the scope's `base` directory.
-fn skill_targets(agent: AgentKind, scope: SetupScope, base: &Path) -> Vec<(PathBuf, ActionKind)> {
+pub(crate) fn skill_targets(
+    agent: AgentKind,
+    scope: SetupScope,
+    base: &Path,
+) -> Vec<(PathBuf, ActionKind)> {
     let canonical_dir = base.join(".agents/skills/citadel");
     let skill_file = (canonical_dir.join("SKILL.md"), ActionKind::WriteSkillFile);
     let symlink = |rel: &str| {
@@ -164,7 +168,11 @@ fn skill_targets(agent: AgentKind, scope: SetupScope, base: &Path) -> Vec<(PathB
 }
 
 /// MCP config files for `agent`, relative to the scope's `base` directory.
-fn mcp_targets(agent: AgentKind, scope: SetupScope, base: &Path) -> Vec<(PathBuf, ActionKind)> {
+pub(crate) fn mcp_targets(
+    agent: AgentKind,
+    scope: SetupScope,
+    base: &Path,
+) -> Vec<(PathBuf, ActionKind)> {
     let json = |rel: &str, include_http_type: bool| {
         (
             base.join(rel),

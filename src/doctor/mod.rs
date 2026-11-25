@@ -2,4 +2,5 @@
 
 pub mod report;
 pub mod running;
+pub mod setup;
 pub mod version;
