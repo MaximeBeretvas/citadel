@@ -185,25 +185,49 @@ fn toml_server(raw: &str) -> std::result::Result<RawServer, String> {
 /// Where a stdio MCP command points, relative to the running doctor binary.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StdioResolution {
+    /// A bare name not on `PATH`, or an absolute path that does not exist.
     NotFound,
     SameAsDoctor,
-    Other {
+    /// A `citadel` binary other than this one; `version` is `None` when
+    /// `--version` timed out, failed or printed something unexpected.
+    Citadel {
         path: PathBuf,
         version: Option<String>,
     },
+    /// Resolves to a program doctor does not run (`docker`, a wrapper script…).
+    NotChecked {
+        path: PathBuf,
+    },
+    /// A relative path such as `./x`: never resolved or run.
+    Relative,
 }
 
-/// Resolve `command` (absolute, or searched on `path_env`) and compare it with `current_exe`.
+const CITADEL_FILE_NAME: &str = "citadel";
+
+/// Resolve `command` (absolute, or a bare name searched on the absolute
+/// directories of `path_env`) and compare it with `current_exe`.
+///
+/// Doctor only runs `--version` on a binary named exactly `citadel`, reached
+/// as the bare name `citadel` or an absolute path; it never runs any other
+/// program named in an agent config.
 pub fn resolve_stdio_command(
     command: &str,
     path_env: Option<&OsStr>,
     current_exe: &Path,
 ) -> StdioResolution {
-    let found = if command.contains(std::path::MAIN_SEPARATOR) {
-        Some(PathBuf::from(command))
+    let as_written = Path::new(command);
+    let absolute = as_written.is_absolute();
+    let has_separator =
+        command.contains('/') || command.contains(std::path::MAIN_SEPARATOR) || absolute;
+    if has_separator && !absolute {
+        return StdioResolution::Relative;
+    }
+    let found = if absolute {
+        Some(as_written.to_path_buf())
     } else {
         path_env.and_then(|paths| {
             std::env::split_paths(paths)
+                .filter(|dir| dir.is_absolute())
                 .map(|dir| dir.join(command))
                 .find(|candidate| candidate.is_file())
         })
@@ -215,8 +239,14 @@ pub fn resolve_stdio_command(
     if resolved == current {
         return StdioResolution::SameAsDoctor;
     }
+    let named_citadel = as_written
+        .file_name()
+        .is_some_and(|name| name == CITADEL_FILE_NAME);
+    if !named_citadel {
+        return StdioResolution::NotChecked { path: resolved };
+    }
     let version = binary_version(&resolved);
-    StdioResolution::Other {
+    StdioResolution::Citadel {
         path: resolved,
         version,
     }
@@ -362,16 +392,42 @@ pub fn setup_checks(
                     format!("{base} — command not found)"),
                 )
                 .with_hint("install citadel on PATH or re-run citadel setup"),
-                Some(StdioResolution::Other { path, version }) if version.as_deref() != Some(current) => {
-                    let found = version.as_deref().unwrap_or("unknown version");
-                    Check::warn(
-                        Section::Setup,
-                        "mcp",
-                        format!("{base} — {} is {found}, doctor is {current})", path.display()),
-                    )
-                    .with_hint("update the citadel on PATH (citadel update) so the agent runs the same version")
+                Some(StdioResolution::Citadel {
+                    path,
+                    version: None,
+                }) => Check::warn(
+                    Section::Setup,
+                    "mcp",
+                    format!("{base} — could not read its version: {})", path.display()),
+                )
+                .with_hint(&format!(
+                    "run {} --version; if it fails, reinstall citadel (citadel update)",
+                    path.display()
+                )),
+                Some(StdioResolution::Citadel {
+                    path,
+                    version: Some(found),
+                }) if found != current => Check::warn(
+                    Section::Setup,
+                    "mcp",
+                    format!("{base} — {} is {found}, doctor is {current})", path.display()),
+                )
+                .with_hint(
+                    "update the citadel on PATH (citadel update) so the agent runs the same version",
+                ),
+                Some(StdioResolution::NotChecked { .. }) => Check::info(
+                    Section::Setup,
+                    "mcp",
+                    format!("{base}) (version not checked)"),
+                ),
+                Some(StdioResolution::Relative) => Check::info(
+                    Section::Setup,
+                    "mcp",
+                    format!("{base}) (relative command, not checked)"),
+                ),
+                Some(StdioResolution::SameAsDoctor | StdioResolution::Citadel { .. }) | None => {
+                    Check::ok(Section::Setup, "mcp", format!("{base})"))
                 }
-                _ => Check::ok(Section::Setup, "mcp", format!("{base})")),
             });
         }
         Ok(Some(McpEntry::Http { url })) => {
@@ -608,11 +664,146 @@ mod tests {
         std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
         assert_eq!(
             resolve_stdio_command("citadel", Some(bin.as_os_str()), &exe),
-            StdioResolution::Other {
+            StdioResolution::Citadel {
                 path: std::fs::canonicalize(&fake).unwrap(),
                 version: Some("9.9.9".into())
             }
         );
+    }
+
+    fn exec_script(path: &Path, body: &str) {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::write(path, format!("#!/bin/sh\n{body}\n")).unwrap();
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    #[test]
+    fn non_citadel_commands_are_never_run() {
+        let dir = tempdir().unwrap();
+        let exe = dir.path().join("exe");
+        std::fs::write(&exe, "x").unwrap();
+        let bin = dir.path().join("bin");
+        std::fs::create_dir(&bin).unwrap();
+        let marker = dir.path().join("ran");
+        let body = format!("touch '{}'\necho 'citadel 9.9.9'", marker.display());
+        for name in ["docker", "citadel-wrapper", "citadel"] {
+            exec_script(&bin.join(name), &body);
+        }
+        let docker = std::fs::canonicalize(bin.join("docker")).unwrap();
+        assert_eq!(
+            resolve_stdio_command("docker", Some(bin.as_os_str()), &exe),
+            StdioResolution::NotChecked {
+                path: docker.clone()
+            }
+        );
+        let wrapper = bin.join("citadel-wrapper");
+        assert_eq!(
+            resolve_stdio_command(wrapper.to_str().unwrap(), None, &exe),
+            StdioResolution::NotChecked {
+                path: std::fs::canonicalize(&wrapper).unwrap()
+            }
+        );
+        for relative in ["./citadel", "bin/citadel", "../x"] {
+            assert_eq!(
+                resolve_stdio_command(relative, Some(bin.as_os_str()), &exe),
+                StdioResolution::Relative
+            );
+        }
+        // A relative PATH entry (such as `.`) is never searched.
+        assert_eq!(
+            resolve_stdio_command("citadel", Some(OsStr::new("bin")), &exe),
+            StdioResolution::NotFound
+        );
+        assert!(!marker.exists(), "doctor ran a program it must not run");
+    }
+
+    #[test]
+    fn citadel_with_unreadable_version_is_none() {
+        let dir = tempdir().unwrap();
+        let exe = dir.path().join("exe");
+        std::fs::write(&exe, "x").unwrap();
+        for (i, body) in ["exit 3", "echo 'something else'"].iter().enumerate() {
+            let bin = dir.path().join(format!("bin{i}"));
+            std::fs::create_dir(&bin).unwrap();
+            exec_script(&bin.join("citadel"), body);
+            let abs = bin.join("citadel");
+            assert_eq!(
+                resolve_stdio_command(abs.to_str().unwrap(), None, &exe),
+                StdioResolution::Citadel {
+                    path: std::fs::canonicalize(&abs).unwrap(),
+                    version: None
+                },
+                "{body}"
+            );
+        }
+    }
+
+    #[test]
+    fn unreadable_version_warns_not_mismatch_and_unchecked_is_info() {
+        let dir = tempdir().unwrap();
+        let l = loc(AgentKind::Claude, SetupScope::Local, dir.path());
+        let entry = Ok(Some(McpEntry::Stdio {
+            command: "citadel".into(),
+            args: vec!["mcp".into()],
+        }));
+        let unreadable = StdioResolution::Citadel {
+            path: PathBuf::from("/usr/bin/citadel"),
+            version: None,
+        };
+        let rows = setup_checks(
+            &l,
+            &SkillState::Missing,
+            &entry,
+            Some(&unreadable),
+            None,
+            "1.0.0",
+        );
+        let mcp = row(&rows, "mcp");
+        assert_eq!(mcp.status, CheckStatus::Warn);
+        assert!(
+            mcp.detail.contains("could not read its version"),
+            "{}",
+            mcp.detail
+        );
+        assert!(!mcp.detail.contains("doctor is"), "{}", mcp.detail);
+        assert!(mcp
+            .hint
+            .as_deref()
+            .unwrap()
+            .contains("/usr/bin/citadel --version"));
+
+        let unchecked = StdioResolution::NotChecked {
+            path: PathBuf::from("/usr/bin/docker"),
+        };
+        let rows = setup_checks(
+            &l,
+            &SkillState::Missing,
+            &entry,
+            Some(&unchecked),
+            None,
+            "1.0.0",
+        );
+        let mcp = row(&rows, "mcp");
+        assert_eq!(mcp.status, CheckStatus::Info);
+        assert!(
+            mcp.detail.ends_with("(version not checked)"),
+            "{}",
+            mcp.detail
+        );
+        assert!(mcp.hint.is_none());
+
+        let rows = setup_checks(
+            &l,
+            &SkillState::Missing,
+            &entry,
+            Some(&StdioResolution::Relative),
+            None,
+            "1.0.0",
+        );
+        let mcp = row(&rows, "mcp");
+        assert_eq!(mcp.status, CheckStatus::Info);
+        assert!(mcp.detail.ends_with("(relative command, not checked)"));
+        assert!(mcp.hint.is_none());
     }
 
     #[test]
@@ -748,7 +939,7 @@ mod tests {
             command: "citadel".into(),
             args: vec!["mcp".into()],
         };
-        let other = StdioResolution::Other {
+        let other = StdioResolution::Citadel {
             path: PathBuf::from("/usr/bin/citadel"),
             version: Some("0.1.0".into()),
         };

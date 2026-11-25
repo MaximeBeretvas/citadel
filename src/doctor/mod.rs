@@ -115,11 +115,17 @@ pub async fn run_doctor(config: &VaultConfig, opts: &DoctorOpts) -> Report {
                 &config.pid_path(),
             ));
         }
-        Some(Err(err)) => checks.push(Check::fail(
-            Section::Running,
-            "daemon",
-            format!("cannot read daemon state: {err}"),
-        )),
+        Some(Err(err)) => checks.push(
+            Check::fail(
+                Section::Running,
+                "daemon",
+                format!("cannot read daemon state: {err}"),
+            )
+            .with_hint(&format!(
+                "check permissions on {}, then run citadel daemon status",
+                config.pid_path().display()
+            )),
+        ),
         None => {}
     }
     if let Some(service) = &service {
