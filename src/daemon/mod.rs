@@ -1,3 +1,4 @@
+pub mod info;
 pub mod service;
 
 use std::collections::{HashMap, HashSet};
@@ -20,6 +21,8 @@ use crate::db::open_rw_db;
 use crate::error::{Result, VaultError};
 use crate::ingest::{local::canonicalize_local_dir, map_source_record, SourceRecord, SyncSummary};
 use crate::sources::{SourceLifecycle, SyncOutcome};
+
+use info::{DaemonInfo, DaemonInfoGuard};
 
 pub use service::{
     generate_launchd_plist, generate_systemd_unit, install_service, uninstall_service,
@@ -154,6 +157,10 @@ pub fn start_daemon(config: &VaultConfig, foreground: bool) -> Result<Option<u32
 
     if foreground {
         let _lock = PidLock::acquire(&config.pid_path())?;
+        let _info = DaemonInfoGuard::write(
+            &config.daemon_info_path(),
+            &DaemonInfo::for_current_process()?,
+        )?;
         let rt = tokio::runtime::Builder::new_multi_thread()
             .enable_all()
             .build()
@@ -201,6 +208,7 @@ pub fn stop_daemon(config: &VaultConfig) -> Result<Option<u32>> {
         DaemonStatus::Stopped => Ok(None),
         DaemonStatus::Stale => {
             let _ = fs::remove_file(config.pid_path());
+            let _ = fs::remove_file(config.daemon_info_path());
             Ok(None)
         }
         DaemonStatus::Running(pid) => {
