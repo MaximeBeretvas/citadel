@@ -155,7 +155,7 @@ pub fn serve_version_check(current: &str, probe: &ServeProbe) -> Option<Check> {
         return None;
     };
     let check = match version {
-        Some(v) if v == current => Check::ok(
+        Some(v) if normalize_version_str(v) == normalize_version_str(current) => Check::ok(
             Section::Version,
             "serve",
             format!("serve {v} matches the CLI"),

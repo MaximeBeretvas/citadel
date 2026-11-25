@@ -131,7 +131,8 @@ pub fn daemon_status(config: &VaultConfig) -> Result<DaemonStatus> {
         return Ok(DaemonStatus::Stopped);
     }
 
-    let mut file = match OpenOptions::new().read(true).write(true).open(&pid_path) {
+    // Read-only: status must work on a pid file it may not write (flock needs no write access).
+    let mut file = match OpenOptions::new().read(true).open(&pid_path) {
         Ok(f) => f,
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
             return Ok(DaemonStatus::Stopped);

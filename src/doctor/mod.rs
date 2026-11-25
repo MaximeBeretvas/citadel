@@ -67,7 +67,11 @@ pub async fn run_doctor(config: &VaultConfig, opts: &DoctorOpts) -> Report {
     } else {
         Some(running::gather_service_state())
     };
-    let service_installed = matches!(service, Some(running::ServiceState::Installed { .. }));
+    // Only a loaded service can be restarted through launchctl/systemctl.
+    let service_installed = matches!(
+        service,
+        Some(running::ServiceState::Installed { loaded: true, .. })
+    );
     let home_is_cwd = opts
         .home
         .as_deref()

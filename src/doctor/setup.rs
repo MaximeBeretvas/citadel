@@ -266,6 +266,14 @@ fn binary_version(path: &Path) -> Option<String> {
         .stderr(Stdio::null())
         .spawn()
         .ok()?;
+    // Read stdout on its own thread: a child that exits but leaves a grandchild
+    // holding the pipe open must not block doctor past the timeout.
+    let mut stdout = child.stdout.take()?;
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let mut out = String::new();
+        let _ = tx.send(stdout.read_to_string(&mut out).ok().map(|_| out));
+    });
     let deadline = Instant::now() + VERSION_TIMEOUT;
     loop {
         match child.try_wait() {
@@ -279,8 +287,9 @@ fn binary_version(path: &Path) -> Option<String> {
             Ok(None) => std::thread::sleep(Duration::from_millis(20)),
         }
     }
-    let mut out = String::new();
-    child.stdout.take()?.read_to_string(&mut out).ok()?;
+    let out = rx
+        .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+        .ok()??;
     out.trim()
         .strip_prefix("citadel ")
         .map(|v| v.trim().to_string())
@@ -404,14 +413,18 @@ pub fn setup_checks(
                 Some(StdioResolution::Citadel {
                     path,
                     version: Some(found),
-                }) if found != current => Check::warn(
+                }) if crate::update::check::normalize_version_str(found)
+                    != crate::update::check::normalize_version_str(current) =>
+                {
+                    Check::warn(
                     Section::Setup,
                     "mcp",
                     format!("{base} — {} is {found}, doctor is {current})", path.display()),
                 )
                 .with_hint(
                     "update the citadel on PATH (citadel update) so the agent runs the same version",
-                ),
+                )
+                }
                 Some(StdioResolution::NotChecked { .. }) => Check::info(
                     Section::Setup,
                     "mcp",
