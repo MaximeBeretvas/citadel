@@ -187,4 +187,5 @@ citadel skill install --path /path/to/skills
 | `citadel ui [--port 4317] [--no-open]` | Launch the embedded local Web UI server on `127.0.0.1`. |
 | `citadel serve [--bind 0.0.0.0:4317]` | Run the all-in-one server (daemon + Web UI + MCP Streamable HTTP on `/mcp`). |
 | `citadel daemon <start\|stop\|status\|install\|uninstall>` | Manage the background scheduler/watcher and OS service registration. |
+| `citadel doctor [--json]` | Read-only health report: versions, what is running, and where the skill and MCP entry are set up. Exits 1 if a check fails. |
 | `citadel skill install [--global \| --path DIR]` | Install the embedded agent router `SKILL.md`. |

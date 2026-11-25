@@ -86,6 +86,22 @@ pub fn uninstall_service() -> Result<Option<PathBuf>> {
     uninstall_service_for_platform()
 }
 
+/// Path of the OS service definition file for this platform, if the platform has one.
+pub fn service_file_path() -> Result<Option<PathBuf>> {
+    #[cfg(target_os = "macos")]
+    {
+        launchd_plist_path().map(Some)
+    }
+    #[cfg(target_os = "linux")]
+    {
+        systemd_unit_path().map(Some)
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    {
+        Ok(None)
+    }
+}
+
 #[cfg(target_os = "macos")]
 fn launchd_plist_path() -> Result<PathBuf> {
     let base = directories::BaseDirs::new().ok_or_else(|| {

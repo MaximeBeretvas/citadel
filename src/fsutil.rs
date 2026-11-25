@@ -92,6 +92,14 @@ fn resolve_write_target(path: &Path) -> Result<PathBuf> {
     )))
 }
 
+/// Whether `a` and `b` name the same file once symlinks are resolved; a path that
+/// cannot be canonicalized (e.g. it does not exist) is compared as written.
+pub(crate) fn same_path(a: &Path, b: &Path) -> bool {
+    let a = std::fs::canonicalize(a).unwrap_or_else(|_| a.to_path_buf());
+    let b = std::fs::canonicalize(b).unwrap_or_else(|_| b.to_path_buf());
+    a == b
+}
+
 /// Whether `link` already resolves to the directory `target`, e.g. because a parent of
 /// `link` is itself a symlink into `target`'s tree. Replacing such a path would delete
 /// `target` through the parent link and leave a link pointing at itself.

@@ -45,36 +45,37 @@ pub async fn detect_default_transport(probe_url: &str) -> McpTransport {
 }
 
 async fn answers_mcp_ping(probe_url: &str) -> bool {
-    let Ok(client) = reqwest::Client::builder()
-        .timeout(Duration::from_millis(500))
-        .build()
-    else {
-        return false;
-    };
     let ping = r#"{"jsonrpc":"2.0","id":"citadel-setup-probe","method":"ping"}"#;
-    let Ok(resp) = client
-        .post(probe_url)
+    mcp_post(probe_url, ping.to_string(), Duration::from_millis(500))
+        .await
+        .is_some()
+}
+
+/// POST one JSON-RPC request to an MCP Streamable HTTP endpoint. Returns the reply only
+/// when the server answers 2xx with a JSON-RPC 2.0 `result`; any failure yields `None`.
+pub(crate) async fn mcp_post(
+    url: &str,
+    body: String,
+    timeout: Duration,
+) -> Option<serde_json::Value> {
+    let client = reqwest::Client::builder().timeout(timeout).build().ok()?;
+    let resp = client
+        .post(url)
         .header(reqwest::header::CONTENT_TYPE, "application/json")
         .header(
             reqwest::header::ACCEPT,
             "application/json, text/event-stream",
         )
-        .body(ping)
+        .body(body)
         .send()
         .await
-    else {
-        return false;
-    };
+        .ok()?;
     if !resp.status().is_success() {
-        return false;
+        return None;
     }
-    let Ok(body) = resp.text().await else {
-        return false;
-    };
-    serde_json::from_str::<serde_json::Value>(&body).is_ok_and(|reply| {
-        reply.get("jsonrpc").and_then(|v| v.as_str()) == Some("2.0")
-            && reply.get("result").is_some()
-    })
+    let reply = serde_json::from_str::<serde_json::Value>(&resp.text().await.ok()?).ok()?;
+    (reply.get("jsonrpc").and_then(|v| v.as_str()) == Some("2.0") && reply.get("result").is_some())
+        .then_some(reply)
 }
 
 /// Run `citadel setup` non-interactively using explicit options.

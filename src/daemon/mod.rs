@@ -1,3 +1,4 @@
+pub mod info;
 pub mod service;
 
 use std::collections::{HashMap, HashSet};
@@ -21,9 +22,11 @@ use crate::error::{Result, VaultError};
 use crate::ingest::{local::canonicalize_local_dir, map_source_record, SourceRecord, SyncSummary};
 use crate::sources::{SourceLifecycle, SyncOutcome};
 
+use info::{DaemonInfo, DaemonInfoGuard};
+
 pub use service::{
-    generate_launchd_plist, generate_systemd_unit, install_service, uninstall_service,
-    LAUNCHD_LABEL, SYSTEMD_SERVICE_NAME,
+    generate_launchd_plist, generate_systemd_unit, install_service, service_file_path,
+    uninstall_service, LAUNCHD_LABEL, SYSTEMD_SERVICE_NAME,
 };
 
 /// Default web scheduler tick interval (60 seconds).
@@ -128,7 +131,8 @@ pub fn daemon_status(config: &VaultConfig) -> Result<DaemonStatus> {
         return Ok(DaemonStatus::Stopped);
     }
 
-    let mut file = match OpenOptions::new().read(true).write(true).open(&pid_path) {
+    // Read-only: status must work on a pid file it may not write (flock needs no write access).
+    let mut file = match OpenOptions::new().read(true).open(&pid_path) {
         Ok(f) => f,
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
             return Ok(DaemonStatus::Stopped);
@@ -146,6 +150,19 @@ pub fn daemon_status(config: &VaultConfig) -> Result<DaemonStatus> {
     }
 }
 
+/// Write `daemon.json` for this process. It only feeds `citadel doctor`, so a
+/// failure is logged and the daemon runs on without it. Keep the returned guard
+/// alive for the daemon's lifetime: dropping it removes the file.
+fn write_daemon_info_best_effort(path: &Path) -> Option<DaemonInfoGuard> {
+    match DaemonInfo::for_current_process().and_then(|info| DaemonInfoGuard::write(path, &info)) {
+        Ok(guard) => Some(guard),
+        Err(err) => {
+            tracing::warn!(error = %err, "could not write daemon.json; continuing without it");
+            None
+        }
+    }
+}
+
 /// Start the daemon either in the foreground (blocking until `SIGINT`/`SIGTERM`) or detached.
 ///
 /// Returns `Ok(Some(child_pid))` when detached, or `Ok(None)` after clean foreground shutdown.
@@ -154,6 +171,7 @@ pub fn start_daemon(config: &VaultConfig, foreground: bool) -> Result<Option<u32
 
     if foreground {
         let _lock = PidLock::acquire(&config.pid_path())?;
+        let _info = write_daemon_info_best_effort(&config.daemon_info_path());
         let rt = tokio::runtime::Builder::new_multi_thread()
             .enable_all()
             .build()
@@ -201,6 +219,7 @@ pub fn stop_daemon(config: &VaultConfig) -> Result<Option<u32>> {
         DaemonStatus::Stopped => Ok(None),
         DaemonStatus::Stale => {
             let _ = fs::remove_file(config.pid_path());
+            let _ = fs::remove_file(config.daemon_info_path());
             Ok(None)
         }
         DaemonStatus::Running(pid) => {
@@ -888,6 +907,18 @@ mod tests {
             matches!(err, VaultError::Io(ref io_err) if io_err.kind() == std::io::ErrorKind::NotFound),
             "expected NotFound Io error from explicit exe path, got: {err}"
         );
+    }
+
+    #[test]
+    fn daemon_info_write_failure_is_not_fatal() {
+        let dir = tempdir().expect("tempdir");
+        let path = dir.path().join("missing-dir").join("daemon.json");
+        assert!(write_daemon_info_best_effort(&path).is_none());
+        let ok_path = dir.path().join("daemon.json");
+        let guard = write_daemon_info_best_effort(&ok_path);
+        assert!(guard.is_some() && ok_path.exists());
+        drop(guard);
+        assert!(!ok_path.exists());
     }
 
     #[test]

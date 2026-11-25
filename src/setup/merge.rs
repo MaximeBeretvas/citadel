@@ -8,6 +8,18 @@ const CITADEL_KEY: &str = "citadel";
 const MCP_SERVERS_JSON_KEY: &str = "mcpServers";
 const MCP_SERVERS_TOML_KEY: &str = "mcp_servers";
 
+/// The `mcpServers.citadel` entry of a parsed JSON agent config.
+pub(crate) fn json_citadel_entry(root: &Value) -> Option<&Value> {
+    root.get(MCP_SERVERS_JSON_KEY)?.get(CITADEL_KEY)
+}
+
+/// The `[mcp_servers.citadel]` table of a parsed TOML agent config.
+pub(crate) fn toml_citadel_entry(doc: &DocumentMut) -> Option<&dyn toml_edit::TableLike> {
+    doc.get(MCP_SERVERS_TOML_KEY)?
+        .get(CITADEL_KEY)?
+        .as_table_like()
+}
+
 /// Return `true` if `existing` JSON content already contains `mcpServers.citadel`.
 pub fn json_has_citadel_entry(existing: &str) -> bool {
     let Ok(Value::Object(root)) = serde_json::from_str::<Value>(existing) else {

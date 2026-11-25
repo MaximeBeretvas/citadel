@@ -110,6 +110,16 @@ pub fn is_newer_version(current: &str, latest: &str) -> bool {
     lat.cmp_precedence(&cur) == std::cmp::Ordering::Greater
 }
 
+/// Read `update-check.json` and its latest version normalized to SemVer; `None` when the
+/// file is missing, unparsable, or holds an invalid version.
+pub(crate) fn read_cache_entry(path: &Path) -> Option<(UpdateCheckCache, String)> {
+    let raw = std::fs::read_to_string(path).ok()?;
+    let cache = serde_json::from_str::<UpdateCheckCache>(&raw).ok()?;
+    let latest = normalize_version_str(&cache.latest_version).to_string();
+    semver::Version::parse(&latest).ok()?;
+    Some((cache, latest))
+}
+
 /// Read `<CITADEL_HOME>/update-check.json` synchronously (0 ms network cost) and evaluate TTL.
 pub fn read_cached_status(
     path: &Path,
@@ -129,17 +139,9 @@ pub fn read_cached_status(
         )
     };
 
-    let Ok(raw) = std::fs::read_to_string(path) else {
+    let Some((cache, latest)) = read_cache_entry(path) else {
         return fallback();
     };
-    let Ok(cache) = serde_json::from_str::<UpdateCheckCache>(&raw) else {
-        return fallback();
-    };
-
-    let latest = normalize_version_str(&cache.latest_version).to_string();
-    if semver::Version::parse(&latest).is_err() {
-        return fallback();
-    }
 
     // A timestamp from the future (written under a wrong clock) is stale, not fresh forever.
     let is_stale = parse_iso8601_utc(&cache.checked_at).is_none_or(|checked| {
@@ -199,12 +201,20 @@ pub fn claim_refresh_attempt(cache_path: &Path, now_secs: i64) -> bool {
     std::fs::write(&marker, format!("{now_secs}\n")).is_ok()
 }
 
+/// HTTP client for the GitHub Releases API, identified as `citadel/<version>`.
+pub(crate) fn release_http_client(
+    version: &str,
+    timeout: Duration,
+) -> reqwest::Result<reqwest::Client> {
+    reqwest::Client::builder()
+        .timeout(timeout)
+        .user_agent(format!("citadel/{version}"))
+        .build()
+}
+
 /// Fetch latest release metadata from `api_url` and write `update-check.json` atomically.
 pub async fn refresh_cache(api_url: &str, path: &Path) -> Result<UpdateCheckCache> {
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(3))
-        .user_agent(format!("citadel/{}", env!("CARGO_PKG_VERSION")))
-        .build()?;
+    let client = release_http_client(env!("CARGO_PKG_VERSION"), Duration::from_secs(3))?;
     let (release, latest) = fetch_release(&client, api_url).await?;
     let cache = UpdateCheckCache::now(latest, release.html_url);
     write_cache_atomic(path, &cache)?;

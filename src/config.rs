@@ -78,6 +78,11 @@ impl VaultConfig {
         self.data_dir.join("daemon.pid")
     }
 
+    /// Path to the daemon metadata file (`daemon.json`).
+    pub fn daemon_info_path(&self) -> PathBuf {
+        self.data_dir.join("daemon.json")
+    }
+
     /// Path to the daemon log file (`daemon.log`).
     pub fn log_path(&self) -> PathBuf {
         self.data_dir.join("daemon.log")
