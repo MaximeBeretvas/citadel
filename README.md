@@ -110,12 +110,29 @@ make install          # cargo install --path . --locked --force (default feature
 make install-lite     # same, with --no-default-features (no headless-browser support)
 ```
 
+## Quick Start
+
+```bash
+# Index a docs site (or a local Markdown folder) and run its first Sync
+citadel add https://docs.example.com --name example-docs
+
+# Browse and search it in the Web UI
+citadel ui
+
+# Connect your coding agents (skill + MCP entry)
+citadel setup
+```
+
+In the container, run the same commands through `make exec`, for example `make exec CMD="add https://docs.example.com"`; the Web UI is already running at http://127.0.0.1:4317.
+
 ## MCP Client Configuration
 
 `citadel` exposes two MCP tools:
 
 - **`query`**: Execute a single read-only SQLite/FTS5 `SELECT` statement against the vault (`v_sources`, `pages`, `sections`, `pages_fts`, `sections_fts`, `v_recent_changes`) with `SQLITE_OPEN_READ_ONLY`, `PRAGMA query_only = ON`, authorizer allowlist, 5-second timeout, and row/byte caps.
-- **`manage`**: Register, inspect, sync, or remove sources (`add`, `list`, `show`, `sync`, `rm`) with directory canonicalization on local paths. Every entry point (CLI, UI, MCP) refuses Private origins (loopback, private network, link-local, `localhost`); set `CITADEL_ALLOW_PRIVATE_ORIGINS=1` to index intranet or `localhost` docs.
+- **`manage`**: Register, update, sync, or remove sources (`add`, `update`, `sync`, `remove`) with directory canonicalization on local paths. Every entry point (CLI, UI, MCP) refuses Private origins (loopback, private network, link-local, CGNAT, `localhost`); set `CITADEL_ALLOW_PRIVATE_ORIGINS=1` to index intranet or `localhost` docs.
+
+`citadel setup` (see [Agent Skill Installation](#agent-skill-installation)) writes these entries for Claude, Antigravity, and Codex. Use the snippets below for other clients or to configure by hand.
 
 ### Streamable HTTP (Recommended with `citadel serve` or the container)
 
@@ -161,31 +178,51 @@ With `RUNTIME=container`, use `"command": "container"` instead.
 
 ## Agent Skill Installation
 
-Install the embedded `SKILL.md` router so coding agents know the vault schema, FTS5 recipes, and `query`/`manage` workflows:
+The quickest route is the setup wizard, which installs the skill and registers the MCP server for Claude, Antigravity, and Codex in one step:
+
+```bash
+# Interactive wizard
+citadel setup
+
+# Non-interactive: global skill + stdio MCP entry for Claude and Codex
+citadel setup --agent claude --agent codex --scope global --transport stdio -y
+```
+
+`--scope local` writes into the current project (for example `.mcp.json`, `.codex/config.toml`); `--scope global` writes into your home directory. Use `--only skill` or `--only mcp` to configure one part, `--transport http` (with `--url`) to point agents at a running `citadel serve`, and `--force` to overwrite existing entries.
+
+To install only the skill, install the embedded `SKILL.md` router so coding agents know the vault schema, FTS5 recipes, and `query`/`manage` workflows:
 
 ```bash
 # Install into the current repository (.agents/skills/citadel/SKILL.md)
 citadel skill install
 
-# Install globally for user agent skill directories (Claude, Antigravity, Codex, etc.)
+# Install globally into ~/.agents/skills, symlinked into each agent's skill directory
 citadel skill install --global
+
+# Limit a global install to one agent (agents, claude, copilot, opencode; default: all)
+citadel skill install --global --target claude
 
 # Install into a custom skills parent directory
 citadel skill install --path /path/to/skills
 ```
 
+Add `--force` to overwrite an existing `SKILL.md` or symlink.
+
 ## Core CLI Commands
 
 | Command | Description |
 |---|---|
-| `citadel add <URL_OR_PATH> [--name SLUG]` | Register and sync a documentation URL or local Markdown directory. |
+| `citadel add <URL_OR_PATH> [--name SLUG] [OPTIONS]` | Register and sync a documentation URL or local Markdown directory. Options: `--tags`, `--interval` (e.g. `24h`, `30m`; `0` turns off scheduled Syncs), `--max-pages`, `--max-depth`, `--include`/`--exclude` (glob or prefix), `--render-js` (headless Chrome), `--no-sync`. |
 | `citadel list [--json]` | List configured sources, page counts, and health status. |
 | `citadel show <NAME>` | Inspect source details, recent sync runs, and stale/error pages. |
 | `citadel sync [NAME \| --all] [--prune]` | Manually sync one or all sources (optionally pruning stale pages). |
 | `citadel rm <NAME> [--yes]` | Remove a source and cascade-delete its indexed pages. |
-| `citadel query "<SQL>" [--limit N] [--format table\|json\|csv]` | Run a read-only SQLite/FTS5 query against the vault. |
-| `citadel ui [--port 4317] [--no-open]` | Launch the embedded local Web UI server on `127.0.0.1`. |
-| `citadel serve [--bind 0.0.0.0:4317]` | Run the all-in-one server (daemon + Web UI + MCP Streamable HTTP on `/mcp`). |
+| `citadel query "<SQL>" [--limit N] [--format table\|json\|csv]` | Run a read-only SQLite/FTS5 query against the vault (default 50 rows, max 200). |
+| `citadel ui [--port PORT] [--no-open]` | Launch the embedded local Web UI server on `127.0.0.1` (default port 4317; falls back to a free port if 4317 is taken). |
+| `citadel serve [--bind ADDR]` | Run the all-in-one server (daemon + Web UI + MCP Streamable HTTP on `/mcp`); default bind `0.0.0.0:4317`. |
+| `citadel mcp` | Run the MCP server over `stdio` (newline-delimited JSON-RPC 2.0). |
 | `citadel daemon <start\|stop\|status\|install\|uninstall>` | Manage the background scheduler/watcher and OS service registration. |
 | `citadel doctor [--json]` | Read-only health report: versions, what is running, and where the skill and MCP entry are set up. Exits 1 if a check fails. |
-| `citadel skill install [--global \| --path DIR]` | Install the embedded agent router `SKILL.md`. |
+| `citadel skill install [--global [--target T] \| --path DIR] [--force]` | Install the embedded agent router `SKILL.md`. |
+| `citadel setup [--agent A] [--scope S] [--transport T] [--only O] [--force] [-y]` | Wizard that installs the skill and MCP entry for Claude, Antigravity (`agy`), and Codex. |
+| `citadel update [--check] [-y]` | Check for or install the latest GitHub Release binary (macOS and Linux). |
