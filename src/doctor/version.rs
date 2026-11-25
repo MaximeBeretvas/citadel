@@ -7,6 +7,7 @@ use crate::config::VaultConfig;
 use crate::daemon::info::{read_daemon_info, DaemonInfo};
 use crate::daemon::{daemon_status, DaemonStatus};
 use crate::doctor::report::{Check, Section};
+use crate::doctor::running::ServeProbe;
 use crate::error::Result;
 use crate::update::check::{
     fetch_release, is_newer_version, normalize_version_str, UpdateCheckCache,
@@ -192,6 +193,28 @@ pub fn daemon_version_checks(current: &str, facts: &DaemonFacts) -> Vec<Check> {
     )]
 }
 
+/// Compare the serve process version with the CLI; `None` unless it answered.
+pub fn serve_version_check(current: &str, probe: &ServeProbe) -> Option<Check> {
+    let ServeProbe::Answering { version } = probe else {
+        return None;
+    };
+    let check = match version {
+        Some(v) if v == current => Check::ok(
+            Section::Version,
+            "serve",
+            format!("serve {v} matches the CLI"),
+        ),
+        Some(v) => Check::warn(
+            Section::Version,
+            "serve",
+            format!("serve runs {v}, CLI is {current}"),
+        )
+        .with_hint("rebuild and restart the serve process or container (make build && make run)"),
+        None => Check::info(Section::Version, "serve", "serve version unknown"),
+    };
+    Some(check)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -337,5 +360,27 @@ mod tests {
         let facts = gather_daemon_facts(&config, false).unwrap();
         assert_eq!(facts.status, DaemonStatus::Running(std::process::id()));
         assert_eq!(facts.info, None);
+    }
+
+    #[test]
+    fn serve_other_version_warns() {
+        let probe = ServeProbe::Answering {
+            version: Some("0.2.0".into()),
+        };
+        let c = serve_version_check("0.3.0", &probe).unwrap();
+        assert_eq!(c.status, CheckStatus::Warn);
+        assert!(c.detail.contains("0.2.0") && c.detail.contains("0.3.0"));
+        assert_eq!(
+            c.hint.as_deref(),
+            Some("rebuild and restart the serve process or container (make build && make run)")
+        );
+        let same = ServeProbe::Answering {
+            version: Some("0.3.0".into()),
+        };
+        assert_eq!(
+            serve_version_check("0.3.0", &same).unwrap().status,
+            CheckStatus::Ok
+        );
+        assert!(serve_version_check("0.3.0", &ServeProbe::NotAnswering).is_none());
     }
 }
