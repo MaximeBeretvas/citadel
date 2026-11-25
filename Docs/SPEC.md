@@ -61,7 +61,7 @@ Resolved via `CITADEL_HOME` env var, `--data-dir` flag, or OS defaults (`directo
 - **Files inside data dir:**
   - `vault.db` (+ `vault.db-wal`, `vault.db-shm`) — primary SQLite database
   - `daemon.pid` — active daemon PID lockfile
-  - `daemon.json` — written while the daemon holds the lock: `pid`, `version`, `exe`, `exe_mtime`, `started_at`; read by `citadel doctor`, removed with `daemon.pid`
+  - `daemon.json` — written (best effort; a failure is logged, not fatal) while the daemon holds the lock: `pid`, `version`, `exe`, `exe_mtime_secs`, `started_at`; read by `citadel doctor`, removed with `daemon.pid`
   - `daemon.log` — rotating daemon log
   - `update-check.json` — cached latest-release metadata (`checked_at`, `latest_version`, `release_url`, 24h TTL)
 - **`CITADEL_ALLOW_PRIVATE_ORIGINS`:** `1` or `true` allows web Sources on Private origins (intranet docs, `localhost`); off by default.
@@ -448,7 +448,7 @@ citadel
 One read-only report in four sections. It never writes a file, creates the data directory, opens `vault.db` or starts a process, and it skips the automatic update notice. Design: [doctor-command](./superpowers/specs/2026-11-25-doctor-command-design.md).
 - **Version:** CLI against the latest release (live check with a 3 s timeout, else `update-check.json`; `CITADEL_NO_UPDATE_CHECK=1` uses the cache only); the daemon's version and binary from `daemon.json` against the CLI; the `serve` version (MCP `initialize`) against the CLI.
 - **Running:** daemon state, OS service (installed, loaded, data dir and binary match the CLI), count of `daemon`/`serve` processes, and whether `serve` answers on `127.0.0.1:4317`. Inside a container it skips the daemon, service and process rows.
-- **Setup:** for Claude Code, Antigravity and Codex, in local (current directory) and global (home) scope: the skill (present, dangling, outdated) and the `citadel` MCP entry (stdio command resolves, HTTP URL answers). Local scope is skipped when the current directory is the home directory.
+- **Setup:** for Claude Code, Antigravity and Codex, in local (current directory) and global (home) scope: the skill (present, dangling, outdated) and the `citadel` MCP entry (stdio command resolves, HTTP URL answers). It runs `--version` only on a stdio command that is the bare name `citadel` found in an absolute `PATH` directory, or an absolute path named `citadel`; any other resolved command is `·` "version not checked", a relative path is `·` "relative command, not checked", and neither is run. Local scope is skipped when the current directory is the home directory.
 - **Data:** the data directory path, marked `(not created yet)` when absent.
 
 Rows are marked `✓` ok, `·` info, `!` warning, `✗` fail; each `!`/`✗` row names the command that fixes it. `--json` prints `{"checks": [{section, name, status, detail, hint}]}`. Exit code is `1` only when a check fails; warnings exit `0`.
