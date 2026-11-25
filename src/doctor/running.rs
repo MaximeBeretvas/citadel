@@ -11,6 +11,8 @@ pub struct ServiceFile {
     pub path: PathBuf,
     pub binary: Option<PathBuf>,
     pub data_dir: Option<PathBuf>,
+    /// Why the file could not be read, when it exists but is unreadable.
+    pub unreadable: Option<String>,
 }
 
 /// State of the OS background service.
@@ -18,7 +20,14 @@ pub struct ServiceFile {
 pub enum ServiceState {
     Unsupported,
     NotInstalled,
-    Installed { file: ServiceFile, loaded: bool },
+    /// The service file location could not be determined.
+    Unknown {
+        reason: String,
+    },
+    Installed {
+        file: ServiceFile,
+        loaded: bool,
+    },
 }
 
 /// Map the daemon pid-file status to a check row.
@@ -132,12 +141,16 @@ pub fn gather_service_state() -> ServiceState {
     let path = match crate::daemon::service_file_path() {
         Ok(Some(path)) => path,
         Ok(None) => return ServiceState::Unsupported,
-        Err(_) => return ServiceState::NotInstalled,
+        Err(e) => {
+            return ServiceState::Unknown {
+                reason: e.to_string(),
+            }
+        }
     };
-    let text = match std::fs::read_to_string(&path) {
-        Ok(text) => text,
+    let (text, unreadable) = match std::fs::read_to_string(&path) {
+        Ok(text) => (text, None),
         Err(_) if !path.exists() => return ServiceState::NotInstalled,
-        Err(_) => String::new(),
+        Err(e) => (String::new(), Some(e.to_string())),
     };
     let (binary, data_dir) = if cfg!(target_os = "macos") {
         parse_launchd_plist(&text)
@@ -149,6 +162,7 @@ pub fn gather_service_state() -> ServiceState {
             path,
             binary,
             data_dir,
+            unreadable,
         },
         loaded: service_is_loaded(),
     }
@@ -201,6 +215,12 @@ pub fn service_checks(state: &ServiceState, cli_data_dir: &Path, cli_exe: &Path)
                     .with_hint("citadel daemon install"),
             ]
         }
+        ServiceState::Unknown { reason } => vec![Check::warn(
+            Section::Running,
+            NAME,
+            format!("cannot locate the service file: {reason}"),
+        )
+        .with_hint("set HOME, then re-run citadel doctor")],
         ServiceState::Installed { file, loaded } => {
             let mut checks = Vec::new();
             if *loaded {
@@ -220,6 +240,19 @@ pub fn service_checks(state: &ServiceState, cli_data_dir: &Path, cli_exe: &Path)
                         ),
                     )
                     .with_hint("citadel daemon install"),
+                );
+            }
+            if let Some(reason) = &file.unreadable {
+                checks.push(
+                    Check::warn(
+                        Section::Running,
+                        "service file",
+                        format!(
+                            "service file unreadable ({}): {reason}",
+                            file.path.display()
+                        ),
+                    )
+                    .with_hint("fix the file permissions or run citadel daemon install"),
                 );
             }
             if let Some(dir) = &file.data_dir {
@@ -275,6 +308,7 @@ mod tests {
                 path: PathBuf::from("/svc/file"),
                 binary: p(binary),
                 data_dir: p(data_dir),
+                unreadable: None,
             },
             loaded,
         }
@@ -405,5 +439,37 @@ mod tests {
             .expect("a warn row");
         assert!(warn.detail.contains("/old/c"));
         assert_eq!(warn.hint.as_deref(), Some("citadel daemon install"));
+    }
+
+    #[test]
+    fn service_unknown_location_warns_with_reason_and_hint() {
+        let state = ServiceState::Unknown {
+            reason: "no home directory".to_string(),
+        };
+        let checks = service_checks(&state, Path::new("/data"), Path::new("/bin/c"));
+        assert_eq!(checks.len(), 1);
+        assert_eq!(checks[0].status, CheckStatus::Warn);
+        assert!(checks[0].detail.contains("no home directory"));
+        assert!(checks[0].hint.is_some());
+    }
+
+    #[test]
+    fn service_unreadable_file_warns_with_hint() {
+        let ServiceState::Installed { mut file, loaded } = installed("/bin/c", "/data", true)
+        else {
+            unreachable!()
+        };
+        file.binary = None;
+        file.data_dir = None;
+        file.unreadable = Some("permission denied".to_string());
+        let state = ServiceState::Installed { file, loaded };
+        let checks = service_checks(&state, Path::new("/data"), Path::new("/bin/c"));
+        let warn = checks
+            .iter()
+            .find(|c| c.status == CheckStatus::Warn)
+            .expect("a warn row");
+        assert!(warn.detail.contains("unreadable"));
+        assert!(warn.detail.contains("permission denied"));
+        assert!(warn.hint.is_some());
     }
 }
