@@ -201,12 +201,20 @@ pub fn claim_refresh_attempt(cache_path: &Path, now_secs: i64) -> bool {
     std::fs::write(&marker, format!("{now_secs}\n")).is_ok()
 }
 
+/// HTTP client for the GitHub Releases API, identified as `citadel/<version>`.
+pub(crate) fn release_http_client(
+    version: &str,
+    timeout: Duration,
+) -> reqwest::Result<reqwest::Client> {
+    reqwest::Client::builder()
+        .timeout(timeout)
+        .user_agent(format!("citadel/{version}"))
+        .build()
+}
+
 /// Fetch latest release metadata from `api_url` and write `update-check.json` atomically.
 pub async fn refresh_cache(api_url: &str, path: &Path) -> Result<UpdateCheckCache> {
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(3))
-        .user_agent(format!("citadel/{}", env!("CARGO_PKG_VERSION")))
-        .build()?;
+    let client = release_http_client(env!("CARGO_PKG_VERSION"), Duration::from_secs(3))?;
     let (release, latest) = fetch_release(&client, api_url).await?;
     let cache = UpdateCheckCache::now(latest, release.html_url);
     write_cache_atomic(path, &cache)?;

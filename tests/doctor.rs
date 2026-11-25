@@ -1,16 +1,16 @@
 //! End-to-end checks of `citadel doctor` against a throwaway home and project directory.
 
 use std::ffi::{OsStr, OsString};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
 use tempfile::{tempdir, TempDir};
 
 struct Env {
-    _tmp: TempDir,
-    home: std::path::PathBuf,
-    data: std::path::PathBuf,
-    project: std::path::PathBuf,
+    tmp: TempDir,
+    home: PathBuf,
+    data: PathBuf,
+    project: PathBuf,
 }
 
 fn env() -> Env {
@@ -23,7 +23,7 @@ fn env() -> Env {
         data: tmp.path().join("data"),
         home,
         project,
-        _tmp: tmp,
+        tmp,
     }
 }
 
@@ -164,7 +164,7 @@ fn doctor_with_home_as_cwd_skips_local_scope() {
 #[test]
 fn doctor_never_runs_a_relative_stdio_command() {
     let env = env();
-    let marker = env.home.parent().expect("tmp").join("relative-ran");
+    let marker = env.tmp.path().join("relative-ran");
     script(
         &env.project.join("x"),
         &format!("touch '{}'", marker.display()),
@@ -185,7 +185,7 @@ fn doctor_never_runs_a_relative_stdio_command() {
 #[test]
 fn doctor_does_not_run_docker_from_a_stdio_entry() {
     let env = env();
-    let tmp = env.home.parent().expect("tmp").to_path_buf();
+    let tmp = env.tmp.path().to_path_buf();
     let bin = tmp.join("bin");
     std::fs::create_dir(&bin).expect("bin");
     let marker = tmp.join("docker-ran");

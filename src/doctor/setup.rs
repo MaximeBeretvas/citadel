@@ -10,8 +10,8 @@ use std::time::{Duration, Instant};
 
 use super::report::{Check, Section};
 use super::running::ServeProbe;
-use crate::setup::agents::{mcp_targets, skill_targets, ActionKind, AgentKind, SetupScope};
-use crate::setup::merge::{CITADEL_KEY, MCP_SERVERS_JSON_KEY, MCP_SERVERS_TOML_KEY};
+use crate::setup::agents::{agent_mcp_config, agent_skill_path, AgentKind, SetupScope};
+use crate::setup::merge::{json_citadel_entry, toml_citadel_entry};
 use crate::skill::ROUTER_SKILL_MD;
 
 const AGENTS: [AgentKind; 3] = [AgentKind::Claude, AgentKind::Agy, AgentKind::Codex];
@@ -34,24 +34,15 @@ pub fn setup_locations(cwd: &Path, home: Option<&Path>) -> Vec<SetupLocation> {
     for (scope, base) in [(SetupScope::Local, Some(cwd)), (SetupScope::Global, home)] {
         let Some(base) = base else { continue };
         for agent in AGENTS {
-            let skill_path = skill_targets(agent, scope, base)
-                .pop()
-                .map(|(path, _)| path);
-            let mcp = mcp_targets(agent, scope, base)
-                .into_iter()
-                .find(|(_, kind)| {
-                    matches!(
-                        kind,
-                        ActionKind::MergeJsonMcp { .. } | ActionKind::MergeTomlMcp
-                    )
-                });
-            if let (Some(skill_path), Some((mcp_path, kind))) = (skill_path, mcp) {
+            let skill_path = agent_skill_path(agent, scope, base);
+            let mcp = agent_mcp_config(agent, scope, base);
+            if let (Some(skill_path), Some((mcp_path, mcp_is_toml))) = (skill_path, mcp) {
                 out.push(SetupLocation {
                     agent,
                     scope,
                     skill_path,
                     mcp_path,
-                    mcp_is_toml: kind == ActionKind::MergeTomlMcp,
+                    mcp_is_toml,
                 });
             }
         }
@@ -110,6 +101,16 @@ pub enum McpEntry {
     Http { url: String },
 }
 
+impl McpEntry {
+    /// The URL of an HTTP entry.
+    pub fn http_url(&self) -> Option<&str> {
+        match self {
+            Self::Http { url } => Some(url),
+            Self::Stdio { .. } => None,
+        }
+    }
+}
+
 /// Read the `citadel` entry: `Ok(None)` for a missing or empty file or no entry,
 /// `Err(message)` when the file does not parse.
 pub fn read_mcp_entry(path: &Path, toml: bool) -> std::result::Result<Option<McpEntry>, String> {
@@ -165,10 +166,7 @@ fn json_server(raw: &str) -> std::result::Result<Option<RawServer>, String> {
     if !root.is_object() {
         return Err("config is not a JSON object".to_string());
     }
-    let Some(server) = root
-        .get(MCP_SERVERS_JSON_KEY)
-        .and_then(|s| s.get(CITADEL_KEY))
-    else {
+    let Some(server) = json_citadel_entry(&root) else {
         return Ok(None);
     };
     let args = server.get("args").and_then(|v| v.as_array());
@@ -182,11 +180,7 @@ fn toml_server(raw: &str) -> std::result::Result<Option<RawServer>, String> {
     let doc: toml_edit::DocumentMut = raw
         .parse()
         .map_err(|e: toml_edit::TomlError| e.to_string())?;
-    let Some(server) = doc
-        .get(MCP_SERVERS_TOML_KEY)
-        .and_then(|s| s.get(CITADEL_KEY))
-        .and_then(|s| s.as_table_like())
-    else {
+    let Some(server) = toml_citadel_entry(&doc) else {
         return Ok(None);
     };
     let args = server.get("args").and_then(|v| v.as_array());
@@ -231,9 +225,7 @@ pub fn resolve_stdio_command(
 ) -> StdioResolution {
     let as_written = Path::new(command);
     let absolute = as_written.is_absolute();
-    let has_separator =
-        command.contains('/') || command.contains(std::path::MAIN_SEPARATOR) || absolute;
-    if has_separator && !absolute {
+    if !absolute && command.contains(['/', std::path::MAIN_SEPARATOR]) {
         return StdioResolution::Relative;
     }
     let found = if absolute {
@@ -249,8 +241,7 @@ pub fn resolve_stdio_command(
     let Some(resolved) = found.and_then(|p| std::fs::canonicalize(p).ok()) else {
         return StdioResolution::NotFound;
     };
-    let current = std::fs::canonicalize(current_exe).unwrap_or_else(|_| current_exe.to_path_buf());
-    if resolved == current {
+    if crate::fsutil::same_path(&resolved, current_exe) {
         return StdioResolution::SameAsDoctor;
     }
     let named_citadel = as_written
@@ -659,15 +650,13 @@ mod tests {
 
     #[test]
     fn stdio_other_binary_reports_its_version() {
-        use std::os::unix::fs::PermissionsExt;
         let dir = tempdir().unwrap();
         let exe = dir.path().join("exe");
         std::fs::write(&exe, "x").unwrap();
         let bin = dir.path().join("bin");
         std::fs::create_dir(&bin).unwrap();
         let fake = bin.join("citadel");
-        std::fs::write(&fake, "#!/bin/sh\necho 'citadel 9.9.9'\n").unwrap();
-        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+        exec_script(&fake, "echo 'citadel 9.9.9'");
         assert_eq!(
             resolve_stdio_command("citadel", Some(bin.as_os_str()), &exe),
             StdioResolution::Citadel {

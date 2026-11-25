@@ -32,6 +32,12 @@ struct Inspected {
     mcp: std::result::Result<Option<McpEntry>, String>,
 }
 
+impl Inspected {
+    fn http_url(&self) -> Option<&str> {
+        self.mcp.as_ref().ok()?.as_ref()?.http_url()
+    }
+}
+
 /// Probe every distinct URL concurrently.
 async fn probe_all(urls: Vec<String>) -> HashMap<String, ServeProbe> {
     let mut set = tokio::task::JoinSet::new();
@@ -78,10 +84,11 @@ pub async fn run_doctor(config: &VaultConfig, opts: &DoctorOpts) -> Report {
 
     // Network checks run concurrently: the release check and each distinct HTTP URL once.
     let mut urls: Vec<String> = std::iter::once(opts.serve_url.clone())
-        .chain(inspected.iter().filter_map(|i| match &i.mcp {
-            Ok(Some(McpEntry::Http { url })) => Some(url.clone()),
-            _ => None,
-        }))
+        .chain(
+            inspected
+                .iter()
+                .filter_map(|i| i.http_url().map(str::to_string)),
+        )
         .collect();
     urls.sort();
     urls.dedup();
@@ -101,22 +108,22 @@ pub async fn run_doctor(config: &VaultConfig, opts: &DoctorOpts) -> Report {
         .unwrap_or(ServeProbe::NotAnswering);
     let http_entry_points_here = inspected
         .iter()
-        .any(|i| matches!(&i.mcp, Ok(Some(McpEntry::Http { url })) if *url == opts.serve_url));
+        .any(|i| i.http_url() == Some(opts.serve_url.as_str()));
 
     // Daemon state feeds a Version row and a Running row.
     let (daemon_version_rows, daemon_running_row) = if opts.in_container {
-        (Vec::new(), None)
+        (None, None)
     } else {
         match version::gather_daemon_facts(config, service_installed) {
             Ok(facts) => (
-                version::daemon_version_checks(current, &facts),
+                version::daemon_version_check(current, &facts),
                 Some(running::daemon_running_check(
                     facts.status,
                     &config.pid_path(),
                 )),
             ),
             Err(err) => (
-                Vec::new(),
+                None,
                 Some(
                     Check::fail(
                         Section::Running,
@@ -188,10 +195,7 @@ pub async fn run_doctor(config: &VaultConfig, opts: &DoctorOpts) -> Report {
             ),
             _ => None,
         };
-        let http = match &item.mcp {
-            Ok(Some(McpEntry::Http { url })) => probes.get(url),
-            _ => None,
-        };
+        let http = item.http_url().and_then(|url| probes.get(url));
         checks.extend(setup::setup_checks(
             &item.loc,
             &item.skill,

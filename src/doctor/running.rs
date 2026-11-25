@@ -194,12 +194,6 @@ fn service_is_loaded() -> bool {
     false
 }
 
-fn same_path(a: &Path, b: &Path) -> bool {
-    let a = std::fs::canonicalize(a).unwrap_or_else(|_| a.to_path_buf());
-    let b = std::fs::canonicalize(b).unwrap_or_else(|_| b.to_path_buf());
-    a == b
-}
-
 /// Turn the gathered service state into check rows.
 pub fn service_checks(state: &ServiceState, cli_data_dir: &Path, cli_exe: &Path) -> Vec<Check> {
     const NAME: &str = "service";
@@ -256,7 +250,7 @@ pub fn service_checks(state: &ServiceState, cli_data_dir: &Path, cli_exe: &Path)
                 );
             }
             if let Some(dir) = &file.data_dir {
-                if !same_path(dir, cli_data_dir) {
+                if !crate::fsutil::same_path(dir, cli_data_dir) {
                     checks.push(
                         Check::warn(
                             Section::Running,
@@ -272,7 +266,7 @@ pub fn service_checks(state: &ServiceState, cli_data_dir: &Path, cli_exe: &Path)
                 }
             }
             if let Some(bin) = &file.binary {
-                if !same_path(bin, cli_exe) {
+                if !crate::fsutil::same_path(bin, cli_exe) {
                     checks.push(
                         Check::warn(
                             Section::Running,

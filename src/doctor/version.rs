@@ -10,7 +10,7 @@ use crate::doctor::report::{Check, Section};
 use crate::doctor::running::ServeProbe;
 use crate::error::Result;
 use crate::update::check::{
-    fetch_release, is_newer_version, normalize_version_str, read_cache_entry,
+    fetch_release, is_newer_version, normalize_version_str, read_cache_entry, release_http_client,
 };
 
 const LIVE_CHECK_TIMEOUT: Duration = Duration::from_secs(3);
@@ -33,21 +33,14 @@ pub async fn latest_release(
 ) -> LatestRelease {
     if live {
         let check = async {
-            let client = reqwest::Client::builder()
-                .connect_timeout(LIVE_CHECK_TIMEOUT)
-                .user_agent(format!("citadel/{current}"))
-                .build()?;
+            let client = release_http_client(current, LIVE_CHECK_TIMEOUT)?;
             fetch_release(&client, api_url).await
         };
         if let Ok(Ok((_, latest))) = tokio::time::timeout(LIVE_CHECK_TIMEOUT, check).await {
             return LatestRelease::Live(latest);
         }
     }
-    read_cache(cache_path)
-}
-
-fn read_cache(path: &Path) -> LatestRelease {
-    match read_cache_entry(path) {
+    match read_cache_entry(cache_path) {
         Some((cache, version)) => LatestRelease::Cached {
             version,
             checked_at: cache.checked_at,
@@ -76,19 +69,11 @@ pub fn cli_version_check(current: &str, latest: &LatestRelease) -> Check {
             );
         }
     };
+    let detail = format!("citadel {current}, latest: {version}{source}");
     if is_newer_version(current, version) {
-        Check::warn(
-            Section::Version,
-            name,
-            format!("citadel {current}, latest: {version}{source}"),
-        )
-        .with_hint("citadel update")
+        Check::warn(Section::Version, name, detail).with_hint("citadel update")
     } else {
-        Check::ok(
-            Section::Version,
-            name,
-            format!("citadel {current}, latest: {version}{source}"),
-        )
+        Check::ok(Section::Version, name, detail)
     }
 }
 
@@ -131,53 +116,37 @@ pub fn restart_hint(service_installed: bool) -> String {
     }
 }
 
-/// Compare the running daemon with this CLI. Empty unless a daemon is running.
-pub fn daemon_version_checks(current: &str, facts: &DaemonFacts) -> Vec<Check> {
+/// Compare the running daemon with this CLI; `None` unless a daemon is running.
+pub fn daemon_version_check(current: &str, facts: &DaemonFacts) -> Option<Check> {
     if !matches!(facts.status, DaemonStatus::Running(_)) {
-        return Vec::new();
+        return None;
     }
     let name = "daemon version";
-    let hint = restart_hint(facts.service_installed);
+    let warn = |detail: String| {
+        Check::warn(Section::Version, name, detail)
+            .with_hint(&restart_hint(facts.service_installed))
+    };
     let Some(info) = &facts.info else {
-        return vec![Check::warn(
-            Section::Version,
-            name,
-            "daemon started by an older citadel (version unknown)",
-        )
-        .with_hint(&hint)];
+        return Some(warn(
+            "daemon started by an older citadel (version unknown)".to_string(),
+        ));
     };
-    if normalize_version_str(&info.version) != normalize_version_str(current) {
-        return vec![Check::warn(
-            Section::Version,
-            name,
-            format!("daemon runs {}, cli is {current}", info.version),
-        )
-        .with_hint(&hint)];
-    }
-    let Some(now) = facts.exe_mtime_now else {
-        return vec![Check::warn(
-            Section::Version,
-            name,
-            format!("daemon runs {}, binary no longer exists", info.version),
-        )
-        .with_hint(&hint)];
+    let version = &info.version;
+    let check = if normalize_version_str(version) != normalize_version_str(current) {
+        warn(format!("daemon runs {version}, cli is {current}"))
+    } else if facts.exe_mtime_now.is_none() {
+        warn(format!("daemon runs {version}, binary no longer exists"))
+    } else if info
+        .exe_mtime_secs
+        .is_some_and(|started| Some(started) != facts.exe_mtime_now)
+    {
+        warn(format!(
+            "daemon runs {version}, binary replaced since the daemon started"
+        ))
+    } else {
+        Check::ok(Section::Version, name, format!("daemon runs {version}"))
     };
-    if info.exe_mtime_secs.is_some_and(|started| started != now) {
-        return vec![Check::warn(
-            Section::Version,
-            name,
-            format!(
-                "daemon runs {}, binary replaced since the daemon started",
-                info.version
-            ),
-        )
-        .with_hint(&hint)];
-    }
-    vec![Check::ok(
-        Section::Version,
-        name,
-        format!("daemon runs {}", info.version),
-    )]
+    Some(check)
 }
 
 /// Compare the serve process version with the CLI; `None` unless it answered.
@@ -287,52 +256,55 @@ mod tests {
 
     #[test]
     fn daemon_same_version_same_binary_is_ok() {
-        let checks =
-            daemon_version_checks("0.3.0", &facts(Some(info("0.3.0", Some(100))), Some(100)));
-        assert_eq!(checks.len(), 1);
-        assert_eq!(checks[0].status, CheckStatus::Ok);
+        let check =
+            daemon_version_check("0.3.0", &facts(Some(info("0.3.0", Some(100))), Some(100)))
+                .expect("a version row");
+        assert_eq!(check.status, CheckStatus::Ok);
     }
 
     #[test]
     fn daemon_other_version_warns_with_restart_hint() {
-        let checks =
-            daemon_version_checks("0.3.0", &facts(Some(info("0.2.0", Some(100))), Some(100)));
-        assert_eq!(checks[0].status, CheckStatus::Warn);
+        let check =
+            daemon_version_check("0.3.0", &facts(Some(info("0.2.0", Some(100))), Some(100)))
+                .expect("a version row");
+        assert_eq!(check.status, CheckStatus::Warn);
         assert_eq!(
-            checks[0].hint.as_deref(),
+            check.hint.as_deref(),
             Some("citadel daemon stop && citadel daemon start")
         );
     }
 
     #[test]
     fn daemon_binary_replaced_warns() {
-        let checks =
-            daemon_version_checks("0.3.0", &facts(Some(info("0.3.0", Some(100))), Some(200)));
-        assert_eq!(checks[0].status, CheckStatus::Warn);
-        assert!(checks[0]
+        let check =
+            daemon_version_check("0.3.0", &facts(Some(info("0.3.0", Some(100))), Some(200)))
+                .expect("a version row");
+        assert_eq!(check.status, CheckStatus::Warn);
+        assert!(check
             .detail
             .contains("binary replaced since the daemon started"));
     }
 
     #[test]
     fn daemon_binary_missing_warns() {
-        let checks = daemon_version_checks("0.3.0", &facts(Some(info("0.3.0", Some(100))), None));
-        assert_eq!(checks[0].status, CheckStatus::Warn);
-        assert!(checks[0].detail.contains("binary no longer exists"));
+        let check = daemon_version_check("0.3.0", &facts(Some(info("0.3.0", Some(100))), None))
+            .expect("a version row");
+        assert_eq!(check.status, CheckStatus::Warn);
+        assert!(check.detail.contains("binary no longer exists"));
     }
 
     #[test]
     fn daemon_without_info_warns_older_citadel() {
-        let checks = daemon_version_checks("0.3.0", &facts(None, None));
-        assert_eq!(checks[0].status, CheckStatus::Warn);
-        assert!(checks[0].detail.contains("started by an older citadel"));
+        let check = daemon_version_check("0.3.0", &facts(None, None)).expect("a version row");
+        assert_eq!(check.status, CheckStatus::Warn);
+        assert!(check.detail.contains("started by an older citadel"));
     }
 
     #[test]
     fn stopped_daemon_has_no_version_rows() {
         let mut f = facts(None, None);
         f.status = DaemonStatus::Stopped;
-        assert!(daemon_version_checks("0.3.0", &f).is_empty());
+        assert!(daemon_version_check("0.3.0", &f).is_none());
     }
 
     #[test]

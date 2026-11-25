@@ -135,12 +135,35 @@ pub fn build_plan(
     Ok(SetupPlan { transport, actions })
 }
 
-/// Skill files and symlinks for `agent`, relative to the scope's `base` directory.
-pub(crate) fn skill_targets(
+/// The skill path `agent` itself reads: the symlink where setup creates one, else the
+/// `SKILL.md` file. `None` only if `agent` gets no skill.
+pub(crate) fn agent_skill_path(
     agent: AgentKind,
     scope: SetupScope,
     base: &Path,
-) -> Vec<(PathBuf, ActionKind)> {
+) -> Option<PathBuf> {
+    skill_targets(agent, scope, base)
+        .pop()
+        .map(|(path, _)| path)
+}
+
+/// The config file holding `agent`'s `citadel` MCP entry, and whether it is TOML.
+pub(crate) fn agent_mcp_config(
+    agent: AgentKind,
+    scope: SetupScope,
+    base: &Path,
+) -> Option<(PathBuf, bool)> {
+    mcp_targets(agent, scope, base)
+        .into_iter()
+        .find_map(|(path, kind)| match kind {
+            ActionKind::MergeJsonMcp { .. } => Some((path, false)),
+            ActionKind::MergeTomlMcp => Some((path, true)),
+            _ => None,
+        })
+}
+
+/// Skill files and symlinks for `agent`, relative to the scope's `base` directory.
+fn skill_targets(agent: AgentKind, scope: SetupScope, base: &Path) -> Vec<(PathBuf, ActionKind)> {
     let canonical_dir = base.join(".agents/skills/citadel");
     let skill_file = (canonical_dir.join("SKILL.md"), ActionKind::WriteSkillFile);
     let symlink = |rel: &str| {
@@ -168,11 +191,7 @@ pub(crate) fn skill_targets(
 }
 
 /// MCP config files for `agent`, relative to the scope's `base` directory.
-pub(crate) fn mcp_targets(
-    agent: AgentKind,
-    scope: SetupScope,
-    base: &Path,
-) -> Vec<(PathBuf, ActionKind)> {
+fn mcp_targets(agent: AgentKind, scope: SetupScope, base: &Path) -> Vec<(PathBuf, ActionKind)> {
     let json = |rel: &str, include_http_type: bool| {
         (
             base.join(rel),
