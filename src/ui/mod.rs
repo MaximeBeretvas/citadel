@@ -281,7 +281,7 @@ mod tests {
             )
             .await
             .expect("register");
-        let held = lifecycle
+        let mut held = lifecycle
             .claim("busy")
             .await
             .expect("claim")
@@ -305,7 +305,7 @@ mod tests {
                 .expect("response");
             assert_eq!(resp.status(), StatusCode::CONFLICT, "{method} {uri}");
         }
-        drop(held);
+        held.release().await;
 
         let resp = app
             .oneshot(
