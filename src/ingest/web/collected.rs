@@ -715,29 +715,40 @@ fn extract_page_markdown_and_title(page: &Page, url: &Url) -> (String, Option<St
         main_content: false,
     };
 
-    let chosen = if let Some(landmark_html) = extract_landmark_html(&cleaned_html) {
-        let landmark_page = page_with_html(url, landmark_html);
-        transform_content(&landmark_page, &fallback_cfg, &None, &None, &None)
-    } else {
-        let html_h1 = extract_html_h1(&cleaned_html);
-        let cleaned_page = page_with_html(url, cleaned_html);
-        let readability_cfg = TransformConfig {
-            readability: true,
-            ..fallback_cfg
-        };
-        let readability_md =
-            transform_content(&cleaned_page, &readability_cfg, &None, &None, &None);
-        let fallback_md = transform_content(&cleaned_page, &fallback_cfg, &None, &None, &None);
+    let chosen = match extract_landmark_html(&cleaned_html) {
+        LandmarkSelection::Single(landmark_html) => {
+            let landmark_page = page_with_html(url, landmark_html);
+            transform_content(&landmark_page, &fallback_cfg, &None, &None, &None)
+        }
+        LandmarkSelection::MultipleArticles => {
+            // Multiple <article> elements without <main> typically represent a card/post listing
+            // that may also have a page-level <h1> or intro outside the cards; convert the
+            // already-stripped HTML directly so Readability neither drops the outside heading
+            // nor truncates to the first <article>.
+            let cleaned_page = page_with_html(url, cleaned_html);
+            transform_content(&cleaned_page, &fallback_cfg, &None, &None, &None)
+        }
+        LandmarkSelection::None => {
+            let html_h1 = extract_html_h1(&cleaned_html);
+            let cleaned_page = page_with_html(url, cleaned_html);
+            let readability_cfg = TransformConfig {
+                readability: true,
+                ..fallback_cfg
+            };
+            let readability_md =
+                transform_content(&cleaned_page, &readability_cfg, &None, &None, &None);
+            let fallback_md = transform_content(&cleaned_page, &fallback_cfg, &None, &None, &None);
 
-        if should_prefer_fallback(
-            &readability_md,
-            &fallback_md,
-            html_title.as_deref(),
-            html_h1.as_deref(),
-        ) {
-            fallback_md
-        } else {
-            readability_md
+            if should_prefer_fallback(
+                &readability_md,
+                &fallback_md,
+                html_title.as_deref(),
+                html_h1.as_deref(),
+            ) {
+                fallback_md
+            } else {
+                readability_md
+            }
         }
     };
 
@@ -747,6 +758,7 @@ fn extract_page_markdown_and_title(page: &Page, url: &Url) -> (String, Option<St
 fn page_with_html(url: &Url, html: String) -> Page {
     let mut page = Page::default();
     page.set_url(url.to_string());
+    page.set_url_parsed(url.clone());
     page.set_html_bytes(Some(html.into_bytes()));
     page
 }
@@ -784,26 +796,34 @@ fn strip_non_content_html(html: &str) -> String {
     .unwrap_or_else(|_| html.to_string())
 }
 
+enum LandmarkSelection {
+    Single(String),
+    MultipleArticles,
+    None,
+}
+
 /// Extract the primary semantic landmark (`<main>`, `[role="main"]`, or a single `<article>`)
 /// when it contains non-whitespace text.
-fn extract_landmark_html(cleaned_html: &str) -> Option<String> {
+fn extract_landmark_html(cleaned_html: &str) -> LandmarkSelection {
     for selector in ["main", "[role=\"main\"]"] {
         if let Some(found) = extract_selector_matches(cleaned_html, selector)
             .into_iter()
             .find(|fragment| has_visible_text(fragment))
         {
-            return Some(found);
+            return LandmarkSelection::Single(found);
         }
     }
 
-    let non_empty_articles: Vec<String> = extract_selector_matches(cleaned_html, "article")
+    let mut non_empty_articles = extract_selector_matches(cleaned_html, "article")
         .into_iter()
-        .filter(|fragment| has_visible_text(fragment))
-        .collect();
-    if non_empty_articles.is_empty() {
-        None
+        .filter(|fragment| has_visible_text(fragment));
+    let Some(first) = non_empty_articles.next() else {
+        return LandmarkSelection::None;
+    };
+    if non_empty_articles.next().is_some() {
+        LandmarkSelection::MultipleArticles
     } else {
-        Some(non_empty_articles.join("\n"))
+        LandmarkSelection::Single(first)
     }
 }
 
@@ -830,6 +850,9 @@ fn extract_selector_matches(html: &str, selector: &str) -> Vec<String> {
         html,
         lol_html::RewriteStrSettings {
             element_content_handlers: vec![lol_html::element!(selector, move |el| {
+                if !el.can_have_content() {
+                    return Ok(());
+                }
                 let d = depth_el.get();
                 depth_el.set(d + 1);
                 if d == 0 {
@@ -896,30 +919,42 @@ fn has_visible_text(html: &str) -> bool {
 }
 
 fn extract_html_h1(html: &str) -> Option<String> {
-    let first_h1 = extract_selector_matches(html, "h1").into_iter().next()?;
-    let mut text = String::new();
-    let _ = lol_html::rewrite_str(
-        &first_h1,
-        lol_html::RewriteStrSettings {
-            element_content_handlers: vec![lol_html::text!("*", |t| {
-                text.push_str(t.as_str());
-                Ok(())
-            })],
-            ..lol_html::RewriteStrSettings::new()
-        },
-    );
-    let collapsed = text.split_whitespace().collect::<Vec<_>>().join(" ");
-    if collapsed.is_empty() {
-        None
-    } else {
-        Some(collapsed)
-    }
+    extract_selector_matches(html, "h1")
+        .into_iter()
+        .find_map(|h1_html| {
+            let mut text = String::new();
+            let _ = lol_html::rewrite_str(
+                &h1_html,
+                lol_html::RewriteStrSettings {
+                    element_content_handlers: vec![lol_html::text!("*", |t| {
+                        text.push_str(t.as_str());
+                        Ok(())
+                    })],
+                    ..lol_html::RewriteStrSettings::new()
+                },
+            );
+            let decoded = decode_basic_html_entities(&text);
+            let collapsed = decoded
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ")
+                .trim_end_matches(['¶', '\u{200B}'])
+                .trim()
+                .to_string();
+            if collapsed.is_empty() {
+                None
+            } else {
+                Some(collapsed)
+            }
+        })
 }
 
 fn normalize_heading_text(raw: &str) -> String {
     raw.split_whitespace()
         .collect::<Vec<_>>()
         .join(" ")
+        .trim_end_matches(['¶', '\u{200B}'])
+        .trim()
         .to_ascii_lowercase()
 }
 
@@ -936,14 +971,26 @@ fn markdown_heading_text(line: &str) -> Option<&str> {
     Some(after.trim())
 }
 
+fn title_matches_heading(norm_title: &str, norm_heading: &str) -> bool {
+    if norm_title == norm_heading {
+        return true;
+    }
+    norm_title
+        .split(['|', '—', '–', ':'])
+        .flat_map(|part| part.split(" - "))
+        .map(str::trim)
+        .filter(|seg| seg.len() >= 3)
+        .any(|seg| seg == norm_heading)
+}
+
 fn has_matching_heading(md: &str, html_title: Option<&str>, html_h1: Option<&str>) -> bool {
-    let norm_title = html_title
-        .map(normalize_heading_text)
-        .filter(|s| !s.is_empty());
     let norm_h1 = html_h1
         .map(normalize_heading_text)
         .filter(|s| !s.is_empty());
-    if norm_title.is_none() && norm_h1.is_none() {
+    let norm_title = html_title
+        .map(normalize_heading_text)
+        .filter(|s| !s.is_empty());
+    if norm_h1.is_none() && norm_title.is_none() {
         return false;
     }
 
@@ -953,14 +1000,10 @@ fn has_matching_heading(md: &str, html_title: Option<&str>, html_h1: Option<&str
             return false;
         }
         if let Some(h1) = norm_h1.as_deref() {
-            if norm_h == h1 || norm_h.contains(h1) {
-                return true;
-            }
+            return norm_h == h1 || norm_h.contains(h1);
         }
         if let Some(title) = norm_title.as_deref() {
-            if norm_h.len() >= 3 && (title == norm_h || title.contains(&norm_h)) {
-                return true;
-            }
+            return title_matches_heading(title, &norm_h);
         }
         false
     })
@@ -2139,6 +2182,74 @@ mod tests {
                 Some("Destinations | Docs"),
                 Some("Destinations"),
             ));
+        }
+
+        #[test]
+        fn non_landmark_page_preserves_base_url_for_relative_links() {
+            let html = r#"<html><body><div><h1>Guide</h1><p>Read the <a href="/docs/next">next page</a> for full details and examples of usage.</p></div></body></html>"#;
+            let md = extract(html);
+            assert!(
+                !md.contains("example.net"),
+                "relative link fell back to example.net: {md}"
+            );
+            assert!(md.contains("docs.example/docs/next"), "{md}");
+        }
+
+        #[test]
+        fn void_role_main_element_does_not_break_landmark_extraction() {
+            let html = r#"<html><body>
+                <input role="main" type="text">
+                <div role="main"><h1>Real</h1><p>Body.</p></div>
+            </body></html>"#;
+            let md = extract(html);
+            assert!(md.contains("Real"), "{md}");
+            assert!(md.contains("Body."), "{md}");
+        }
+
+        #[test]
+        fn multiple_articles_preserve_outside_h1_and_all_cards() {
+            let html = r#"<html><body>
+                <div>
+                    <h1>Catalog</h1>
+                    <p>Intro.</p>
+                    <article><h2>First</h2><p>One.</p></article>
+                    <article><h2>Second</h2><p>Two.</p></article>
+                </div>
+            </body></html>"#;
+            let md = extract(html);
+            assert!(md.contains("Catalog"), "missing outside h1: {md}");
+            assert!(md.contains("Intro."), "missing outside intro: {md}");
+            assert!(md.contains("First"), "{md}");
+            assert!(md.contains("Second"), "{md}");
+        }
+
+        #[test]
+        fn extract_html_h1_decodes_entities_and_skips_empty_first_h1() {
+            let widget_prose = "This demo works on codespaces. ".repeat(30);
+            let html = format!(
+                r#"<html><head><title>Users &amp; Roles | Docs</title></head><body>
+                <h1><img src="/logo.png" alt="Logo"></h1>
+                <div><h1>Users &amp; Roles</h1><p>Short.</p></div>
+                <div class="widget"><h2>DHelp</h2><p>{widget_prose}</p></div>
+                </body></html>"#
+            );
+            let md = extract(&html);
+            assert!(md.contains("Users & Roles"), "missing h1: {md}");
+            assert!(md.contains("Short."), "missing body: {md}");
+        }
+
+        #[test]
+        fn has_matching_heading_does_not_mask_missing_h1_with_title_suffix() {
+            let widget_prose = "This demo works on codespaces. ".repeat(30);
+            let html = format!(
+                r#"<html><head><title>Destinations | Docs</title></head><body>
+                <div><h1>Destinations</h1><p>Short list.</p></div>
+                <div class="widget"><h2>Docs</h2><p>{widget_prose}</p></div>
+                </body></html>"#
+            );
+            let md = extract(&html);
+            assert!(md.contains("# Destinations"), "missing h1: {md}");
+            assert!(md.contains("Short list."), "missing body: {md}");
         }
     }
 }
