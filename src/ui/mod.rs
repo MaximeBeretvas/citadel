@@ -793,6 +793,91 @@ mod tests {
         }
     }
 
+    async fn get_asset_text(app: &Router, uri: &str) -> String {
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri(uri)
+                    .body(Body::empty())
+                    .expect("build asset request"),
+            )
+            .await
+            .expect("asset response");
+        assert_eq!(resp.status(), StatusCode::OK, "expected 200 OK for `{uri}`");
+        read_text_body(resp).await
+    }
+
+    #[tokio::test]
+    async fn ui_assets_include_pages_tooltip_and_accessible_header() {
+        let vault_dir = tempdir().expect("vault tempdir");
+        let app = build_router(VaultConfig::new(vault_dir.path()));
+
+        let index_html = get_asset_text(&app, "/").await;
+        for expected in [
+            "Pages (active)",
+            "id=\"pages-tooltip\"",
+            "popover=\"hint\"",
+            "role=\"tooltip\"",
+        ] {
+            assert!(
+                index_html.contains(expected),
+                "index.html missing `{expected}`"
+            );
+        }
+
+        let app_js = get_asset_text(&app, "/app.js").await;
+        for expected in [
+            "formatPagesBreakdown",
+            "aria-describedby",
+            "browse-status",
+            "initPagesTooltip",
+        ] {
+            assert!(app_js.contains(expected), "app.js missing `{expected}`");
+        }
+
+        let style_css = get_asset_text(&app, "/style.css").await;
+        for expected in [".pages-tooltip", ".pages-count-btn"] {
+            assert!(
+                style_css.contains(expected),
+                "style.css missing `{expected}`"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn ui_assets_include_browser_error_banner_and_drilldown() {
+        let vault_dir = tempdir().expect("vault tempdir");
+        let app = build_router(VaultConfig::new(vault_dir.path()));
+
+        let app_js = get_asset_text(&app, "/app.js").await;
+        for expected in [
+            "renderPageStatusBanner",
+            "navigateToBrowser",
+            "error_message",
+            "hasFailingHttp",
+        ] {
+            assert!(app_js.contains(expected), "app.js missing `{expected}`");
+        }
+    }
+
+    #[tokio::test]
+    async fn ui_assets_reset_and_hide_pages_tooltip_safely() {
+        let vault_dir = tempdir().expect("vault tempdir");
+        let app = build_router(VaultConfig::new(vault_dir.path()));
+
+        let app_js = get_asset_text(&app, "/app.js").await;
+        for expected in [
+            "hidePagesTooltip()",
+            "tooltip.style.left = \"0px\"",
+            "tooltip.style.top = \"0px\"",
+            "tooltip.hidden = true;",
+        ] {
+            assert!(app_js.contains(expected), "app.js missing `{expected}`");
+        }
+    }
+
     #[tokio::test]
     async fn assets_contain_zero_external_cdn_links() {
         let vault_dir = tempdir().expect("vault tempdir");

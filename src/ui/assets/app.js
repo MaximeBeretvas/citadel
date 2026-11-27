@@ -171,14 +171,49 @@
   }
 
   // Routing
+  const VALID_PAGE_STATUSES = ["active", "stale", "error"];
+
   function parseHashView() {
     const raw = (window.location.hash || "").replace(/^#/, "").trim().toLowerCase();
     const view = raw.split("?")[0];
     return VALID_VIEWS.includes(view) ? view : "sources";
   }
 
+  function parseHashParams() {
+    const raw = (window.location.hash || "").replace(/^#/, "");
+    const qIdx = raw.indexOf("?");
+    return new URLSearchParams(qIdx >= 0 ? raw.slice(qIdx + 1) : "");
+  }
+
+  function navigateToBrowser(sourceId, status) {
+    const cleanSource = sourceId !== null && sourceId !== undefined && sourceId !== "" ? String(sourceId) : "";
+    const cleanStatus = VALID_PAGE_STATUSES.includes(status) ? status : "";
+
+    const sourceSelect = el("browser-source-select");
+    const statusSelect = el("browser-status-select");
+    const searchInput = el("browser-search-input");
+    if (sourceSelect) sourceSelect.value = cleanSource;
+    if (statusSelect) statusSelect.value = cleanStatus;
+    if (searchInput) searchInput.value = "";
+
+    const params = new URLSearchParams();
+    if (cleanSource) params.set("source", cleanSource);
+    if (cleanStatus) params.set("status", cleanStatus);
+    const qs = params.toString();
+    const targetHash = qs ? `#browser?${qs}` : "#browser";
+
+    if (window.location.hash === targetHash) {
+      void loadBrowserView();
+    } else {
+      window.location.hash = targetHash;
+    }
+  }
+
   function setActiveView(view, shouldLoad = true) {
     state.view = VALID_VIEWS.includes(view) ? view : "sources";
+    if (state.view !== "sources") {
+      hidePagesTooltip();
+    }
 
     document.querySelectorAll(".view").forEach((sec) => {
       sec.hidden = sec.getAttribute("data-view") !== state.view;
@@ -307,7 +342,183 @@
     el("kpi-total-words").textContent = formatNumber(totalWords);
   }
 
+  function formatPagesBreakdown(source) {
+    const active = Number(source.active_pages || 0);
+    const stale = Number(source.stale_pages || 0);
+    const errors = Number(source.error_pages || 0);
+    const activeWord = active === 1 ? "page" : "pages";
+    const errorWord = errors === 1 ? "error" : "errors";
+    return `${formatNumber(active)} active ${activeWord} · ${formatNumber(stale)} stale (no longer fetched, last good copy kept) · ${formatNumber(errors)} ${errorWord} (last fetch failed)`;
+  }
+
+  function renderPagesCountButton(sourceId, status, label, descId) {
+    return `<button type="button" class="pages-count-btn pages-count-${status}" data-action="browse-status" data-id="${sourceId}" data-status="${status}" aria-describedby="${descId}">${label}</button>`;
+  }
+
+  function renderPagesCell(s) {
+    const active = Number(s.active_pages || 0);
+    const stale = Number(s.stale_pages || 0);
+    const errors = Number(s.error_pages || 0);
+    const breakdown = formatPagesBreakdown(s);
+    const descId = `pages-desc-${s.id}`;
+
+    let activeHtml;
+    if (active > 0) {
+      activeHtml = renderPagesCountButton(s.id, "active", formatNumber(active), descId);
+    } else if (stale + errors === 0) {
+      activeHtml = `<span class="pages-zero-trigger" tabindex="0" aria-describedby="${descId}">0</span>`;
+    } else {
+      activeHtml = "<span>0</span>";
+    }
+
+    let staleOrErrHtml = "";
+    if (stale + errors > 0) {
+      const stalePart =
+        stale > 0
+          ? renderPagesCountButton(s.id, "stale", `${formatNumber(stale)}s`, descId)
+          : "<span>0s</span>";
+      const errorPart =
+        errors > 0
+          ? renderPagesCountButton(s.id, "error", `${formatNumber(errors)}e`, descId)
+          : "<span>0e</span>";
+      staleOrErrHtml = `<span class="muted-meta pages-meta">(${stalePart} / ${errorPart})</span>`;
+    }
+
+    return `<td class="num pages-cell" data-pages-tooltip="${escapeHtml(breakdown)}"><span id="${descId}" class="sr-only">${escapeHtml(breakdown)}</span>${activeHtml}${staleOrErrHtml}</td>`;
+  }
+
+  let hidePagesTooltip = () => {};
+
+  function positionPagesTooltip(tooltip, anchorEl) {
+    const pad = 8;
+    const gap = 8;
+    tooltip.style.left = "0px";
+    tooltip.style.top = "0px";
+    const anchorRect = anchorEl.getBoundingClientRect();
+    const tipRect = tooltip.getBoundingClientRect();
+
+    let top = anchorRect.top - tipRect.height - gap;
+    if (top < pad) {
+      top = anchorRect.bottom + gap;
+    }
+    const maxTop = Math.max(pad, window.innerHeight - tipRect.height - pad);
+    top = Math.min(Math.max(pad, top), maxTop);
+
+    const idealLeft = anchorRect.left + anchorRect.width / 2 - tipRect.width / 2;
+    const maxLeft = Math.max(pad, window.innerWidth - tipRect.width - pad);
+    const left = Math.min(Math.max(pad, idealLeft), maxLeft);
+
+    tooltip.style.top = `${Math.round(top)}px`;
+    tooltip.style.left = `${Math.round(left)}px`;
+  }
+
+  function initPagesTooltip() {
+    const tooltip = el("pages-tooltip");
+    const tbody = el("sources-tbody");
+    if (!tooltip || !tbody) return;
+
+    // Feature-detect popover="hint"; fall back to "manual" where unsupported (e.g. Safari)
+    if ("popover" in HTMLElement.prototype) {
+      const probe = document.createElement("div");
+      probe.popover = "hint";
+      if (probe.popover !== "hint") {
+        tooltip.setAttribute("popover", "manual");
+      }
+    } else {
+      tooltip.hidden = true;
+    }
+
+    let activeCell = null;
+    let hideTimer = null;
+
+    const cancelHide = () => {
+      if (hideTimer !== null) {
+        window.clearTimeout(hideTimer);
+        hideTimer = null;
+      }
+    };
+
+    const hideNow = () => {
+      cancelHide();
+      activeCell = null;
+      if (typeof tooltip.hidePopover === "function") {
+        try {
+          if (tooltip.matches(":popover-open")) {
+            tooltip.hidePopover();
+          }
+        } catch {
+          // Ignore if already closed.
+        }
+      } else {
+        tooltip.hidden = true;
+      }
+    };
+
+    hidePagesTooltip = hideNow;
+
+    const scheduleHide = () => {
+      cancelHide();
+      hideTimer = window.setTimeout(hideNow, 120);
+    };
+
+    const showForCell = (cell) => {
+      const text = cell.getAttribute("data-pages-tooltip");
+      if (!text) return;
+      cancelHide();
+      activeCell = cell;
+      tooltip.textContent = text;
+      if (typeof tooltip.showPopover === "function") {
+        try {
+          if (!tooltip.matches(":popover-open")) {
+            tooltip.showPopover();
+          }
+        } catch {
+          // Ignore if already open.
+        }
+      } else {
+        tooltip.hidden = false;
+      }
+      positionPagesTooltip(tooltip, cell);
+    };
+
+    const handleTriggerEnter = (event) => {
+      const cell = event.target.closest("td[data-pages-tooltip]");
+      if (cell) showForCell(cell);
+    };
+
+    const handleTriggerLeave = (event) => {
+      const cell = event.target.closest("td[data-pages-tooltip]");
+      if (!cell) return;
+      const next = event.relatedTarget;
+      if (next && (cell.contains(next) || tooltip.contains(next))) return;
+      scheduleHide();
+    };
+
+    const hideIfActive = () => {
+      if (activeCell) hideNow();
+    };
+
+    tbody.addEventListener("mouseover", handleTriggerEnter);
+    tbody.addEventListener("focusin", handleTriggerEnter);
+    tbody.addEventListener("mouseout", handleTriggerLeave);
+    tbody.addEventListener("focusout", handleTriggerLeave);
+
+    tooltip.addEventListener("mouseenter", cancelHide);
+    tooltip.addEventListener("mouseleave", (event) => {
+      const next = event.relatedTarget;
+      if (activeCell && next && activeCell.contains(next)) return;
+      scheduleHide();
+    });
+
+    document.addEventListener("keydown", (event) => {
+      if (event.key === "Escape") hideIfActive();
+    });
+    window.addEventListener("scroll", hideIfActive, true);
+    window.addEventListener("resize", hideIfActive);
+  }
+
   function renderSourcesTable(sources) {
+    hidePagesTooltip();
     const tbody = el("sources-tbody");
     if (!tbody) return;
     if (!sources.length) {
@@ -321,10 +532,6 @@
         const tagsHtml =
           Array.isArray(s.tags) && s.tags.length
             ? `<div class="tag-list">${s.tags.map((t) => `<span class="tag">${escapeHtml(t)}</span>`).join("")}</div>`
-            : "";
-        const staleOrErr =
-          Number(s.stale_pages || 0) + Number(s.error_pages || 0) > 0
-            ? ` <span class="muted-meta">(${s.stale_pages}s / ${s.error_pages}e)</span>`
             : "";
 
         const isConfirming = state.confirmDeleteId === s.id;
@@ -341,7 +548,7 @@
           </td>
           <td><span class="badge badge-kind">${escapeHtml(s.kind)}</span></td>
           <td>${renderStatusBadge(s.status)}</td>
-          <td class="num">${formatNumber(s.active_pages)}${staleOrErr}</td>
+          ${renderPagesCell(s)}
           <td class="num">${formatNumber(s.total_words)}</td>
           <td class="mono">${escapeHtml(formatTimestamp(s.last_synced_at))}</td>
           <td class="actions-col">
@@ -364,9 +571,13 @@
     const id = Number(btn.getAttribute("data-id"));
 
     if (action === "browse") {
-      const select = el("browser-source-select");
-      if (select) select.value = String(id);
-      window.location.hash = "#browser";
+      navigateToBrowser(id, "");
+      return;
+    }
+
+    if (action === "browse-status") {
+      const status = btn.getAttribute("data-status") || "";
+      navigateToBrowser(id, status);
       return;
     }
 
@@ -539,6 +750,22 @@
         // Handled below
       }
     }
+    const params = parseHashParams();
+    const sourceParam = params.get("source");
+    const statusParam = params.get("status");
+    const sourceSelect = el("browser-source-select");
+    const statusSelect = el("browser-status-select");
+
+    if (sourceParam && sourceSelect && state.sources.some((s) => String(s.id) === sourceParam)) {
+      sourceSelect.value = sourceParam;
+    }
+    if (statusSelect) {
+      if (statusParam && VALID_PAGE_STATUSES.includes(statusParam)) {
+        statusSelect.value = statusParam;
+      } else if (sourceParam && !params.has("status")) {
+        statusSelect.value = "";
+      }
+    }
     await searchBrowserPages();
   }
 
@@ -646,11 +873,16 @@
     listEl.innerHTML = state.browserPages
       .map((p) => {
         const selectedClass = p.id === state.selectedPageId ? " selected" : "";
+        const httpMeta =
+          p.status === "error" && p.http_status !== null && p.http_status !== undefined
+            ? `<span class="mono">HTTP ${escapeHtml(p.http_status)}</span>`
+            : "";
         return `<button type="button" class="page-item${selectedClass}" data-page-id="${p.id}" role="option" aria-selected="${p.id === state.selectedPageId}">
           <span class="page-item-title">${escapeHtml(p.title || p.uri)}</span>
           <span class="page-item-uri">${escapeHtml(p.uri)}</span>
           <span class="page-item-meta">
             ${renderStatusBadge(p.status)}
+            ${httpMeta}
             <span>${formatNumber(p.word_count)} words</span>
           </span>
         </button>`;
@@ -669,6 +901,28 @@
     } catch (err) {
       detailEl.innerHTML = `<div class="empty-state">Failed to load page: ${escapeHtml(err.message)}</div>`;
     }
+  }
+
+  function renderPageStatusBanner(page) {
+    const status = String(page.status || "").toLowerCase();
+    const errMsg = typeof page.error_message === "string" ? page.error_message.trim() : "";
+    const hasHttp = page.http_status !== null && page.http_status !== undefined;
+    const hasFailingHttp = hasHttp && Number(page.http_status) >= 400;
+
+    if (status === "error" || errMsg || hasFailingHttp) {
+      const parts = [];
+      const httpPrefix = hasHttp ? `HTTP ${page.http_status}` : "";
+      if (httpPrefix && !errMsg.startsWith(httpPrefix)) parts.push(httpPrefix);
+      if (errMsg) parts.push(errMsg);
+      const detail = parts.length ? parts.join(" — ") : "Last fetch failed.";
+      return `<div class="alert alert-error detail-status-banner" role="alert"><strong>Fetch error:</strong> ${escapeHtml(detail)}</div>`;
+    }
+
+    if (status === "stale") {
+      return '<div class="alert alert-warn detail-status-banner" role="status"><strong>Stale page:</strong> No longer fetched on the last sync; last good copy is kept.</div>';
+    }
+
+    return "";
   }
 
   function renderPageDetail(page) {
@@ -711,6 +965,7 @@
           <span>${formatNumber(page.word_count)} words</span>
           <span class="mono">Changed: ${escapeHtml(formatTimestamp(page.last_changed_at))}</span>
         </div>
+        ${renderPageStatusBanner(page)}
       </div>
       <div class="detail-body">${contentHtml}</div>
     `;
@@ -1044,6 +1299,7 @@
   function boot() {
     initTheme();
     initUpdatePopover();
+    initPagesTooltip();
     initSqlPresets();
     initEvents();
     void loadVersion();

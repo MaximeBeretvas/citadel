@@ -886,6 +886,10 @@ h3 {
   color: var(--text-muted);
 }
 
+.detail-status-banner {
+  margin-top: var(--space-1);
+}
+
 .detail-body {
   padding: var(--space-4) 18px;
   display: flex;
@@ -1186,6 +1190,97 @@ h3 {
   box-shadow: var(--shadow-sm);
 }
 
+/* Sources Pages Cell & Top-Layer Tooltip */
+.pages-cell {
+  white-space: nowrap;
+}
+
+.pages-count-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 24px;
+  padding: 1px 5px;
+  border-radius: 4px;
+  border: 1px solid transparent;
+  background: transparent;
+  font: inherit;
+  color: inherit;
+  cursor: pointer;
+  touch-action: manipulation;
+  text-decoration: underline dotted var(--border-strong);
+  text-underline-offset: 3px;
+  transition: background 0.16s ease, color 0.16s ease, border-color 0.16s ease;
+}
+
+.pages-count-btn:hover,
+.pages-count-btn:focus-visible {
+  text-decoration: none;
+}
+
+.pages-count-active:hover,
+.pages-count-active:focus-visible {
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
+.pages-count-stale {
+  color: var(--warn);
+}
+
+.pages-count-stale:hover,
+.pages-count-stale:focus-visible {
+  background: var(--warn-bg);
+  color: var(--warn);
+}
+
+.pages-count-error {
+  color: var(--err-text);
+}
+
+.pages-count-error:hover,
+.pages-count-error:focus-visible {
+  background: var(--err-bg);
+  color: var(--err-text);
+}
+
+.pages-meta {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  margin-left: 4px;
+}
+
+.pages-zero-trigger {
+  display: inline-flex;
+  align-items: center;
+  min-height: 24px;
+  padding: 1px 4px;
+  border-radius: 4px;
+  text-decoration: underline dotted var(--border-strong);
+  text-underline-offset: 3px;
+  cursor: help;
+}
+
+.pages-tooltip {
+  position: fixed;
+  inset: auto;
+  margin: 0;
+  z-index: 50;
+  max-width: min(360px, calc(100vw - 16px));
+  padding: 8px 11px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border-strong);
+  background: var(--surface);
+  color: var(--text);
+  box-shadow: var(--shadow-md);
+  font-family: var(--font-sans);
+  font-size: 12.5px;
+  line-height: 1.45;
+  white-space: normal;
+  text-align: left;
+}
+
 /* Responsive */
 @media (max-width: 960px) {
   .browser-split,
@@ -1253,6 +1348,15 @@ h3 {
   .data-table th,
   .data-table td {
     padding: 8px 10px;
+  }
+
+  .pages-meta {
+    gap: 4px;
+  }
+
+  .pages-count-btn {
+    min-height: 32px;
+    padding: 2px 6px;
   }
 }
 
