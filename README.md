@@ -1,8 +1,12 @@
 <p align="center">
-  <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="Docs/assets/logo/citadel-horizontal-reversed.svg" />
-    <img src="Docs/assets/logo/citadel-horizontal.svg" alt="Citadel" width="360" />
-  </picture>
+  <img src="Docs/assets/logo/citadel-intro.gif" alt="Citadel logo: local knowledge vault &amp; MCP server for docs" width="720" />
+</p>
+
+<p align="center">
+  <a href="https://github.com/MaximeBeretvas/citadel/actions/workflows/ci.yml?query=branch%3Amain"><img src="https://img.shields.io/github/actions/workflow/status/MaximeBeretvas/citadel/ci.yml?branch=main&label=CI" alt="CI status" /></a>
+  <a href="https://github.com/MaximeBeretvas/citadel/releases/latest"><img src="https://img.shields.io/github/v/release/MaximeBeretvas/citadel" alt="Latest release" /></a>
+  <a href="LICENSE"><img src="https://img.shields.io/github/license/MaximeBeretvas/citadel" alt="License: Apache-2.0" /></a>
+  <img src="https://img.shields.io/badge/platform-macOS%20%7C%20Linux-lightgrey" alt="Platforms: macOS and Linux" />
 </p>
 
 Local knowledge vault and MCP server for web documentation sites and local Markdown folders. `citadel` crawls documentation sites, watches local Markdown directories, indexes content into SQLite + FTS5 with section splitting and unified diff history, and serves an offline embedded Web UI alongside a 2-tool MCP interface.
@@ -10,7 +14,7 @@ Local knowledge vault and MCP server for web documentation sites and local Markd
 ## Key Features
 
 - **Unified ingestion:** Crawl `http(s)://` docs sites (`spider`, `sitemap.xml`, `llms.txt`, optional headless Chromium) and watch local Markdown folders with incremental SHA-256 diffing and `stale`/`error` tracking.
-- **SQLite + FTS5 search:** Single-file WAL database with heading-level sections (`H1`–`H3`), breadcrumbs, and full-text search views (`v_sources`, `v_recent_changes`, `pages_fts`, `sections_fts`).
+- **SQLite + FTS5 search:** Single-file WAL database with heading-level sections (`H1`–`H3`), breadcrumbs, FTS5 tables (`pages_fts`, `sections_fts`), and query views (`v_sources`, `v_recent_changes`).
 - **Hardened 2-tool MCP server:** Exposes `query` (strictly read-only SQLite authorizer, 5s timeout, row/byte caps) and `manage` (Private-origin-guarded URL and canonicalized path validation) over Streamable HTTP (`/mcp`) or `stdio`.
 - **Self-contained runtime:** Single Rust binary with bundled SQLite and `rust-embed` offline Web UI (Sources, Knowledge Browser, Changes & Health, SQL Explorer).
 
@@ -25,7 +29,7 @@ Measured on an M1 Pro Mac with a real docs site (500 pages of dlthub docs):
 | `citadel mcp`, agent queries | under 8 MB | ~3 ms per query |
 | `citadel ui` | under 10 MB | negligible |
 
-Method, every scenario, and caveats: [Docs/resource-usage.md](Docs/resource-usage.md).
+Method, every scenario, and caveats (measured on `v0.1.0`): [Docs/resource-usage.md](Docs/resource-usage.md).
 
 ## Install (Recommended)
 
@@ -130,13 +134,13 @@ In the container, run the same commands through `make exec`, for example `make e
 `citadel` exposes two MCP tools:
 
 - **`query`**: Execute a single read-only SQLite/FTS5 `SELECT` statement against the vault (`v_sources`, `pages`, `sections`, `pages_fts`, `sections_fts`, `v_recent_changes`) with `SQLITE_OPEN_READ_ONLY`, `PRAGMA query_only = ON`, authorizer allowlist, 5-second timeout, and row/byte caps.
-- **`manage`**: Register, update, sync, or remove sources (`add`, `update`, `sync`, `remove`) with directory canonicalization on local paths. Every entry point (CLI, UI, MCP) refuses Private origins (loopback, private network, link-local, CGNAT, `localhost`); set `CITADEL_ALLOW_PRIVATE_ORIGINS=1` to index intranet or `localhost` docs.
+- **`manage`**: Register, update, sync, or remove sources (`add`, `update`, `sync`, `remove`) with directory canonicalization on local paths. Every entry point (CLI, UI, MCP, daemon) refuses Private origins (loopback, private network, link-local, CGNAT, `localhost`); set `CITADEL_ALLOW_PRIVATE_ORIGINS=1` to index intranet or `localhost` docs.
 
 `citadel setup` (see [Agent Skill Installation](#agent-skill-installation)) writes these entries for Claude, Antigravity, and Codex. Use the snippets below for other clients or to configure by hand.
 
 ### Streamable HTTP (Recommended with `citadel serve` or the container)
 
-Point Claude, Antigravity, or any Streamable HTTP MCP client to:
+Point Antigravity or any Streamable HTTP MCP client to the endpoint below. Claude Code also needs `"type": "http"` in the `citadel` entry (`citadel setup` adds it for you):
 
 ```json
 {
@@ -219,10 +223,34 @@ Add `--force` to overwrite an existing `SKILL.md` or symlink.
 | `citadel rm <NAME> [--yes]` | Remove a source and cascade-delete its indexed pages. |
 | `citadel query "<SQL>" [--limit N] [--format table\|json\|csv]` | Run a read-only SQLite/FTS5 query against the vault (default 50 rows, max 200). |
 | `citadel ui [--port PORT] [--no-open]` | Launch the embedded local Web UI server on `127.0.0.1` (default port 4317; falls back to a free port if 4317 is taken). |
-| `citadel serve [--bind ADDR]` | Run the all-in-one server (daemon + Web UI + MCP Streamable HTTP on `/mcp`); default bind `0.0.0.0:4317`. |
+| `citadel serve [--bind ADDR]` | Run the all-in-one server (daemon + Web UI + MCP Streamable HTTP on `/mcp`); default bind `0.0.0.0:4317` (also respects `CITADEL_BIND`). |
 | `citadel mcp` | Run the MCP server over `stdio` (newline-delimited JSON-RPC 2.0). |
-| `citadel daemon <start\|stop\|status\|install\|uninstall>` | Manage the background scheduler/watcher and OS service registration. |
+| `citadel daemon <start [--foreground]\|stop\|status\|install\|uninstall>` | Manage the background scheduler/watcher and OS service registration. |
 | `citadel doctor [--json]` | Read-only health report: versions, what is running, and where the skill and MCP entry are set up. Exits 1 if a check fails. |
 | `citadel skill install [--global [--target T] \| --path DIR] [--force]` | Install the embedded agent router `SKILL.md`. |
 | `citadel setup [--agent A] [--scope S] [--transport T] [--only O] [--force] [-y]` | Wizard that installs the skill and MCP entry for Claude, Antigravity (`agy`), and Codex. |
 | `citadel update [--check] [-y]` | Check for or install the latest GitHub Release binary (macOS and Linux). |
+
+All commands also accept `--data-dir <DIR>` (or `CITADEL_HOME`) to override the vault data directory.
+
+## Documentation
+
+- [Docs/PRD.md](Docs/PRD.md) — Product scope, user journeys, and requirements.
+- [Docs/SPEC.md](Docs/SPEC.md) — Architecture, SQLite + FTS5 schema, MCP contracts, and deployment details.
+- [Docs/resource-usage.md](Docs/resource-usage.md) — Memory and CPU measurements and how they were taken.
+- [Docs/adr/](Docs/adr/) — Architecture decision records.
+- [CONTEXT.md](CONTEXT.md) — Domain glossary (Source, Origin, Sync, Sync claim).
+
+## Development
+
+Contributors and coding agents follow [AGENTS.md](AGENTS.md). Every change must pass:
+
+```bash
+cargo fmt --check
+cargo clippy --all-targets -- -D warnings
+cargo test
+```
+
+## License
+
+Licensed under the [Apache License, Version 2.0](LICENSE).
