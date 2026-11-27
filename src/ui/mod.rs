@@ -793,24 +793,28 @@ mod tests {
         }
     }
 
+    async fn get_asset_text(app: &Router, uri: &str) -> String {
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri(uri)
+                    .body(Body::empty())
+                    .expect("build asset request"),
+            )
+            .await
+            .expect("asset response");
+        assert_eq!(resp.status(), StatusCode::OK, "expected 200 OK for `{uri}`");
+        read_text_body(resp).await
+    }
+
     #[tokio::test]
     async fn ui_assets_include_pages_tooltip_and_accessible_header() {
         let vault_dir = tempdir().expect("vault tempdir");
         let app = build_router(VaultConfig::new(vault_dir.path()));
 
-        let index_resp = app
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .method(Method::GET)
-                    .uri("/")
-                    .body(Body::empty())
-                    .expect("GET /"),
-            )
-            .await
-            .expect("GET / response");
-        assert_eq!(index_resp.status(), StatusCode::OK);
-        let index_html = read_text_body(index_resp).await;
+        let index_html = get_asset_text(&app, "/").await;
         for expected in [
             "Pages (active)",
             "id=\"pages-tooltip\"",
@@ -823,19 +827,7 @@ mod tests {
             );
         }
 
-        let js_resp = app
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .method(Method::GET)
-                    .uri("/app.js")
-                    .body(Body::empty())
-                    .expect("GET /app.js"),
-            )
-            .await
-            .expect("GET /app.js response");
-        assert_eq!(js_resp.status(), StatusCode::OK);
-        let app_js = read_text_body(js_resp).await;
+        let app_js = get_asset_text(&app, "/app.js").await;
         for expected in [
             "formatPagesBreakdown",
             "aria-describedby",
@@ -845,18 +837,7 @@ mod tests {
             assert!(app_js.contains(expected), "app.js missing `{expected}`");
         }
 
-        let css_resp = app
-            .oneshot(
-                Request::builder()
-                    .method(Method::GET)
-                    .uri("/style.css")
-                    .body(Body::empty())
-                    .expect("GET /style.css"),
-            )
-            .await
-            .expect("GET /style.css response");
-        assert_eq!(css_resp.status(), StatusCode::OK);
-        let style_css = read_text_body(css_resp).await;
+        let style_css = get_asset_text(&app, "/style.css").await;
         for expected in [".pages-tooltip", ".pages-count-btn"] {
             assert!(
                 style_css.contains(expected),
@@ -870,22 +851,12 @@ mod tests {
         let vault_dir = tempdir().expect("vault tempdir");
         let app = build_router(VaultConfig::new(vault_dir.path()));
 
-        let js_resp = app
-            .oneshot(
-                Request::builder()
-                    .method(Method::GET)
-                    .uri("/app.js")
-                    .body(Body::empty())
-                    .expect("GET /app.js"),
-            )
-            .await
-            .expect("GET /app.js response");
-        assert_eq!(js_resp.status(), StatusCode::OK);
-        let app_js = read_text_body(js_resp).await;
+        let app_js = get_asset_text(&app, "/app.js").await;
         for expected in [
             "renderPageStatusBanner",
             "navigateToBrowser",
             "error_message",
+            "hasFailingHttp",
         ] {
             assert!(app_js.contains(expected), "app.js missing `{expected}`");
         }
@@ -896,22 +867,12 @@ mod tests {
         let vault_dir = tempdir().expect("vault tempdir");
         let app = build_router(VaultConfig::new(vault_dir.path()));
 
-        let js_resp = app
-            .oneshot(
-                Request::builder()
-                    .method(Method::GET)
-                    .uri("/app.js")
-                    .body(Body::empty())
-                    .expect("GET /app.js"),
-            )
-            .await
-            .expect("GET /app.js response");
-        assert_eq!(js_resp.status(), StatusCode::OK);
-        let app_js = read_text_body(js_resp).await;
+        let app_js = get_asset_text(&app, "/app.js").await;
         for expected in [
             "hidePagesTooltip()",
             "tooltip.style.left = \"0px\"",
             "tooltip.style.top = \"0px\"",
+            "tooltip.hidden = true;",
         ] {
             assert!(app_js.contains(expected), "app.js missing `{expected}`");
         }

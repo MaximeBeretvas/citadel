@@ -351,6 +351,10 @@
     return `${formatNumber(active)} active ${activeWord} · ${formatNumber(stale)} stale (no longer fetched, last good copy kept) · ${formatNumber(errors)} ${errorWord} (last fetch failed)`;
   }
 
+  function renderPagesCountButton(sourceId, status, label, descId) {
+    return `<button type="button" class="pages-count-btn pages-count-${status}" data-action="browse-status" data-id="${sourceId}" data-status="${status}" aria-describedby="${descId}">${label}</button>`;
+  }
+
   function renderPagesCell(s) {
     const active = Number(s.active_pages || 0);
     const stale = Number(s.stale_pages || 0);
@@ -360,7 +364,7 @@
 
     let activeHtml;
     if (active > 0) {
-      activeHtml = `<button type="button" class="pages-count-btn pages-count-active" data-action="browse-status" data-id="${s.id}" data-status="active" aria-describedby="${descId}">${formatNumber(active)}</button>`;
+      activeHtml = renderPagesCountButton(s.id, "active", formatNumber(active), descId);
     } else if (stale + errors === 0) {
       activeHtml = `<span class="pages-zero-trigger" tabindex="0" aria-describedby="${descId}">0</span>`;
     } else {
@@ -371,11 +375,11 @@
     if (stale + errors > 0) {
       const stalePart =
         stale > 0
-          ? `<button type="button" class="pages-count-btn pages-count-stale" data-action="browse-status" data-id="${s.id}" data-status="stale" aria-describedby="${descId}">${formatNumber(stale)}s</button>`
+          ? renderPagesCountButton(s.id, "stale", `${formatNumber(stale)}s`, descId)
           : "<span>0s</span>";
       const errorPart =
         errors > 0
-          ? `<button type="button" class="pages-count-btn pages-count-error" data-action="browse-status" data-id="${s.id}" data-status="error" aria-describedby="${descId}">${formatNumber(errors)}e</button>`
+          ? renderPagesCountButton(s.id, "error", `${formatNumber(errors)}e`, descId)
           : "<span>0e</span>";
       staleOrErrHtml = `<span class="muted-meta pages-meta">(${stalePart} / ${errorPart})</span>`;
     }
@@ -420,6 +424,8 @@
       if (probe.popover !== "hint") {
         tooltip.setAttribute("popover", "manual");
       }
+    } else {
+      tooltip.hidden = true;
     }
 
     let activeCell = null;
@@ -475,35 +481,27 @@
       positionPagesTooltip(tooltip, cell);
     };
 
-    tbody.addEventListener("mouseover", (event) => {
+    const handleTriggerEnter = (event) => {
       const cell = event.target.closest("td[data-pages-tooltip]");
-      if (cell) {
-        showForCell(cell);
-      }
-    });
+      if (cell) showForCell(cell);
+    };
 
-    tbody.addEventListener("mouseout", (event) => {
+    const handleTriggerLeave = (event) => {
       const cell = event.target.closest("td[data-pages-tooltip]");
       if (!cell) return;
       const next = event.relatedTarget;
       if (next && (cell.contains(next) || tooltip.contains(next))) return;
       scheduleHide();
-    });
+    };
 
-    tbody.addEventListener("focusin", (event) => {
-      const cell = event.target.closest("td[data-pages-tooltip]");
-      if (cell) {
-        showForCell(cell);
-      }
-    });
+    const hideIfActive = () => {
+      if (activeCell) hideNow();
+    };
 
-    tbody.addEventListener("focusout", (event) => {
-      const cell = event.target.closest("td[data-pages-tooltip]");
-      if (!cell) return;
-      const next = event.relatedTarget;
-      if (next && (cell.contains(next) || tooltip.contains(next))) return;
-      scheduleHide();
-    });
+    tbody.addEventListener("mouseover", handleTriggerEnter);
+    tbody.addEventListener("focusin", handleTriggerEnter);
+    tbody.addEventListener("mouseout", handleTriggerLeave);
+    tbody.addEventListener("focusout", handleTriggerLeave);
 
     tooltip.addEventListener("mouseenter", cancelHide);
     tooltip.addEventListener("mouseleave", (event) => {
@@ -513,18 +511,10 @@
     });
 
     document.addEventListener("keydown", (event) => {
-      if (event.key === "Escape" && activeCell) {
-        hideNow();
-      }
+      if (event.key === "Escape") hideIfActive();
     });
-
-    window.addEventListener("scroll", () => {
-      if (activeCell) hideNow();
-    }, true);
-
-    window.addEventListener("resize", () => {
-      if (activeCell) hideNow();
-    });
+    window.addEventListener("scroll", hideIfActive, true);
+    window.addEventListener("resize", hideIfActive);
   }
 
   function renderSourcesTable(sources) {
@@ -917,10 +907,12 @@
     const status = String(page.status || "").toLowerCase();
     const errMsg = typeof page.error_message === "string" ? page.error_message.trim() : "";
     const hasHttp = page.http_status !== null && page.http_status !== undefined;
+    const hasFailingHttp = hasHttp && Number(page.http_status) >= 400;
 
-    if (status === "error" || errMsg) {
+    if (status === "error" || errMsg || hasFailingHttp) {
       const parts = [];
-      if (hasHttp) parts.push(`HTTP ${page.http_status}`);
+      const httpPrefix = hasHttp ? `HTTP ${page.http_status}` : "";
+      if (httpPrefix && !errMsg.startsWith(httpPrefix)) parts.push(httpPrefix);
       if (errMsg) parts.push(errMsg);
       const detail = parts.length ? parts.join(" — ") : "Last fetch failed.";
       return `<div class="alert alert-error detail-status-banner" role="alert"><strong>Fetch error:</strong> ${escapeHtml(detail)}</div>`;
