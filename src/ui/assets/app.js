@@ -211,6 +211,9 @@
 
   function setActiveView(view, shouldLoad = true) {
     state.view = VALID_VIEWS.includes(view) ? view : "sources";
+    if (state.view !== "sources") {
+      hidePagesTooltip();
+    }
 
     document.querySelectorAll(".view").forEach((sec) => {
       sec.hidden = sec.getAttribute("data-view") !== state.view;
@@ -380,9 +383,13 @@
     return `<td class="num pages-cell" data-pages-tooltip="${escapeHtml(breakdown)}"><span id="${descId}" class="sr-only">${escapeHtml(breakdown)}</span>${activeHtml}${staleOrErrHtml}</td>`;
   }
 
+  let hidePagesTooltip = () => {};
+
   function positionPagesTooltip(tooltip, anchorEl) {
     const pad = 8;
     const gap = 8;
+    tooltip.style.left = "0px";
+    tooltip.style.top = "0px";
     const anchorRect = anchorEl.getBoundingClientRect();
     const tipRect = tooltip.getBoundingClientRect();
 
@@ -440,6 +447,8 @@
         tooltip.hidden = true;
       }
     };
+
+    hidePagesTooltip = hideNow;
 
     const scheduleHide = () => {
       cancelHide();
@@ -519,6 +528,7 @@
   }
 
   function renderSourcesTable(sources) {
+    hidePagesTooltip();
     const tbody = el("sources-tbody");
     if (!tbody) return;
     if (!sources.length) {
