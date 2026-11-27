@@ -794,6 +794,78 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn ui_assets_include_pages_tooltip_and_accessible_header() {
+        let vault_dir = tempdir().expect("vault tempdir");
+        let app = build_router(VaultConfig::new(vault_dir.path()));
+
+        let index_resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri("/")
+                    .body(Body::empty())
+                    .expect("GET /"),
+            )
+            .await
+            .expect("GET / response");
+        assert_eq!(index_resp.status(), StatusCode::OK);
+        let index_html = read_text_body(index_resp).await;
+        for expected in [
+            "Pages (active)",
+            "id=\"pages-tooltip\"",
+            "popover=\"hint\"",
+            "role=\"tooltip\"",
+        ] {
+            assert!(
+                index_html.contains(expected),
+                "index.html missing `{expected}`"
+            );
+        }
+
+        let js_resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri("/app.js")
+                    .body(Body::empty())
+                    .expect("GET /app.js"),
+            )
+            .await
+            .expect("GET /app.js response");
+        assert_eq!(js_resp.status(), StatusCode::OK);
+        let app_js = read_text_body(js_resp).await;
+        for expected in [
+            "formatPagesBreakdown",
+            "aria-describedby",
+            "browse-status",
+            "initPagesTooltip",
+        ] {
+            assert!(app_js.contains(expected), "app.js missing `{expected}`");
+        }
+
+        let css_resp = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri("/style.css")
+                    .body(Body::empty())
+                    .expect("GET /style.css"),
+            )
+            .await
+            .expect("GET /style.css response");
+        assert_eq!(css_resp.status(), StatusCode::OK);
+        let style_css = read_text_body(css_resp).await;
+        for expected in [".pages-tooltip", ".pages-count-btn"] {
+            assert!(
+                style_css.contains(expected),
+                "style.css missing `{expected}`"
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn assets_contain_zero_external_cdn_links() {
         let vault_dir = tempdir().expect("vault tempdir");
         let app = build_router(VaultConfig::new(vault_dir.path()));

@@ -307,6 +307,185 @@
     el("kpi-total-words").textContent = formatNumber(totalWords);
   }
 
+  function formatPagesBreakdown(source) {
+    const active = Number(source.active_pages || 0);
+    const stale = Number(source.stale_pages || 0);
+    const errors = Number(source.error_pages || 0);
+    const activeWord = active === 1 ? "page" : "pages";
+    const errorWord = errors === 1 ? "error" : "errors";
+    return `${formatNumber(active)} active ${activeWord} · ${formatNumber(stale)} stale (no longer fetched, last good copy kept) · ${formatNumber(errors)} ${errorWord} (last fetch failed)`;
+  }
+
+  function renderPagesCell(s) {
+    const active = Number(s.active_pages || 0);
+    const stale = Number(s.stale_pages || 0);
+    const errors = Number(s.error_pages || 0);
+    const breakdown = formatPagesBreakdown(s);
+    const descId = `pages-desc-${s.id}`;
+
+    let activeHtml;
+    if (active > 0) {
+      activeHtml = `<button type="button" class="pages-count-btn pages-count-active" data-action="browse-status" data-id="${s.id}" data-status="active" aria-describedby="${descId}">${formatNumber(active)}</button>`;
+    } else if (stale + errors === 0) {
+      activeHtml = `<span class="pages-zero-trigger" tabindex="0" aria-describedby="${descId}">0</span>`;
+    } else {
+      activeHtml = "<span>0</span>";
+    }
+
+    let staleOrErrHtml = "";
+    if (stale + errors > 0) {
+      const stalePart =
+        stale > 0
+          ? `<button type="button" class="pages-count-btn pages-count-stale" data-action="browse-status" data-id="${s.id}" data-status="stale" aria-describedby="${descId}">${formatNumber(stale)}s</button>`
+          : "<span>0s</span>";
+      const errorPart =
+        errors > 0
+          ? `<button type="button" class="pages-count-btn pages-count-error" data-action="browse-status" data-id="${s.id}" data-status="error" aria-describedby="${descId}">${formatNumber(errors)}e</button>`
+          : "<span>0e</span>";
+      staleOrErrHtml = `<span class="muted-meta pages-meta">(${stalePart} / ${errorPart})</span>`;
+    }
+
+    return `<td class="num pages-cell" data-pages-tooltip="${escapeHtml(breakdown)}"><span id="${descId}" class="sr-only">${escapeHtml(breakdown)}</span>${activeHtml}${staleOrErrHtml}</td>`;
+  }
+
+  function positionPagesTooltip(tooltip, anchorEl) {
+    const pad = 8;
+    const gap = 8;
+    const anchorRect = anchorEl.getBoundingClientRect();
+    const tipRect = tooltip.getBoundingClientRect();
+
+    let top = anchorRect.top - tipRect.height - gap;
+    if (top < pad) {
+      top = anchorRect.bottom + gap;
+    }
+    const maxTop = Math.max(pad, window.innerHeight - tipRect.height - pad);
+    top = Math.min(Math.max(pad, top), maxTop);
+
+    const idealLeft = anchorRect.left + anchorRect.width / 2 - tipRect.width / 2;
+    const maxLeft = Math.max(pad, window.innerWidth - tipRect.width - pad);
+    const left = Math.min(Math.max(pad, idealLeft), maxLeft);
+
+    tooltip.style.top = `${Math.round(top)}px`;
+    tooltip.style.left = `${Math.round(left)}px`;
+  }
+
+  function initPagesTooltip() {
+    const tooltip = el("pages-tooltip");
+    const tbody = el("sources-tbody");
+    if (!tooltip || !tbody) return;
+
+    // Feature-detect popover="hint"; fall back to "manual" where unsupported (e.g. Safari)
+    if ("popover" in HTMLElement.prototype) {
+      const probe = document.createElement("div");
+      probe.popover = "hint";
+      if (probe.popover !== "hint") {
+        tooltip.setAttribute("popover", "manual");
+      }
+    }
+
+    let activeCell = null;
+    let hideTimer = null;
+
+    const cancelHide = () => {
+      if (hideTimer !== null) {
+        window.clearTimeout(hideTimer);
+        hideTimer = null;
+      }
+    };
+
+    const hideNow = () => {
+      cancelHide();
+      activeCell = null;
+      if (typeof tooltip.hidePopover === "function") {
+        try {
+          if (tooltip.matches(":popover-open")) {
+            tooltip.hidePopover();
+          }
+        } catch {
+          // Ignore if already closed.
+        }
+      } else {
+        tooltip.hidden = true;
+      }
+    };
+
+    const scheduleHide = () => {
+      cancelHide();
+      hideTimer = window.setTimeout(hideNow, 120);
+    };
+
+    const showForCell = (cell) => {
+      const text = cell.getAttribute("data-pages-tooltip");
+      if (!text) return;
+      cancelHide();
+      activeCell = cell;
+      tooltip.textContent = text;
+      if (typeof tooltip.showPopover === "function") {
+        try {
+          if (!tooltip.matches(":popover-open")) {
+            tooltip.showPopover();
+          }
+        } catch {
+          // Ignore if already open.
+        }
+      } else {
+        tooltip.hidden = false;
+      }
+      positionPagesTooltip(tooltip, cell);
+    };
+
+    tbody.addEventListener("mouseover", (event) => {
+      const cell = event.target.closest("td[data-pages-tooltip]");
+      if (cell) {
+        showForCell(cell);
+      }
+    });
+
+    tbody.addEventListener("mouseout", (event) => {
+      const cell = event.target.closest("td[data-pages-tooltip]");
+      if (!cell) return;
+      const next = event.relatedTarget;
+      if (next && (cell.contains(next) || tooltip.contains(next))) return;
+      scheduleHide();
+    });
+
+    tbody.addEventListener("focusin", (event) => {
+      const cell = event.target.closest("td[data-pages-tooltip]");
+      if (cell) {
+        showForCell(cell);
+      }
+    });
+
+    tbody.addEventListener("focusout", (event) => {
+      const cell = event.target.closest("td[data-pages-tooltip]");
+      if (!cell) return;
+      const next = event.relatedTarget;
+      if (next && (cell.contains(next) || tooltip.contains(next))) return;
+      scheduleHide();
+    });
+
+    tooltip.addEventListener("mouseenter", cancelHide);
+    tooltip.addEventListener("mouseleave", (event) => {
+      const next = event.relatedTarget;
+      if (activeCell && next && activeCell.contains(next)) return;
+      scheduleHide();
+    });
+
+    document.addEventListener("keydown", (event) => {
+      if (event.key === "Escape" && activeCell) {
+        hideNow();
+      }
+    });
+
+    window.addEventListener("scroll", () => {
+      if (activeCell) hideNow();
+    }, true);
+
+    window.addEventListener("resize", () => {
+      if (activeCell) hideNow();
+    });
+  }
+
   function renderSourcesTable(sources) {
     const tbody = el("sources-tbody");
     if (!tbody) return;
@@ -321,10 +500,6 @@
         const tagsHtml =
           Array.isArray(s.tags) && s.tags.length
             ? `<div class="tag-list">${s.tags.map((t) => `<span class="tag">${escapeHtml(t)}</span>`).join("")}</div>`
-            : "";
-        const staleOrErr =
-          Number(s.stale_pages || 0) + Number(s.error_pages || 0) > 0
-            ? ` <span class="muted-meta">(${s.stale_pages}s / ${s.error_pages}e)</span>`
             : "";
 
         const isConfirming = state.confirmDeleteId === s.id;
@@ -341,7 +516,7 @@
           </td>
           <td><span class="badge badge-kind">${escapeHtml(s.kind)}</span></td>
           <td>${renderStatusBadge(s.status)}</td>
-          <td class="num">${formatNumber(s.active_pages)}${staleOrErr}</td>
+          ${renderPagesCell(s)}
           <td class="num">${formatNumber(s.total_words)}</td>
           <td class="mono">${escapeHtml(formatTimestamp(s.last_synced_at))}</td>
           <td class="actions-col">
@@ -1044,6 +1219,7 @@
   function boot() {
     initTheme();
     initUpdatePopover();
+    initPagesTooltip();
     initSqlPresets();
     initEvents();
     void loadVersion();
