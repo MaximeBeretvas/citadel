@@ -13,7 +13,7 @@ async fn detached_cli_refresh_populates_cache_in_child_process() {
         axum::routing::get(|| async {
             axum::Json(serde_json::json!({
                 "tag_name": "v0.9.0",
-                "html_url": "https://github.com/mberetvas/citadel/releases/tag/v0.9.0"
+                "html_url": "https://github.com/MaximeBeretvas/citadel/releases/tag/v0.9.0"
             }))
         }),
     );

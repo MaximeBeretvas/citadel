@@ -9,7 +9,7 @@ use crate::error::{Result, VaultError};
 
 /// Default GitHub Releases latest endpoint for Citadel.
 pub const DEFAULT_RELEASES_API_URL: &str =
-    "https://api.github.com/repos/mberetvas/citadel/releases/latest";
+    "https://api.github.com/repos/MaximeBeretvas/citadel/releases/latest";
 
 /// Cache TTL for `update-check.json`: 24 hours in seconds.
 pub const CACHE_TTL_SECS: i64 = 24 * 60 * 60;
@@ -409,7 +409,8 @@ mod tests {
         let cache = UpdateCheckCache {
             checked_at: "2030-01-01T00:00:00Z".to_string(),
             latest_version: "0.2.0".to_string(),
-            release_url: "https://github.com/mberetvas/citadel/releases/tag/v0.2.0".to_string(),
+            release_url: "https://github.com/MaximeBeretvas/citadel/releases/tag/v0.2.0"
+                .to_string(),
         };
         std::fs::write(&path, serde_json::to_string(&cache).expect("serialize")).expect("write");
         // 2026-01-01T00:00:00Z: the cache claims to come from 4 years in the future.
@@ -453,7 +454,8 @@ mod tests {
         let cache = UpdateCheckCache {
             checked_at: "2026-01-01T00:00:00Z".to_string(),
             latest_version: "0.2.0".to_string(),
-            release_url: "https://github.com/mberetvas/citadel/releases/tag/v0.2.0".to_string(),
+            release_url: "https://github.com/MaximeBeretvas/citadel/releases/tag/v0.2.0"
+                .to_string(),
         };
         std::fs::write(&path, serde_json::to_string(&cache).expect("serialize")).expect("write");
 
@@ -497,7 +499,7 @@ mod tests {
             axum::routing::get(|| async {
                 axum::Json(serde_json::json!({
                     "tag_name": "v0.2.0",
-                    "html_url": "https://github.com/mberetvas/citadel/releases/tag/v0.2.0"
+                    "html_url": "https://github.com/MaximeBeretvas/citadel/releases/tag/v0.2.0"
                 }))
             }),
         );
@@ -517,7 +519,7 @@ mod tests {
         assert_eq!(written.latest_version, "0.2.0");
         assert_eq!(
             written.release_url,
-            "https://github.com/mberetvas/citadel/releases/tag/v0.2.0"
+            "https://github.com/MaximeBeretvas/citadel/releases/tag/v0.2.0"
         );
         assert!(cache_path.is_file());
         let parsed: UpdateCheckCache =

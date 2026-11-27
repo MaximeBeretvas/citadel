@@ -989,7 +989,7 @@ mod tests {
             checked_at: crate::update::check::format_iso8601_utc(checked_at),
             latest_version: latest_version.to_string(),
             release_url: format!(
-                "https://github.com/mberetvas/citadel/releases/tag/{latest_version}"
+                "https://github.com/MaximeBeretvas/citadel/releases/tag/{latest_version}"
             ),
         };
         crate::update::check::write_cache_atomic(&config.update_check_path(), &cache)
@@ -1035,7 +1035,7 @@ mod tests {
         assert_eq!(body["latest_version"], "99.0.0");
         assert_eq!(
             body["release_url"],
-            "https://github.com/mberetvas/citadel/releases/tag/v99.0.0"
+            "https://github.com/MaximeBeretvas/citadel/releases/tag/v99.0.0"
         );
         assert!(
             !config
@@ -1070,7 +1070,7 @@ mod tests {
             get(|| async {
                 Json(json!({
                     "tag_name": "v42.0.0",
-                    "html_url": "https://github.com/mberetvas/citadel/releases/tag/v42.0.0"
+                    "html_url": "https://github.com/MaximeBeretvas/citadel/releases/tag/v42.0.0"
                 }))
             }),
         );

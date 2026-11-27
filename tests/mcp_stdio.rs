@@ -13,7 +13,7 @@ fn stdio_binary_emits_only_valid_jsonrpc_frames_with_debug_logs() {
     // A fresh cache (checked now) so nothing would refresh even if `mcp` did check.
     let cache = citadel::update::check::UpdateCheckCache::now(
         "99.0.0".to_string(),
-        "https://github.com/mberetvas/citadel/releases/tag/v99.0.0".to_string(),
+        "https://github.com/MaximeBeretvas/citadel/releases/tag/v99.0.0".to_string(),
     );
     citadel::update::check::write_cache_atomic(&vault_dir.path().join("update-check.json"), &cache)
         .expect("seed update-check.json");

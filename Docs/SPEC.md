@@ -568,7 +568,7 @@ The `Makefile` drives Docker by default (`RUNTIME ?= docker`); Apple's macOS OCI
 
 ### 8.2 Optional Native Install (macOS / Linux)
 - **Install:** `cargo install --path .` (or prebuilt GitHub Release binary) puts `citadel` on `$PATH`.
-- **Windows:** not yet tested and no prebuilt binary; install with `cargo install --git https://github.com/mberetvas/citadel --locked` or build from source. `citadel update` and `citadel daemon install` are unsupported there.
+- **Windows:** not yet tested and no prebuilt binary; install with `cargo install --git https://github.com/MaximeBeretvas/citadel --locked` or build from source. `citadel update` and `citadel daemon install` are unsupported there.
 - **PID & single-instance lock:** Acquires an advisory file lock on `daemon.pid` so only one daemon runs per `CITADEL_HOME`.
 - **OS service integration (`citadel daemon install`):**
   - **macOS:** Generates `~/Library/LaunchAgents/com.citadel.daemon.plist` (`KeepAlive`, `RunAtLoad`) and loads via `launchctl`.

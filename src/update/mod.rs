@@ -936,7 +936,7 @@ mod tests {
             axum::routing::get(move || async move {
                 axum::Json(serde_json::json!({
                     "tag_name": tag,
-                    "html_url": format!("https://github.com/mberetvas/citadel/releases/tag/{tag}"),
+                    "html_url": format!("https://github.com/MaximeBeretvas/citadel/releases/tag/{tag}"),
                     "assets": []
                 }))
             }),
@@ -1091,7 +1091,7 @@ mod tests {
                     async move {
                         axum::Json(serde_json::json!({
                             "tag_name": "v0.2.0",
-                            "html_url": "https://github.com/mberetvas/citadel/releases/tag/v0.2.0",
+                            "html_url": "https://github.com/MaximeBeretvas/citadel/releases/tag/v0.2.0",
                             "assets": [
                                 { "name": archive_name, "browser_download_url": archive_url },
                                 { "name": "checksums.sha256", "browser_download_url": checksums_url }
@@ -1166,7 +1166,7 @@ mod tests {
             axum::routing::get(|| async {
                 axum::Json(serde_json::json!({
                     "tag_name": "v0.2.0",
-                    "html_url": "https://github.com/mberetvas/citadel/releases/tag/v0.2.0",
+                    "html_url": "https://github.com/MaximeBeretvas/citadel/releases/tag/v0.2.0",
                     "assets": []
                 }))
             }),

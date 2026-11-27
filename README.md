@@ -32,10 +32,10 @@ Method, every scenario, and caveats: [Docs/resource-usage.md](Docs/resource-usag
 Install the `citadel` binary straight from GitHub with Cargo. Requires a Rust toolchain ([`rustup`](https://rustup.rs/)); SQLite is bundled, so no system `sqlite3` library is needed.
 
 ```bash
-cargo install --git https://github.com/mberetvas/citadel --locked
+cargo install --git https://github.com/MaximeBeretvas/citadel --locked
 
 # Lite build: no headless-browser support (smaller binary, no Chrome needed)
-cargo install --git https://github.com/mberetvas/citadel --locked --no-default-features
+cargo install --git https://github.com/MaximeBeretvas/citadel --locked --no-default-features
 ```
 
 The default build includes the `chrome` feature, so Sources added with `--render-js` can crawl sites whose navigation is built by JavaScript. Those crawls need Google Chrome or Chromium installed (or `CHROME_URL` pointing at a running instance); Citadel launches a private headless browser only while such a crawl runs, so other Sources and the idle daemon never start one.
@@ -52,13 +52,13 @@ citadel daemon install
 
 ### Prebuilt Binaries (macOS & Linux)
 
-Every [GitHub Release](https://github.com/mberetvas/citadel/releases) ships a `citadel` binary built with the default features (including `chrome`) for macOS (Apple Silicon `aarch64-apple-darwin`, Intel `x86_64-apple-darwin`) and Linux (`x86_64-unknown-linux-gnu`, `aarch64-unknown-linux-gnu`; glibc 2.35+), plus a `checksums.sha256` manifest. No Rust toolchain needed:
+Every [GitHub Release](https://github.com/MaximeBeretvas/citadel/releases) ships a `citadel` binary built with the default features (including `chrome`) for macOS (Apple Silicon `aarch64-apple-darwin`, Intel `x86_64-apple-darwin`) and Linux (`x86_64-unknown-linux-gnu`, `aarch64-unknown-linux-gnu`; glibc 2.35+), plus a `checksums.sha256` manifest. No Rust toolchain needed:
 
 ```bash
 V=v0.4.0                  # release tag
 T=aarch64-apple-darwin    # your target, from the list above
-curl -LO https://github.com/mberetvas/citadel/releases/download/$V/citadel-$V-$T.tar.gz
-curl -LO https://github.com/mberetvas/citadel/releases/download/$V/checksums.sha256
+curl -LO https://github.com/MaximeBeretvas/citadel/releases/download/$V/citadel-$V-$T.tar.gz
+curl -LO https://github.com/MaximeBeretvas/citadel/releases/download/$V/checksums.sha256
 shasum -a 256 -c --ignore-missing checksums.sha256   # Linux: sha256sum -c --ignore-missing checksums.sha256
 mkdir -p ~/.local/bin
 tar xzf citadel-$V-$T.tar.gz && install -m 755 citadel ~/.local/bin/
