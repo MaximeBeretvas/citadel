@@ -704,38 +704,191 @@ fn extract_page_markdown_and_title(page: &Page, url: &Url) -> (String, Option<St
     }
 
     let html_title = extract_html_title(&raw_content);
-    let ignore_tags = Some(vec![
-        "nav".to_string(),
-        "footer".to_string(),
-        "script".to_string(),
-        "style".to_string(),
-        "noscript".to_string(),
-        "title".to_string(),
-    ]);
+    let cleaned_html = strip_non_content_html(&raw_content);
 
-    let readability_cfg = TransformConfig {
-        readability: true,
+    let fallback_cfg = TransformConfig {
+        readability: false,
         return_format: ReturnFormat::Markdown,
         filter_images: false,
         clean_html: false,
         filter_svg: true,
         main_content: false,
     };
-    let readability_md = transform_content(page, &readability_cfg, &None, &None, &ignore_tags);
 
-    let fallback_cfg = TransformConfig {
-        readability: false,
-        ..readability_cfg
-    };
-    let fallback_md = transform_content(page, &fallback_cfg, &None, &None, &ignore_tags);
-
-    let chosen = if should_prefer_fallback(&readability_md, &fallback_md) {
-        fallback_md
+    let chosen = if let Some(landmark_html) = extract_landmark_html(&cleaned_html) {
+        let landmark_page = page_with_html(url, landmark_html);
+        transform_content(&landmark_page, &fallback_cfg, &None, &None, &None)
     } else {
-        readability_md
+        let cleaned_page = page_with_html(url, cleaned_html);
+        let readability_cfg = TransformConfig {
+            readability: true,
+            ..fallback_cfg
+        };
+        let readability_md = transform_content(&cleaned_page, &readability_cfg, &None, &None, &None);
+        let fallback_md = transform_content(&cleaned_page, &fallback_cfg, &None, &None, &None);
+
+        if should_prefer_fallback(&readability_md, &fallback_md) {
+            fallback_md
+        } else {
+            readability_md
+        }
     };
 
     (chosen, html_title)
+}
+
+fn page_with_html(url: &Url, html: String) -> Page {
+    let mut page = Page::default();
+    page.set_url(url.to_string());
+    page.set_html_bytes(Some(html.into_bytes()));
+    page
+}
+
+/// Remove navigation, chrome, and widget elements before Readability or Markdown conversion runs.
+fn strip_non_content_html(html: &str) -> String {
+    const STRIP_SELECTORS: &[&str] = &[
+        "nav",
+        "footer",
+        "script",
+        "style",
+        "noscript",
+        "title",
+        "aside",
+        "dialog",
+        "[role=\"complementary\"]",
+        "[role=\"dialog\"]",
+    ];
+    let handlers = STRIP_SELECTORS
+        .iter()
+        .map(|sel| {
+            lol_html::element!(*sel, |el| {
+                el.remove();
+                Ok(())
+            })
+        })
+        .collect();
+    lol_html::rewrite_str(
+        html,
+        lol_html::RewriteStrSettings {
+            element_content_handlers: handlers,
+            ..lol_html::RewriteStrSettings::new()
+        },
+    )
+    .unwrap_or_else(|_| html.to_string())
+}
+
+/// Extract the primary semantic landmark (`<main>`, `[role="main"]`, or a single `<article>`)
+/// when it contains non-whitespace text.
+fn extract_landmark_html(cleaned_html: &str) -> Option<String> {
+    for selector in ["main", "[role=\"main\"]"] {
+        if let Some(found) = extract_selector_matches(cleaned_html, selector)
+            .into_iter()
+            .find(|fragment| has_visible_text(fragment))
+        {
+            return Some(found);
+        }
+    }
+
+    let non_empty_articles: Vec<String> = extract_selector_matches(cleaned_html, "article")
+        .into_iter()
+        .filter(|fragment| has_visible_text(fragment))
+        .collect();
+    if non_empty_articles.is_empty() {
+        None
+    } else {
+        Some(non_empty_articles.join("\n"))
+    }
+}
+
+fn extract_selector_matches(html: &str, selector: &str) -> Vec<String> {
+    use std::cell::Cell;
+    use std::rc::Rc;
+
+    let mut suffix = 0usize;
+    let (start_marker, end_marker) = loop {
+        let s = format!("<!--citadel-lm-start-{suffix}-->");
+        let e = format!("<!--citadel-lm-end-{suffix}-->");
+        if !html.contains(&s) && !html.contains(&e) {
+            break (s, e);
+        }
+        suffix += 1;
+    };
+
+    let depth = Rc::new(Cell::new(0usize));
+    let depth_el = Rc::clone(&depth);
+    let start_for_el = start_marker.clone();
+    let end_for_el = end_marker.clone();
+
+    let Ok(rewritten) = lol_html::rewrite_str(
+        html,
+        lol_html::RewriteStrSettings {
+            element_content_handlers: vec![lol_html::element!(selector, move |el| {
+                let d = depth_el.get();
+                depth_el.set(d + 1);
+                if d == 0 {
+                    el.before(&start_for_el, lol_html::html_content::ContentType::Html);
+                }
+                let depth_end = Rc::clone(&depth_el);
+                let end_marker_inner = end_for_el.clone();
+                el.on_end_tag(Box::new(
+                    move |end: &mut lol_html::html_content::EndTag<'_>| {
+                        let next = depth_end.get().saturating_sub(1);
+                        depth_end.set(next);
+                        if d == 0 && next == 0 {
+                            end.after(
+                                &end_marker_inner,
+                                lol_html::html_content::ContentType::Html,
+                            );
+                        }
+                        Ok(())
+                    },
+                )
+                    as Box<
+                        dyn FnOnce(
+                            &mut lol_html::html_content::EndTag<'_>,
+                        ) -> std::result::Result<
+                            (),
+                            Box<dyn std::error::Error + Send + Sync>,
+                        >,
+                    >)?;
+                Ok(())
+            })],
+            ..lol_html::RewriteStrSettings::new()
+        },
+    ) else {
+        return Vec::new();
+    };
+
+    let mut matches = Vec::new();
+    let mut rest = rewritten.as_str();
+    while let Some(start_idx) = rest.find(&start_marker) {
+        let after_start = &rest[start_idx + start_marker.len()..];
+        if let Some(end_idx) = after_start.find(&end_marker) {
+            matches.push(after_start[..end_idx].to_string());
+            rest = &after_start[end_idx + end_marker.len()..];
+        } else {
+            matches.push(after_start.to_string());
+            break;
+        }
+    }
+    matches
+}
+
+fn has_visible_text(html: &str) -> bool {
+    let mut has_text = false;
+    let _ = lol_html::rewrite_str(
+        html,
+        lol_html::RewriteStrSettings {
+            element_content_handlers: vec![lol_html::text!("*", |t| {
+                if !t.as_str().trim().is_empty() {
+                    has_text = true;
+                }
+                Ok(())
+            })],
+            ..lol_html::RewriteStrSettings::new()
+        },
+    );
+    has_text
 }
 
 fn should_prefer_fallback(readability_md: &str, fallback_md: &str) -> bool {
@@ -1788,6 +1941,93 @@ mod tests {
             ] {
                 assert!(visited.documents.contains(&key(seed)), "{seed}");
             }
+        }
+    }
+
+    mod extraction_tests {
+        use super::super::extract_page_markdown_and_title;
+        use super::{typed_page, url};
+
+        fn extract(html: &str) -> String {
+            let page = typed_page("https://docs.example/docs/page", "text/html", html);
+            let (md, _) =
+                extract_page_markdown_and_title(&page, &url("https://docs.example/docs/page"));
+            md
+        }
+
+        #[test]
+        fn short_main_card_grid_beats_longer_aside_and_dialog_widgets() {
+            let long_help = "This demo works on codespaces. ".repeat(30);
+            let html = format!(
+                r#"<html><head><title>Destinations | Docs</title></head><body>
+                <nav><a href="/docs">Docs</a></nav>
+                <main><h1>Destinations</h1><ul><li><a href="/big">BigQuery</a></li><li><a href="/duck">DuckDB</a></li></ul></main>
+                <aside><h2>DHelp</h2><p>{long_help}</p></aside>
+                <div role="dialog"><p>Dialog help widget text that is also very long.</p></div>
+                <div role="complementary"><p>Complementary sidebar widget text.</p></div>
+                <dialog><p>Native dialog widget text.</p></dialog>
+                </body></html>"#
+            );
+            let md = extract(&html);
+            assert!(md.contains("Destinations"), "missing heading: {md}");
+            assert!(md.contains("BigQuery"), "missing card content: {md}");
+            assert!(!md.contains("DHelp"), "aside widget leaked: {md}");
+            assert!(!md.contains("codespaces"), "aside body leaked: {md}");
+            assert!(!md.contains("Dialog help"), "role=dialog leaked: {md}");
+            assert!(
+                !md.contains("Complementary sidebar"),
+                "role=complementary leaked: {md}"
+            );
+            assert!(!md.contains("Native dialog"), "dialog tag leaked: {md}");
+        }
+
+        #[test]
+        fn empty_main_falls_through_to_article() {
+            let html = r#"<html><body>
+                <main><nav>Menu</nav></main>
+                <article><h1>Guide</h1><p>Body.</p></article>
+            </body></html>"#;
+            let md = extract(html);
+            assert!(md.contains("Guide"), "{md}");
+            assert!(md.contains("Body."), "{md}");
+            assert!(!md.contains("Menu"), "{md}");
+        }
+
+        #[test]
+        fn nested_article_inside_main_is_preserved() {
+            let html = r#"<html><body>
+                <main><h1>Overview</h1><article><h2>Card</h2><p>Details.</p></article></main>
+            </body></html>"#;
+            let md = extract(html);
+            assert!(md.contains("Overview"), "{md}");
+            assert!(md.contains("Details."), "{md}");
+        }
+
+        #[test]
+        fn multiple_articles_without_main_are_not_truncated_to_first() {
+            let html = r#"<html><body>
+                <article><h2>First</h2><p>One.</p></article>
+                <article><h2>Second</h2><p>Two.</p></article>
+            </body></html>"#;
+            let md = extract(html);
+            assert!(md.contains("First"), "{md}");
+            assert!(md.contains("Second"), "{md}");
+        }
+
+        #[test]
+        fn widget_inside_main_is_stripped() {
+            let html = r#"<html><body>
+                <main>
+                    <h1>Page</h1>
+                    <p>Real.</p>
+                    <aside><p>Widget.</p></aside>
+                    <div role="dialog"><p>Popup.</p></div>
+                </main>
+            </body></html>"#;
+            let md = extract(html);
+            assert!(md.contains("Real."), "{md}");
+            assert!(!md.contains("Widget."), "{md}");
+            assert!(!md.contains("Popup."), "{md}");
         }
     }
 }
