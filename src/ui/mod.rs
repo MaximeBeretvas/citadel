@@ -882,7 +882,11 @@ mod tests {
             .expect("GET /app.js response");
         assert_eq!(js_resp.status(), StatusCode::OK);
         let app_js = read_text_body(js_resp).await;
-        for expected in ["renderPageStatusBanner", "navigateToBrowser", "error_message"] {
+        for expected in [
+            "renderPageStatusBanner",
+            "navigateToBrowser",
+            "error_message",
+        ] {
             assert!(app_js.contains(expected), "app.js missing `{expected}`");
         }
     }
