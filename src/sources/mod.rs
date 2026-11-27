@@ -315,7 +315,7 @@ impl ClaimedSync {
 
     /// Release the claim now. A failure is logged, never returned: the Sync's own result
     /// is what callers report.
-    async fn release(&mut self) {
+    pub(crate) async fn release(&mut self) {
         self.released = true;
         let (config, env, id) = self.release_parts();
         let released = blocking(move || {
