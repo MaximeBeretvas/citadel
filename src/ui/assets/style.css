@@ -886,6 +886,10 @@ h3 {
   color: var(--text-muted);
 }
 
+.detail-status-banner {
+  margin-top: var(--space-1);
+}
+
 .detail-body {
   padding: var(--space-4) 18px;
   display: flex;

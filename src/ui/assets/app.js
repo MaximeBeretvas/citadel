@@ -171,10 +171,42 @@
   }
 
   // Routing
+  const VALID_PAGE_STATUSES = ["active", "stale", "error"];
+
   function parseHashView() {
     const raw = (window.location.hash || "").replace(/^#/, "").trim().toLowerCase();
     const view = raw.split("?")[0];
     return VALID_VIEWS.includes(view) ? view : "sources";
+  }
+
+  function parseHashParams() {
+    const raw = (window.location.hash || "").replace(/^#/, "");
+    const qIdx = raw.indexOf("?");
+    return new URLSearchParams(qIdx >= 0 ? raw.slice(qIdx + 1) : "");
+  }
+
+  function navigateToBrowser(sourceId, status) {
+    const cleanSource = sourceId !== null && sourceId !== undefined && sourceId !== "" ? String(sourceId) : "";
+    const cleanStatus = VALID_PAGE_STATUSES.includes(status) ? status : "";
+
+    const sourceSelect = el("browser-source-select");
+    const statusSelect = el("browser-status-select");
+    const searchInput = el("browser-search-input");
+    if (sourceSelect) sourceSelect.value = cleanSource;
+    if (statusSelect) statusSelect.value = cleanStatus;
+    if (searchInput) searchInput.value = "";
+
+    const params = new URLSearchParams();
+    if (cleanSource) params.set("source", cleanSource);
+    if (cleanStatus) params.set("status", cleanStatus);
+    const qs = params.toString();
+    const targetHash = qs ? `#browser?${qs}` : "#browser";
+
+    if (window.location.hash === targetHash) {
+      void loadBrowserView();
+    } else {
+      window.location.hash = targetHash;
+    }
   }
 
   function setActiveView(view, shouldLoad = true) {
@@ -539,9 +571,13 @@
     const id = Number(btn.getAttribute("data-id"));
 
     if (action === "browse") {
-      const select = el("browser-source-select");
-      if (select) select.value = String(id);
-      window.location.hash = "#browser";
+      navigateToBrowser(id, "");
+      return;
+    }
+
+    if (action === "browse-status") {
+      const status = btn.getAttribute("data-status") || "";
+      navigateToBrowser(id, status);
       return;
     }
 
@@ -714,6 +750,22 @@
         // Handled below
       }
     }
+    const params = parseHashParams();
+    const sourceParam = params.get("source");
+    const statusParam = params.get("status");
+    const sourceSelect = el("browser-source-select");
+    const statusSelect = el("browser-status-select");
+
+    if (sourceParam && sourceSelect && state.sources.some((s) => String(s.id) === sourceParam)) {
+      sourceSelect.value = sourceParam;
+    }
+    if (statusSelect) {
+      if (statusParam && VALID_PAGE_STATUSES.includes(statusParam)) {
+        statusSelect.value = statusParam;
+      } else if (sourceParam && !params.has("status")) {
+        statusSelect.value = "";
+      }
+    }
     await searchBrowserPages();
   }
 
@@ -821,11 +873,16 @@
     listEl.innerHTML = state.browserPages
       .map((p) => {
         const selectedClass = p.id === state.selectedPageId ? " selected" : "";
+        const httpMeta =
+          p.status === "error" && p.http_status !== null && p.http_status !== undefined
+            ? `<span class="mono">HTTP ${escapeHtml(p.http_status)}</span>`
+            : "";
         return `<button type="button" class="page-item${selectedClass}" data-page-id="${p.id}" role="option" aria-selected="${p.id === state.selectedPageId}">
           <span class="page-item-title">${escapeHtml(p.title || p.uri)}</span>
           <span class="page-item-uri">${escapeHtml(p.uri)}</span>
           <span class="page-item-meta">
             ${renderStatusBadge(p.status)}
+            ${httpMeta}
             <span>${formatNumber(p.word_count)} words</span>
           </span>
         </button>`;
@@ -844,6 +901,26 @@
     } catch (err) {
       detailEl.innerHTML = `<div class="empty-state">Failed to load page: ${escapeHtml(err.message)}</div>`;
     }
+  }
+
+  function renderPageStatusBanner(page) {
+    const status = String(page.status || "").toLowerCase();
+    const errMsg = typeof page.error_message === "string" ? page.error_message.trim() : "";
+    const hasHttp = page.http_status !== null && page.http_status !== undefined;
+
+    if (status === "error" || errMsg) {
+      const parts = [];
+      if (hasHttp) parts.push(`HTTP ${page.http_status}`);
+      if (errMsg) parts.push(errMsg);
+      const detail = parts.length ? parts.join(" — ") : "Last fetch failed.";
+      return `<div class="alert alert-error detail-status-banner" role="alert"><strong>Fetch error:</strong> ${escapeHtml(detail)}</div>`;
+    }
+
+    if (status === "stale") {
+      return '<div class="alert alert-warn detail-status-banner" role="status"><strong>Stale page:</strong> No longer fetched on the last sync; last good copy is kept.</div>';
+    }
+
+    return "";
   }
 
   function renderPageDetail(page) {
@@ -886,6 +963,7 @@
           <span>${formatNumber(page.word_count)} words</span>
           <span class="mono">Changed: ${escapeHtml(formatTimestamp(page.last_changed_at))}</span>
         </div>
+        ${renderPageStatusBanner(page)}
       </div>
       <div class="detail-body">${contentHtml}</div>
     `;

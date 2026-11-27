@@ -866,6 +866,28 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn ui_assets_include_browser_error_banner_and_drilldown() {
+        let vault_dir = tempdir().expect("vault tempdir");
+        let app = build_router(VaultConfig::new(vault_dir.path()));
+
+        let js_resp = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri("/app.js")
+                    .body(Body::empty())
+                    .expect("GET /app.js"),
+            )
+            .await
+            .expect("GET /app.js response");
+        assert_eq!(js_resp.status(), StatusCode::OK);
+        let app_js = read_text_body(js_resp).await;
+        for expected in ["renderPageStatusBanner", "navigateToBrowser", "error_message"] {
+            assert!(app_js.contains(expected), "app.js missing `{expected}`");
+        }
+    }
+
+    #[tokio::test]
     async fn assets_contain_zero_external_cdn_links() {
         let vault_dir = tempdir().expect("vault tempdir");
         let app = build_router(VaultConfig::new(vault_dir.path()));
