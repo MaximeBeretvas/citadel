@@ -719,15 +719,22 @@ fn extract_page_markdown_and_title(page: &Page, url: &Url) -> (String, Option<St
         let landmark_page = page_with_html(url, landmark_html);
         transform_content(&landmark_page, &fallback_cfg, &None, &None, &None)
     } else {
+        let html_h1 = extract_html_h1(&cleaned_html);
         let cleaned_page = page_with_html(url, cleaned_html);
         let readability_cfg = TransformConfig {
             readability: true,
             ..fallback_cfg
         };
-        let readability_md = transform_content(&cleaned_page, &readability_cfg, &None, &None, &None);
+        let readability_md =
+            transform_content(&cleaned_page, &readability_cfg, &None, &None, &None);
         let fallback_md = transform_content(&cleaned_page, &fallback_cfg, &None, &None, &None);
 
-        if should_prefer_fallback(&readability_md, &fallback_md) {
+        if should_prefer_fallback(
+            &readability_md,
+            &fallback_md,
+            html_title.as_deref(),
+            html_h1.as_deref(),
+        ) {
             fallback_md
         } else {
             readability_md
@@ -830,27 +837,24 @@ fn extract_selector_matches(html: &str, selector: &str) -> Vec<String> {
                 }
                 let depth_end = Rc::clone(&depth_el);
                 let end_marker_inner = end_for_el.clone();
-                el.on_end_tag(Box::new(
-                    move |end: &mut lol_html::html_content::EndTag<'_>| {
+                el.on_end_tag(
+                    Box::new(move |end: &mut lol_html::html_content::EndTag<'_>| {
                         let next = depth_end.get().saturating_sub(1);
                         depth_end.set(next);
                         if d == 0 && next == 0 {
-                            end.after(
-                                &end_marker_inner,
-                                lol_html::html_content::ContentType::Html,
-                            );
+                            end.after(&end_marker_inner, lol_html::html_content::ContentType::Html);
                         }
                         Ok(())
-                    },
-                )
-                    as Box<
-                        dyn FnOnce(
-                            &mut lol_html::html_content::EndTag<'_>,
-                        ) -> std::result::Result<
-                            (),
-                            Box<dyn std::error::Error + Send + Sync>,
+                    })
+                        as Box<
+                            dyn FnOnce(
+                                &mut lol_html::html_content::EndTag<'_>,
+                            ) -> std::result::Result<
+                                (),
+                                Box<dyn std::error::Error + Send + Sync>,
+                            >,
                         >,
-                    >)?;
+                )?;
                 Ok(())
             })],
             ..lol_html::RewriteStrSettings::new()
@@ -891,7 +895,83 @@ fn has_visible_text(html: &str) -> bool {
     has_text
 }
 
-fn should_prefer_fallback(readability_md: &str, fallback_md: &str) -> bool {
+fn extract_html_h1(html: &str) -> Option<String> {
+    let first_h1 = extract_selector_matches(html, "h1").into_iter().next()?;
+    let mut text = String::new();
+    let _ = lol_html::rewrite_str(
+        &first_h1,
+        lol_html::RewriteStrSettings {
+            element_content_handlers: vec![lol_html::text!("*", |t| {
+                text.push_str(t.as_str());
+                Ok(())
+            })],
+            ..lol_html::RewriteStrSettings::new()
+        },
+    );
+    let collapsed = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    if collapsed.is_empty() {
+        None
+    } else {
+        Some(collapsed)
+    }
+}
+
+fn normalize_heading_text(raw: &str) -> String {
+    raw.split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_ascii_lowercase()
+}
+
+fn markdown_heading_text(line: &str) -> Option<&str> {
+    let trimmed = line.trim_start();
+    let hashes = trimmed.bytes().take_while(|&b| b == b'#').count();
+    if !(1..=6).contains(&hashes) {
+        return None;
+    }
+    let after = &trimmed[hashes..];
+    if !after.starts_with(' ') {
+        return None;
+    }
+    Some(after.trim())
+}
+
+fn has_matching_heading(md: &str, html_title: Option<&str>, html_h1: Option<&str>) -> bool {
+    let norm_title = html_title
+        .map(normalize_heading_text)
+        .filter(|s| !s.is_empty());
+    let norm_h1 = html_h1
+        .map(normalize_heading_text)
+        .filter(|s| !s.is_empty());
+    if norm_title.is_none() && norm_h1.is_none() {
+        return false;
+    }
+
+    md.lines().filter_map(markdown_heading_text).any(|heading| {
+        let norm_h = normalize_heading_text(heading);
+        if norm_h.is_empty() {
+            return false;
+        }
+        if let Some(h1) = norm_h1.as_deref() {
+            if norm_h == h1 || norm_h.contains(h1) {
+                return true;
+            }
+        }
+        if let Some(title) = norm_title.as_deref() {
+            if norm_h.len() >= 3 && (title == norm_h || title.contains(&norm_h)) {
+                return true;
+            }
+        }
+        false
+    })
+}
+
+fn should_prefer_fallback(
+    readability_md: &str,
+    fallback_md: &str,
+    html_title: Option<&str>,
+    html_h1: Option<&str>,
+) -> bool {
     if fallback_md.trim().is_empty() {
         return false;
     }
@@ -901,6 +981,11 @@ fn should_prefer_fallback(readability_md: &str, fallback_md: &str) -> bool {
     let read_words = count_words(readability_md);
     let fall_words = count_words(fallback_md);
     if !readability_md.contains("# ") && fallback_md.contains("# ") {
+        return true;
+    }
+    if !has_matching_heading(readability_md, html_title, html_h1)
+        && has_matching_heading(fallback_md, html_title, html_h1)
+    {
         return true;
     }
     fall_words > 10 && read_words.saturating_mul(4) < fall_words
@@ -2028,6 +2113,32 @@ mod tests {
             assert!(md.contains("Real."), "{md}");
             assert!(!md.contains("Widget."), "{md}");
             assert!(!md.contains("Popup."), "{md}");
+        }
+
+        #[test]
+        fn non_landmark_page_prefers_fallback_when_readability_drops_matching_heading() {
+            let widget_prose = "This demo works on codespaces. ".repeat(30);
+            let html = format!(
+                r#"<html><head><title>Destinations | Docs</title></head><body>
+                <div><h1>Destinations</h1><p>Short list.</p></div>
+                <div class="widget"><h2>DHelp</h2><p>{widget_prose}</p></div>
+                </body></html>"#
+            );
+            let md = extract(&html);
+            assert!(md.contains("# Destinations"), "missing h1: {md}");
+            assert!(md.contains("Short list."), "missing body: {md}");
+        }
+
+        #[test]
+        fn should_prefer_fallback_keeps_readability_when_matching_heading_present() {
+            let readability_md = "# Destinations\n\nClean prose body with enough words to pass the length ratio check easily.";
+            let fallback_md = "# Destinations\n\nClean prose body with enough words to pass the length ratio check easily.\n\nExtra footer.";
+            assert!(!super::super::should_prefer_fallback(
+                readability_md,
+                fallback_md,
+                Some("Destinations | Docs"),
+                Some("Destinations"),
+            ));
         }
     }
 }
