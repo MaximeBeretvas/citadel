@@ -42,7 +42,7 @@ cargo install --git https://github.com/MaximeBeretvas/citadel --locked
 cargo install --git https://github.com/MaximeBeretvas/citadel --locked --no-default-features
 ```
 
-The default build includes the `chrome` feature, so Sources added with `--render-js` can crawl sites whose navigation is built by JavaScript. Those crawls need Google Chrome or Chromium installed (or `CHROME_URL` pointing at a running instance); Citadel launches a private headless browser only while such a crawl runs, so other Sources and the idle daemon never start one.
+The default build includes the `chrome` feature, so Sources added with `--render-js` can crawl sites whose navigation is built by JavaScript. Those crawls need Google Chrome or Chromium installed (or `CHROME_URL` pointing at a running instance); Citadel launches a private headless browser only while such a crawl runs, so other Sources and the idle daemon never start one. On Linux, see [Troubleshooting `render_js` on Linux](#troubleshooting-render_js-on-linux) if those Syncs fail with `No usable sandbox!`.
 
 This builds the `main` branch; add `--tag <tag>` or `--branch <name>` to pin another ref, and re-run with `--force` to upgrade. Ensure `~/.cargo/bin` is on your `$PATH`, then verify and optionally register the background service:
 
@@ -232,6 +232,25 @@ Add `--force` to overwrite an existing `SKILL.md` or symlink.
 | `citadel update [--check] [-y]` | Check for or install the latest GitHub Release binary (macOS and Linux). |
 
 All commands also accept `--data-dir <DIR>` (or `CITADEL_HOME`) to override the vault data directory.
+
+## Troubleshooting `render_js` on Linux
+
+Natively, Citadel keeps Chrome's sandbox on. On Ubuntu 23.10+ (and other distros that restrict unprivileged user namespaces through AppArmor), a Chrome or Chromium without its own AppArmor profile cannot start that sandbox, so every `render_js` Sync fails with `No usable sandbox!`. Fixes, safest first:
+
+1. Use a browser that ships an AppArmor profile (Google Chrome's `.deb`, the Chromium snap), or give yours one. See [Chromium's AppArmor guide](https://chromium.googlesource.com/chromium/src/+/main/docs/security/apparmor-userns-restrictions.md), which also covers the system-wide `sysctl` alternative.
+2. Point `CHROME_URL` at a browser that runs elsewhere (e.g. `http://127.0.0.1:9222`).
+3. Set `CITADEL_CHROME_NO_SANDBOX=1` to launch Chrome without its sandbox. This weakens isolation from the pages Citadel crawls; use it only for sites you trust.
+
+Chrome also refuses to run as root with its sandbox on, whatever AppArmor allows: run Citadel as a regular user, point `CHROME_URL` at a browser that runs elsewhere, or set `CITADEL_CHROME_NO_SANDBOX=1`. The container image is not affected: there, the container is the isolation boundary.
+
+The background daemon does not inherit your shell's environment. To set the variable for it on Linux, run `systemctl --user edit citadel` and add:
+
+```ini
+[Service]
+Environment=CITADEL_CHROME_NO_SANDBOX=1
+```
+
+Then restart it with `systemctl --user restart citadel`.
 
 ## Documentation
 

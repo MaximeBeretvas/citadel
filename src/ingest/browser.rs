@@ -37,7 +37,14 @@ const SHUTDOWN_STEP_TIMEOUT: Duration = Duration::from_secs(5);
 /// Environment variable spider reads to reach an already-running browser.
 pub(crate) const CHROME_URL_ENV: &str = "CHROME_URL";
 
+/// Environment variable that launches Chrome without its sandbox when set to `1` or `true`.
+/// Explicit opt-out only: Citadel never drops the sandbox on its own outside a container.
+pub(crate) const CHROME_NO_SANDBOX_ENV: &str = "CITADEL_CHROME_NO_SANDBOX";
+
 pub(crate) const NO_BROWSER_ERROR: &str = "render_js needs a Chrome or Chromium browser, but none could be launched or reached: install Google Chrome or Chromium, or set CHROME_URL to a running instance (e.g. http://127.0.0.1:9222)";
+
+/// Chrome's own guide to the AppArmor restriction on unprivileged user namespaces.
+const APPARMOR_USERNS_DOC: &str = "https://chromium.googlesource.com/chromium/src/+/main/docs/security/apparmor-userns-restrictions.md";
 
 /// A headless Chrome owned by one crawl. Close it with [`RenderBrowser::shutdown`]; dropping it
 /// without shutting down still stops the event loop and removes the profile directory.
@@ -50,7 +57,8 @@ pub(crate) struct RenderBrowser {
 
 impl RenderBrowser {
     /// Launch a headless Chrome with a private profile, or return [`NO_BROWSER_ERROR`] when no
-    /// browser executable is installed or it fails to start.
+    /// browser executable is installed or it fails to start. A start that fails because Chrome's
+    /// sandbox is unavailable (AppArmor, root) returns an error naming those fixes instead.
     pub(crate) async fn launch() -> Result<Self> {
         let profile = tempfile::Builder::new()
             .prefix("citadel-chrome-")
@@ -63,7 +71,14 @@ impl RenderBrowser {
                 builder = builder.chrome_executable(executable);
             }
         }
-        if !chrome_sandbox_enabled(crate::update::is_running_in_container()) {
+        let in_container = crate::update::is_running_in_container();
+        let opt_out = std::env::var(CHROME_NO_SANDBOX_ENV).ok();
+        if !chrome_sandbox_enabled(in_container, opt_out.as_deref()) {
+            if !in_container {
+                tracing::warn!(
+                    "{CHROME_NO_SANDBOX_ENV} is set: launching Chrome for render_js without its sandbox"
+                );
+            }
             builder = builder.no_sandbox();
         }
         let config = builder
@@ -145,16 +160,45 @@ fn is_executable(path: &Path) -> bool {
     }
 }
 
-/// Whether Chrome keeps its own sandbox. Native installs always do; inside an OCI container
+/// Whether Chrome keeps its own sandbox. Native installs do unless the user opts out through
+/// [`CHROME_NO_SANDBOX_ENV`] (`no_sandbox_env` is its raw value); inside an OCI container
 /// Chrome's sandbox cannot start as a non-root user (no user namespaces), and the container is
 /// the isolation boundary instead.
-fn chrome_sandbox_enabled(in_container: bool) -> bool {
-    !in_container
+fn chrome_sandbox_enabled(in_container: bool, no_sandbox_env: Option<&str>) -> bool {
+    !in_container && !crate::config::parse_flag(no_sandbox_env)
+}
+
+/// For a launch that failed because Chrome's sandbox could not start: Chrome's own phrase for
+/// the failure and the fixes. `None` when the failure has another cause. Matched on the whole
+/// cause: chromey puts Chrome's stderr on the same line, after the exit status.
+fn sandbox_failure(cause: &str) -> Option<(&'static str, String)> {
+    if cause.contains("No usable sandbox") {
+        Some((
+            "No usable sandbox!",
+            format!(
+                "render_js could not start Chrome because its sandbox is unavailable (Ubuntu 23.10+ and other distros restrict unprivileged user namespaces through AppArmor). Fix: give this browser an AppArmor profile or allow user namespaces ({APPARMOR_USERNS_DOC}), use Google Chrome's .deb or the Chromium snap (both ship a profile), set {CHROME_URL_ENV} to a running instance, or set {CHROME_NO_SANDBOX_ENV}=1 to run Chrome without its sandbox (less isolation from crawled pages)"
+            ),
+        ))
+    } else if cause.contains("Running as root without --no-sandbox") {
+        Some((
+            "Running as root without --no-sandbox is not supported",
+            format!(
+                "render_js could not start Chrome because Chrome refuses to run as root with its sandbox. Fix: run Citadel as a non-root user, set {CHROME_URL_ENV} to a running instance, or set {CHROME_NO_SANDBOX_ENV}=1 to run Chrome without its sandbox (less isolation from crawled pages)"
+            ),
+        ))
+    } else {
+        None
+    }
 }
 
 fn browser_error(cause: &dyn std::fmt::Display) -> VaultError {
     let cause = cause.to_string();
     tracing::warn!(error = %cause, "failed to launch headless browser for render_js");
+    // A sandbox failure keeps only Chrome's phrase as the cause: the full launch output (exit
+    // status, Chrome's stderr with its own copy of the AppArmor link) stays in the log above.
+    if let Some((phrase, hint)) = sandbox_failure(&cause) {
+        return VaultError::Other(format!("{hint} (cause: {phrase})"));
+    }
     let summary = cause
         .lines()
         .next()
@@ -168,7 +212,9 @@ mod tests {
     use std::fs;
     use std::os::unix::fs::PermissionsExt;
 
-    use super::{browser_error, chrome_sandbox_enabled, find_browser_on_path};
+    use super::{
+        browser_error, chrome_sandbox_enabled, find_browser_on_path, CHROME_NO_SANDBOX_ENV,
+    };
 
     fn fake_executable(dir: &std::path::Path, name: &str) -> std::path::PathBuf {
         let path = dir.join(name);
@@ -198,16 +244,83 @@ mod tests {
     }
 
     #[test]
-    fn chrome_sandbox_is_kept_natively_and_dropped_only_in_containers() {
-        assert!(chrome_sandbox_enabled(false));
-        assert!(!chrome_sandbox_enabled(true));
+    fn chrome_sandbox_is_kept_natively_unless_opted_out_and_dropped_in_containers() {
+        for (in_container, opt_out, expected) in [
+            (false, None, true),
+            (false, Some("0"), true),
+            (false, Some(""), true),
+            (false, Some("1"), false),
+            (false, Some("true"), false),
+            (true, None, false),
+            (true, Some("1"), false),
+        ] {
+            assert_eq!(
+                chrome_sandbox_enabled(in_container, opt_out),
+                expected,
+                "in_container={in_container} {CHROME_NO_SANDBOX_ENV}={opt_out:?}"
+            );
+        }
+    }
+
+    /// How chromey reports a browser that exits during launch: stderr is `{:?}`-formatted, so
+    /// Chrome's whole output sits on one line with escaped newlines.
+    fn launch_exit_cause(stderr: &str) -> String {
+        format!(
+            "Browser process exited with status ExitStatus(unix_wait_status(1280)) before websocket URL could be resolved, stderr: BrowserStderr({stderr:?})"
+        )
+    }
+
+    #[test]
+    fn sandbox_launch_error_names_the_fixes() {
+        let cause = launch_exit_cause(
+            "[4821:4821:1123/101010.123456:FATAL:zygote_host_impl_linux.cc:144] No usable sandbox! If you are running on Ubuntu 23.10+ or another Linux distro that has disabled unprivileged user namespaces with AppArmor, see https://chromium.googlesource.com/chromium/src/+/main/docs/security/apparmor-userns-restrictions.md\n",
+        );
+        let message = browser_error(&cause).to_string();
+        assert!(message.contains("CITADEL_CHROME_NO_SANDBOX=1"), "{message}");
+        assert_eq!(
+            message.matches("apparmor-userns-restrictions.md").count(),
+            1,
+            "the AppArmor guide once, not again from Chrome's stderr: {message}"
+        );
+        assert!(message.contains("CHROME_URL"), "{message}");
+        assert!(message.contains("(cause: No usable sandbox!)"), "{message}");
+        assert!(
+            !message.contains("Browser process exited"),
+            "the hint replaces chromey's raw launch output: {message}"
+        );
+        assert!(
+            !message.contains("install Google Chrome"),
+            "the browser is installed; do not tell the user to install it: {message}"
+        );
+    }
+
+    #[test]
+    fn root_launch_error_names_the_fixes() {
+        let cause = launch_exit_cause(
+            "[77:77:1123/101010.123456:ERROR:zygote_host_impl_linux.cc:100] Running as root without --no-sandbox is not supported. See https://crbug.com/638180.\n",
+        );
+        let message = browser_error(&cause).to_string();
+        assert!(message.contains("non-root"), "{message}");
+        assert!(message.contains("CITADEL_CHROME_NO_SANDBOX=1"), "{message}");
+        assert!(
+            message.contains("(cause: Running as root without --no-sandbox is not supported)"),
+            "{message}"
+        );
+        assert!(!message.contains("Browser process exited"), "{message}");
+        assert!(!message.contains("install Google Chrome"), "{message}");
     }
 
     #[test]
     fn launch_error_keeps_the_fix_hint_and_the_cause() {
-        let message = browser_error(&"No usable sandbox!\nmore detail").to_string();
+        let message =
+            browser_error(&"Could not auto detect a chrome executable\nmore detail").to_string();
         assert!(message.contains("CHROME_URL"), "{message}");
-        assert!(message.contains("No usable sandbox!"), "{message}");
+        assert!(message.contains("install Google Chrome"), "{message}");
+        assert!(!message.contains(CHROME_NO_SANDBOX_ENV), "{message}");
+        assert!(
+            message.contains("Could not auto detect a chrome executable"),
+            "{message}"
+        );
         assert!(
             !message.contains("more detail"),
             "only the first line of the cause: {message}"
