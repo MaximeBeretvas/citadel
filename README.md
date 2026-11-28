@@ -241,7 +241,7 @@ Natively, Citadel keeps Chrome's sandbox on. On Ubuntu 23.10+ (and other distros
 2. Point `CHROME_URL` at a browser that runs elsewhere (e.g. `http://127.0.0.1:9222`).
 3. Set `CITADEL_CHROME_NO_SANDBOX=1` to launch Chrome without its sandbox. This weakens isolation from the pages Citadel crawls; use it only for sites you trust.
 
-Chrome also refuses to run as root with its sandbox on: run Citadel as a regular user (or use one of the fixes above). The container image is not affected: there, the container is the isolation boundary.
+Chrome also refuses to run as root with its sandbox on, whatever AppArmor allows: run Citadel as a regular user, point `CHROME_URL` at a browser that runs elsewhere, or set `CITADEL_CHROME_NO_SANDBOX=1`. The container image is not affected: there, the container is the isolation boundary.
 
 The background daemon does not inherit your shell's environment. To set the variable for it on Linux, run `systemctl --user edit citadel` and add:
 
